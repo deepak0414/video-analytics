@@ -10,6 +10,7 @@ Kept thin on purpose: it parses args and delegates to va.pipeline.*.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -128,15 +129,21 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
 
 def _cmd_query(args: argparse.Namespace) -> int:
     from va.pipeline.query import query
+    from va.runtime.trace import trace, traced_run
 
-    hits = query(args.text, workdir=args.workdir, k=args.k)
-    if getattr(args, "verify", False):
-        # SR.6: VLM-verify the candidates (drops attribute/composition false hits).
-        # No-op unless a real verifier is configured (VA_CONFIG_DIR=run-*/config).
-        from va.pipeline.verify import verify_visual_hits
+    with traced_run("query", args.workdir):
+        hits = query(args.text, workdir=args.workdir, k=args.k)
+        trace("retriever", "visual_search", f"{len(hits)} hits",
+              top=[{"score": round(h.score, 3), "t": round(h.timestamp, 1)} for h in hits[:3]])
+        if getattr(args, "verify", False):
+            # SR.6: VLM-verify the candidates (drops attribute/composition false hits).
+            # No-op unless a real verifier is configured (VA_CONFIG_DIR=run-*/config).
+            from va.pipeline.verify import verify_visual_hits
 
-        hits = verify_visual_hits(hits, args.text, workdir=args.workdir,
-                                  floor=0.10, stop_after_accepts=1)
+            n0 = len(hits)
+            hits = verify_visual_hits(hits, args.text, workdir=args.workdir,
+                                      floor=0.10, stop_after_accepts=1)
+            trace("retriever", "verify", f"{len(hits)}/{n0} survived VLM verification")
     if not hits:
         print("no results (is anything ingested?)")
         return 0
@@ -211,7 +218,39 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print(f"`va serve` needs the web extra (missing: {e.name}). "
               f"Install with: pip install -e '.[web]'", file=sys.stderr)
         return 1
+    if getattr(args, "trace", False):       # convenience: serve --trace -> VA_TRACE=1
+        os.environ["VA_TRACE"] = "1"
     uvicorn.run(create_app(args.workdir), host=args.host, port=args.port)
+    return 0
+
+
+def _cmd_trace(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from va.runtime.trace import find_run, list_runs, prune_traces, render_trace
+
+    wd, target = args.workdir, args.target
+    if target == "list":
+        runs = list_runs(wd)
+        if not runs:
+            print("no traces found (run with VA_TRACE=1, or `serve --trace`)")
+            return 0
+        for r in runs:
+            warn = f"  ⚠ {r['warnings']}" if r["warnings"] else ""
+            print(f"{r['run_id']:24} {r['kind']:6} {r['ts']:25} {r['events']:>3} ev{warn}")
+        return 0
+    if target == "prune":
+        n = prune_traces(wd, keep=args.keep, older_than_days=args.older_than,
+                         clear_all=args.all)
+        print(f"pruned {n} trace file(s)")
+        return 0
+    # otherwise: render a specific run (by id) or the most recent one
+    path = find_run(wd, target) if (target and not args.last) else (
+        Path(list_runs(wd)[0]["path"]) if list_runs(wd) else None)
+    if path is None:
+        print("no matching trace (try `va trace list`)")
+        return 1
+    print(render_trace(path))
     return 0
 
 
@@ -281,7 +320,19 @@ def build_parser() -> argparse.ArgumentParser:
     psv = sub.add_parser("serve", help="web UI: ingest + search from a browser")
     psv.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")
     psv.add_argument("--port", type=int, default=8080)
+    psv.add_argument("--trace", action="store_true",
+                     help="enable pipeline tracing for the server (sets VA_TRACE=1)")
     psv.set_defaults(func=_cmd_serve)
+
+    ptr = sub.add_parser("trace", help="show/list/prune pipeline traces (needs VA_TRACE runs)")
+    ptr.add_argument("target", nargs="?",
+                     help="run_id | 'list' | 'prune'  (default: most recent run)")
+    ptr.add_argument("--last", action="store_true", help="show the most recent run")
+    ptr.add_argument("--keep", type=int, help="prune: keep the N newest")
+    ptr.add_argument("--older-than", type=float, dest="older_than",
+                     help="prune: remove files older than N days")
+    ptr.add_argument("--all", action="store_true", help="prune: remove all traces")
+    ptr.set_defaults(func=_cmd_trace)
 
     prm = sub.add_parser("remove", help="delete a video everywhere (rows + artifacts)")
     prm.add_argument("video", help="video UUID, source_key, URL, or path")
