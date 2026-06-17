@@ -23,6 +23,7 @@ from va.contracts.video import SourceType, Video
 from va.pipeline.retrieval import retrieve
 from va.pipeline.paths import Workspace
 from va.registry import get_reasoner
+from va.runtime.trace import trace, traced_run
 from va.roles.reasoner import Keyframe
 from va.storage.structured.catalog_sqlite import Catalog
 
@@ -178,58 +179,100 @@ def render_answer(answer: Answer, workdir: str) -> str:
 def ask(
     question: str, workdir: str = ".va", k: int = 5, max_keyframes: int = 4
 ) -> AskResult:
-    reasoner = get_reasoner()
+    with traced_run("ask", workdir):
+        trace("ask", "question", question)
+        reasoner = get_reasoner()
 
-    plan = reasoner.plan(question)              # Role 11, call #1
-    if not plan.query:
-        plan.query = question
+        plan = reasoner.plan(question)              # Role 11, call #1
+        if not plan.query:
+            plan.query = question
+        trace("planner", "plan", _plan_summary(plan),
+              tiers=_active_tiers(plan), search_terms=plan.search_terms,
+              params=plan.params or {})
 
-    # Deterministic escalation floor: deep-scan is the difference between a
-    # counted answer and a guess, so its trigger must not depend on planner
-    # quality (observed: qwen-7B planner missed it on a counting question the
-    # rule heuristics catch). OR the rule trigger into any LLM plan.
-    from va.adapters.reasoner.rule_inproc import RuleReasoner
+        # Deterministic escalation floor: deep-scan is the difference between a
+        # counted answer and a guess, so its trigger must not depend on planner
+        # quality (observed: qwen-7B planner missed it on a counting question the
+        # rule heuristics catch). OR the rule trigger into any LLM plan.
+        from va.adapters.reasoner.rule_inproc import RuleReasoner
 
-    rule_plan = RuleReasoner().plan(question)
-    if rule_plan.needs_deep_scan and not plan.needs_deep_scan:
-        plan.needs_deep_scan = True
-        plan.needs_vlm_reasoning = True
-        if not (plan.params or {}).get("scan_target"):
-            plan.params["scan_target"] = rule_plan.params.get("scan_target")
+        rule_plan = RuleReasoner().plan(question)
+        if rule_plan.needs_deep_scan and not plan.needs_deep_scan:
+            plan.needs_deep_scan = True
+            plan.needs_vlm_reasoning = True
+            if not (plan.params or {}).get("scan_target"):
+                plan.params["scan_target"] = rule_plan.params.get("scan_target")
+            trace("planner", "rule_floor", "rule heuristic forced deep_scan", level="warn",
+                  scan_target=(plan.params or {}).get("scan_target"))
 
-    evidence = retrieve(plan, workdir=workdir, k=k)          # SR.4: fused, ranked
+        evidence = retrieve(plan, workdir=workdir, k=k)          # SR.4: fused, ranked
 
-    if plan.needs_deep_scan:                                 # Tier 5b
-        _deep_scan_into(evidence, plan, workdir, reasoner)
+        if plan.needs_deep_scan:                                 # Tier 5b
+            _deep_scan_into(evidence, plan, workdir, reasoner)
+            trace("deep_scan", "ran",
+                  next((n for n in evidence.notes if "deep-scan" in n), "deep scan"))
 
-    keyframes = _collect_keyframes(evidence, workdir, max_keyframes)
-
-    answer = reasoner.reason(question, evidence, keyframes)  # Role 11, call #2
-
-    # SELF-ESCALATION (architecture: progressive escalation; trigger #3): if no
-    # deep scan ran and the sparse answer self-reports insufficiency (or comes
-    # back uncited and empty), escalate ONCE and re-reason over the dense
-    # evidence. A missed trigger becomes a slower right answer, not a wrong one.
-    if not plan.needs_deep_scan and _answer_insufficient(answer):
-        plan.needs_deep_scan = True
-        if not (plan.params or {}).get("scan_target"):
-            from va.adapters.reasoner.rule_inproc import RuleReasoner
-
-            plan.params["scan_target"] = RuleReasoner().plan(question).params.get("scan_target")
-        evidence.notes.append("self-escalation: sparse answer insufficient -> deep scan")
-        _deep_scan_into(evidence, plan, workdir, reasoner)
         keyframes = _collect_keyframes(evidence, workdir, max_keyframes)
-        answer = reasoner.reason(question, evidence, keyframes)
+        trace("reasoner", "keyframes", f"{len(keyframes)} keyframes",
+              moments=[round(kf.timestamp, 1) for kf in keyframes])
 
-    rendered = render_answer(answer, workdir)
+        _trace_reasoner_input(evidence, keyframes)
+        answer = reasoner.reason(question, evidence, keyframes)  # Role 11, call #2
+        trace("reasoner", "output", "answer produced",
+              reasoner_output=answer.text, citations=len(answer.citations))
 
-    # Deterministic facts are displayed deterministically: when a deep scan ran,
-    # lead with its code-counted numbers — a weak narrator (observed: qwen-7B
-    # said "10" while its own evidence said 19 distinct) can't hide them.
-    ds = [i for i in evidence.items if i.modality == "deep_scan_count"]
-    if ds and "CODE-COUNTED" not in rendered:
-        rendered = f"[{ds[0].content}]\n\n{rendered}"
-    return AskResult(
-        question=question, plan=plan, evidence=evidence,
-        answer=answer, rendered=rendered,
-    )
+        # SELF-ESCALATION (architecture: progressive escalation; trigger #3): if no
+        # deep scan ran and the sparse answer self-reports insufficiency (or comes
+        # back uncited and empty), escalate ONCE and re-reason over the dense
+        # evidence. A missed trigger becomes a slower right answer, not a wrong one.
+        if not plan.needs_deep_scan and _answer_insufficient(answer):
+            trace("reasoner", "self_escalation",
+                  "sparse answer insufficient -> deep scan", level="warn")
+            plan.needs_deep_scan = True
+            if not (plan.params or {}).get("scan_target"):
+                from va.adapters.reasoner.rule_inproc import RuleReasoner
+
+                plan.params["scan_target"] = RuleReasoner().plan(question).params.get("scan_target")
+            evidence.notes.append("self-escalation: sparse answer insufficient -> deep scan")
+            _deep_scan_into(evidence, plan, workdir, reasoner)
+            keyframes = _collect_keyframes(evidence, workdir, max_keyframes)
+            _trace_reasoner_input(evidence, keyframes)
+            answer = reasoner.reason(question, evidence, keyframes)
+            trace("reasoner", "output", "answer (post-escalation)",
+                  reasoner_output=answer.text, citations=len(answer.citations))
+
+        rendered = render_answer(answer, workdir)
+
+        # Deterministic facts are displayed deterministically: when a deep scan ran,
+        # lead with its code-counted numbers — a weak narrator (observed: qwen-7B
+        # said "10" while its own evidence said 19 distinct) can't hide them.
+        ds = [i for i in evidence.items if i.modality == "deep_scan_count"]
+        if ds and "CODE-COUNTED" not in rendered:
+            rendered = f"[{ds[0].content}]\n\n{rendered}"
+        trace("ask", "answer", (rendered or "").splitlines()[0][:120] if rendered else "")
+        return AskResult(
+            question=question, plan=plan, evidence=evidence,
+            answer=answer, rendered=rendered,
+        )
+
+
+def _active_tiers(plan: QueryPlan) -> list[str]:
+    """The tier flags the planner turned on (for the trace)."""
+    return [f for f in QueryPlan.model_fields
+            if f.startswith("needs_") and getattr(plan, f, False)]
+
+
+def _plan_summary(plan: QueryPlan) -> str:
+    tiers = [t.replace("needs_", "") for t in _active_tiers(plan)]
+    return f"tiers: {', '.join(tiers) or 'visual only'}"
+
+
+def _trace_reasoner_input(evidence: Evidence, keyframes: List[Keyframe]) -> None:
+    """Record the VERBATIM text + keyframe list handed to the reasoner — the same
+    render the reasoner adapters use, so the trace shows exactly what it saw."""
+    from va.adapters.reasoner.prompts import render_evidence
+
+    trace("reasoner", "input", f"{len(evidence.items)} evidence items + "
+          f"{len(keyframes)} keyframes -> reasoner",
+          reasoner_input=render_evidence(evidence),
+          keyframes=[kf.path for kf in keyframes])

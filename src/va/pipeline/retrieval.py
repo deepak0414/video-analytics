@@ -52,6 +52,7 @@ from va.contracts.evidence import (
 )
 from va.contracts.query_plan import QueryPlan
 from va.registry import get_reranker
+from va.runtime.trace import trace
 
 # Language-bearing modalities whose `content` is real description a cross-encoder
 # can judge. Visual frame hits ("visual match at 12.3s") carry NO language, so
@@ -150,6 +151,23 @@ def _minmax(values: Sequence[float]) -> List[float]:
     return [(v - lo) / (hi - lo) for v in values]
 
 
+def _snip(text: str, limit: int = 50) -> str:
+    """Short single-line preview that backs off to a word boundary — never cuts a
+    word or URL mid-token (fixes the `https://www.youtube.com/w` truncation)."""
+    text = (text or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip() + "…"
+
+
+def _preview(items, limit: int = 8) -> list:
+    """Per-item provenance for a gather trace event: which role/modality each
+    candidate came from, so the trace shows evidence sources at collection time."""
+    return [{"role": it.source_role, "modality": it.modality,
+             "t": round(it.time_start, 1), "score": round(it.score, 3),
+             "content": _snip(it.content)} for it in items[:limit]]
+
+
 def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
     """Stage 1: pull candidates from every modality the plan asks for.
 
@@ -166,19 +184,27 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
     from va.pipeline.query import query as visual_query
 
     vhits = visual_query(terms, workdir=workdir, k=k)
+    raw_visual = len(vhits)
     # SR.6: when the planner flags a query an embedding mis-handles (attribute /
     # negation / composition), VLM-verify the candidates before they become
     # evidence. No-op under the passthrough stub; the claim is the FULL query
     # (search_terms may have dropped the discriminating word).
-    if getattr(plan, "needs_visual_verification", False):
+    verified = getattr(plan, "needs_visual_verification", False)
+    if verified:
         from va.pipeline.verify import verify_visual_hits
 
         gate = get_relevance_gate()
         floor = gate.min_cosine if gate.min_cosine > -math.inf else 0.10
         vhits = verify_visual_hits(vhits, plan.query, workdir=workdir,
                                    floor=floor, stop_after_accepts=1)
+    n0 = len(ev.items)
     for h in vhits:
         ev.items.append(from_search_hit(h))
+    trace("retriever", "gather:visual",
+          f"{len(vhits)} visual hits"
+          + (f" (VLM-verified, {raw_visual - len(vhits)} dropped)" if verified else ""),
+          count=len(vhits), raw=raw_visual, verified=verified,
+          items=_preview(ev.items[n0:]))
 
     # Text tiers — semantic index (SR.2), with a lexical fallback per modality.
     wanted = [mod for flag, mod in _TEXT_TIERS.items() if getattr(plan, flag, False)]
@@ -191,13 +217,20 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
             ShardedVectorStore(Workspace(workdir).videos_root,
                                shard_name="text_vectors.npz").count() > 0
         )
+        nt = len(ev.items)
         if index_populated:
-            for h in search_text(terms, workdir=workdir, k=k, modalities=wanted):
+            hits = search_text(terms, workdir=workdir, k=k, modalities=wanted)
+            for h in hits:
                 ev.items.append(from_text_hit(h))
+            trace("retriever", "gather:text", f"{len(hits)} semantic-text hits",
+                  modalities=wanted, count=len(hits), items=_preview(ev.items[nt:]))
         else:
             ev.notes.append("semantic text index empty — lexical fallback "
                             "(run `va reingest`/backfill to enable semantic text retrieval)")
             _gather_lexical(ev, wanted, terms, workdir, k)
+            trace("retriever", "gather:text",
+                  f"{len(ev.items) - nt} lexical-fallback hits (semantic index empty)",
+                  level="warn", modalities=wanted, items=_preview(ev.items[nt:]))
 
     # Structured object facts (Roles 5/6) — descriptive language, so rerankable.
     if plan.needs_object_query:
@@ -205,6 +238,7 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
         from va.pipeline.paths import Workspace
         from va.storage.structured.detections import DetectionStore
 
+        ns = len(ev.items)
         for s in query_objects(terms, workdir=workdir):
             ev.items.append(from_object_summary(s))
         for c in count_objects(terms, workdir=workdir):
@@ -218,6 +252,9 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
                     ev.items.append(from_co_occurrence(co))
         finally:
             store.close()
+        trace("retriever", "gather:structured",
+              f"{len(ev.items) - ns} object/count/co-occurrence items (Roles 5/6)",
+              items=_preview(ev.items[ns:]))
 
     # Unknown future tier flags: note them, don't fail (same contract as assemble).
     known = set(QueryPlan.model_fields)
@@ -322,7 +359,19 @@ def retrieve(
     (permissive for the stub pipeline); pass one explicitly to override.
     """
     ev = _gather(plan, workdir=workdir, k=k)
+    from collections import Counter as _Counter
+
+    trace("retriever", "gathered", f"{len(ev.items)} candidates",
+          by_modality=dict(_Counter(it.modality for it in ev.items)))
+
     _fuse(plan.query, ev.items, get_reranker())
+    trace("retriever", "fuse", f"ranked {len(ev.items)} (rerank_weight={RERANK_WEIGHT})",
+          top=[{"modality": it.modality,
+                "fused": round(it.attributes.get("fused_score", 0.0), 3),
+                "rerank": (round(it.attributes["rerank_score"], 2)
+                           if it.attributes.get("rerank_score") is not None else None),
+                "content": _snip(it.content)}
+               for it in ev.items[:3]])
 
     # Preserve the pre-gate dominant video so a deep-scan escalation can still
     # target the right video when the gate empties the evidence. "No (relevant)
@@ -348,6 +397,9 @@ def retrieve(
                 f"(min_rerank={gate.min_rerank}, min_cosine={gate.min_cosine})"
                 + ("; no candidate cleared the floor — no match" if not kept else "")
             )
+        trace("retriever", "gate", f"kept {len(kept)}, dropped {dropped}",
+              level=("warn" if not kept else "info"), kept=len(kept), dropped=dropped,
+              min_rerank=gate.min_rerank, min_cosine=gate.min_cosine)
         ev.items = kept
 
     if len(ev.items) > MAX_ITEMS:
