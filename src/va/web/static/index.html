@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>va — Ctrl-F for Video</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>va <span class="sub">Ctrl-F for Video</span></h1>
+  </header>
+
+  <section class="row" id="ingest-box">
+    <input id="uri" placeholder="YouTube URL, direct video URL, or server-local path">
+    <button id="ingest-btn">Ingest</button>
+    <span id="job-status" class="pill hidden"></span>
+  </section>
+
+  <section class="row" id="picker-box">
+    <label for="video-select">Ingested:</label>
+    <select id="video-select">
+      <option value="">— select a video —</option>
+    </select>
+    <button id="refresh-btn" title="reload list">&#x27F3;</button>
+  </section>
+
+  <section id="player-box">
+    <div id="player-host"><p class="placeholder">Select or ingest a video</p></div>
+  </section>
+
+  <section class="row" id="query-box">
+    <input id="query" placeholder='e.g. "red sports car"'>
+    <label class="k-label">k <input id="k" type="number" value="5" min="1" max="50"></label>
+    <button id="search-btn">Search</button>
+  </section>
+
+  <section id="results" class="hidden">
+    <p class="hint">Click a hit to seek the player. Scores are relative per modality —
+      SigLIP visual scores are small by design (relevant &asymp; 0.11&ndash;0.18).</p>
+    <div class="cols">
+      <div class="col" id="col-visual"><h3>Visual <span>Role 2</span></h3><ul></ul></div>
+      <div class="col" id="col-caption"><h3>Caption <span>Role 4</span></h3><ul></ul></div>
+      <div class="col" id="col-transcript"><h3>Transcript <span>Role 8</span></h3><ul></ul></div>
+      <div class="col" id="col-objects"><h3>Objects <span>Role 5</span></h3><ul></ul></div>
+    </div>
+  </section>
+
+  <section class="row" id="ask-box">
+    <input id="ask-input" placeholder='Ask a question (Role 11) — e.g. "what color is the car?"'>
+    <button id="ask-btn">Ask</button>
+    <span id="ask-status" class="pill hidden"></span>
+  </section>
+
+  <section id="ask-result" class="hidden">
+    <div id="ask-answer" class="answer"></div>
+    <p id="ask-notes" class="hint hidden"></p>
+    <div class="col" id="ask-evidence">
+      <h3>Evidence <span>click to seek</span></h3>
+      <ul></ul>
+    </div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

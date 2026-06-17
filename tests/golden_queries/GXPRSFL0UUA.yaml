@@ -1,0 +1,69 @@
+# Machine-readable golden queries for the developer-agent / pytest harness.
+# Each video is ingested into its OWN workdir, then each query is run through
+# `va query`. match => top hit score >= min_score; no_match => top score < min_score.
+# Thresholds are DEFAULTS to be calibrated on a first real run (SigLIP scores).
+video_id: GXPRSFL0UUA
+title: Red Ferrari 458 Italia Racing
+url: https://www.youtube.com/watch?v=GXPRSFL0UUA
+source_key: GXPRSFL0UUA
+default_min_score: 0.10      # calibrated 2026-06-15 on first real run: true-neg <=0.044, true-pos >=0.108 (was 0.05, admitted false hits); matches SR.5 min_cosine
+
+# Runnable now: Role 2 visual retrieval
+queries:
+  - {id: ferrari-pos-01, query: "red Ferrari sports car",                          expect: match,    time_range: [0, 187]}
+  - {id: ferrari-pos-02, query: "yellow Lamborghini with doors up",                expect: match,    time_range: [8, 24]}
+  - {id: ferrari-pos-03, query: "sports car cornering on a track near orange cones", expect: match,  time_range: [56, 152]}
+  - {id: ferrari-pos-04, query: "desert mountains behind a racetrack",             expect: match,    time_range: [0, 187]}
+  - {id: ferrari-pos-05, query: "concrete Jersey barriers lining the track",       expect: match,    time_range: [56, 168]}
+  # Grandstands ARE real (Las Vegas Motor Speedway, visible ~122s) but distant background.
+  - {id: ferrari-pos-06, query: "spectator grandstands at a speedway",             expect: match,    time_range: [118, 130], xfail: "GENUINE capability gap (human-confirmed): the LVMS grandstands are present ~122s but distant/background — SigLIP maxes 0.065 (<0.10 floor) there and the VLM misses them too. NB the old window [56,128] passed via a FALSE POSITIVE (0.110@78s, a runway frame with NO grandstands); narrowed to the real location so the test asserts the truth. Would need region-aware retrieval (SR.7), not built."}
+  - {id: ferrari-pos-07, query: "person standing next to the parked Ferrari",      expect: match,    time_range: [0, 40]}
+  - {id: ferrari-neg-01, query: "snow covered road",                               expect: no_match}
+  - {id: ferrari-neg-02, query: "night time city street with neon lights",         expect: no_match}
+  - {id: ferrari-neg-03, query: "boat on water ocean",                             expect: no_match}
+  - {id: ferrari-neg-04, query: "person riding a motorcycle",                      expect: no_match}
+  - {id: ferrari-neg-05, query: "blue Ferrari",                                    expect: no_match, verify: true}  # SR.6 VLM-verify rejects the red car (attribute)
+  - {id: ferrari-neg-06, query: "airplane flying in the sky",                      expect: no_match}
+  - {id: ferrari-neg-07, query: "people swimming in a pool",                       expect: no_match}
+
+  # --- caption search (Role 4) — ground truth = vision-verified scene content ---
+  - {id: ferrari-cap-01, query: "red ferrari on a race track", modality: caption, expect: match,    provenance: vision-verified}
+  - {id: ferrari-cap-02, query: "swimming pool",               modality: caption, expect: no_match, provenance: vision-verified}
+
+  # --- object appearances (Role 5) — ground truth = vision-verified ---
+  - {id: ferrari-obj-01, query: "car",        modality: object, expect: match,    time_range: [0, 187], provenance: vision-verified}
+  - {id: ferrari-obj-02, query: "person",     modality: object, expect: match,    provenance: vision-verified}
+  - {id: ferrari-obj-03, query: "truck",      modality: object, expect: match,    provenance: vision-verified}  # background semis @t72/96/144/184
+  - {id: ferrari-obj-04, query: "motorcycle", modality: object, expect: no_match, provenance: vision-verified}
+
+  # --- distinct counts (Role 6 tracks) — bounds, not exact: track quality is
+  #     sampling/tracker dependent; ground truth from vision-verified content ---
+  - {id: ferrari-cnt-01, query: "car",        modality: object_count, expect: match,
+     count_min: 2, count_max: 15, provenance: vision-verified}  # >=2 certain: red Ferrari + yellow Lambo
+  - {id: ferrari-cnt-02, query: "motorcycle", modality: object_count, expect: no_match, provenance: vision-verified}
+
+  # No transcript queries: the verifier rejected all audio claims for this video
+  # (engine sound unverifiable from frames) — no trustworthy speech ground truth.
+
+  # --- on-screen text (Role 10) — billboards vision-verified from frames.
+  #     Queries are the expected text itself (word-overlap retrieval, like transcripts).
+  #     2026-06-12 rapidocr run: "Coors Light" reads as "COOrSLIGHT" (correct chars, no
+  #     space) — found via the space-insensitive phrase match @1.0; DODGE x6 exact.
+  - {id: ferrari-ocr-01, query: "Coors Light", modality: on_screen_text, expect: match, time_range: [30, 187], provenance: vision-verified}
+  - {id: ferrari-ocr-02, query: "Dodge",       modality: on_screen_text, expect: match, time_range: [40, 187], provenance: vision-verified}
+
+  # --- actions (Role 7, X-CLIP zero-shot over the configured vocabulary) ---
+  #     2026-06-12 run: X-CLIP labeled all 11 pyscenedetect segments "driving a
+  #     car" at conf 0.94-0.99 — the whole clip is a car in motion. The query
+  #     word must be IN the recognized label (word-overlap), and the action must
+  #     be IN the ingest vocabulary (DEFAULT_INGEST_ACTIONS has "driving a car").
+  - {id: ferrari-act-01, query: "driving",  modality: action, expect: match,    time_range: [0, 187], provenance: vision-verified}
+  - {id: ferrari-act-02, query: "swimming", modality: action, expect: no_match, provenance: vision-verified}
+
+# Captured for later roles; not run by the current harness
+future_queries:
+  - {query: "how many cars with open doors are shown at once", needs_role: 6,  modality: object_count}  # needs per-instant distinct counting (tracks), not just Role 5 detections
+  # promoted to runnable: Coors Light / Dodge billboards -> ferrari-ocr-01/02 (Role 10 implemented)
+  # promoted to runnable: "driving" action -> ferrari-act-01 (Role 7 implemented). The original
+  # "driving fast in side profile down a straight" needs fine-grained/query-time recognition
+  # (X-CLIP scores a fixed coarse vocabulary at ingest; "side profile down a straight" is not a label).

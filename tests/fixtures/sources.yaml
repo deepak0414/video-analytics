@@ -1,0 +1,6 @@
+# Pinned YouTube fixtures. Fill video_id + the time range / expected answers.
+# `va fixtures pull` downloads these via the same source backend the pipeline uses.
+fixtures:
+  - name: red-sports-car
+    video_id: REPLACE_ME   # an 11-char YouTube id containing a red sports car
+    note: "expected: query 'red sports car' returns a moment with the car"

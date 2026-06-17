@@ -1,0 +1,40 @@
+# Machine-readable golden queries — birdfeeder clip (fixed-camera long take).
+# Source: section 4:13-14:05 (253s-845s) of https://www.youtube.com/watch?v=2Oy4Fy8vIgw
+# (8h stream; downloaded via yt-dlp --download-sections — needs full ffmpeg+ffprobe
+# on PATH, e.g. the static-ffmpeg pip package). Identity = content sha256.
+video_id: birdfeeder_0413_1405
+source_key: "sha256:8970ef1c192392241ad47b3a1cf8d038dcbf8c09430bcee2e732710ebd389818"
+title: birdfeeder 4:13-14:05 section
+default_min_score: 0.10      # calibrated 2026-06-15 on first real run: true-neg <=0.044, true-pos >=0.108 (was 0.05, admitted false hits); matches SR.5 min_cosine
+
+# Runnable now: Role 2 visual retrieval (frame-verified by agent inspection)
+queries:
+  - {id: bird-pos-01, query: "bird eating seeds on a feeder",  expect: match,    time_range: [0, 592], provenance: vision-verified}
+  - {id: bird-pos-02, query: "a tractor",                      expect: match,    provenance: vision-verified}  # yellow loader in background
+  - {id: bird-neg-01, query: "red sports car",                 expect: no_match, provenance: vision-verified}
+  - {id: bird-neg-02, query: "people in an office",            expect: no_match, provenance: vision-verified}
+
+  # --- actions (Role 7, X-CLIP zero-shot with abstention foil) ---
+  #     2026-06-12 run: the single 592s take scored "feeding animals" at conf 0.81
+  #     (birds feeding at the feeder = the literal label; survives the NO_ACTION
+  #     foil). Coarse: one label over the whole take, since the fixed-camera clip is
+  #     one segment (8 frames sampled across 10 min) — fine for "is feeding
+  #     happening", not for per-visit timing.
+  - {id: bird-act-01, query: "feeding animals", modality: action, expect: match,    time_range: [0, 592], provenance: vision-verified}
+  - {id: bird-act-02, query: "driving",         modality: action, expect: no_match, provenance: vision-verified}
+
+# Ask-level questions (Role 11 + deep scan): asserted against the CODE-COUNTED
+# deep_scan_count attributes, not the narrator's prose.
+ask_questions:
+  - id: bird-ask-01
+    question: "How many birds come and feed on the feeder?"
+    statistic: total_episodes          # visits = appearance episodes
+    expected_min: 4
+    expected_max: 5
+    provenance: human-verified         # user hand-counted 4-5 (the 4-vs-5 is a
+                                       # single-frame cardinal touch-and-go @0:18)
+    note: >
+      System measured 5 across FOUR independent sweeps (different label
+      vocabularies, .va-nature and .va-shots copies). Distinct bird types = 3
+      (red cardinal, female cardinal, brown sparrow); tracker "distinct
+      instances" (~9-10) is NOT ground truth (no re-ID across visits).

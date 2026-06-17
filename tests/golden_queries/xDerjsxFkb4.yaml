@@ -1,0 +1,55 @@
+# Machine-readable golden queries. See GXPRSFL0UUA.yaml for harness semantics.
+video_id: xDerjsxFkb4
+title: King Cobra short
+url: https://www.youtube.com/shorts/xDerjsxFkb4
+source_key: xDerjsxFkb4
+default_min_score: 0.10      # calibrated 2026-06-15 on first real run: true-neg <=0.044, true-pos >=0.108 (was 0.05, admitted false hits); matches SR.5 min_cosine
+
+queries:
+  - {id: cobra-pos-01, query: "cobra with hood spread",                     expect: match, time_range: [0, 45]}
+  - {id: cobra-pos-02, query: "snake inside a glass reptile enclosure",     expect: match, time_range: [15, 55]}
+  - {id: cobra-pos-03, query: "snake coiled inside a trash can",            expect: match, time_range: [25, 30]}
+  - {id: cobra-pos-04, query: "human hand pressed against terrarium glass", expect: match, time_range: [40, 45]}
+  - {id: cobra-pos-05, query: "wood shaving substrate bedding in enclosure", expect: match, time_range: [40, 55]}
+  - {id: cobra-pos-06, query: "large snake resting on a wooden branch",     expect: match, time_range: [50, 55]}
+  # CORRECTED 2026-06-16 (human ground truth): there is NO kitchen anywhere in this video.
+  # The original "vision-verified" MATCH was a generation-workflow hallucination (misread a
+  # den — TV/desk/shelves, per Qwen's neutral enumeration — as a kitchen). SigLIP's +0.13 on a
+  # tight crop was a false positive. Now a correct NEGATIVE: the system must NOT report a kitchen.
+  - {id: cobra-neg-07, query: "indoor kitchen with range hood",            expect: no_match, provenance: human-corrected}
+  - {id: cobra-neg-01, query: "person holding a dog",                       expect: no_match}
+  - {id: cobra-neg-02, query: "outdoor forest or jungle scene",            expect: no_match}
+  - {id: cobra-neg-03, query: "person feeding a mouse to the snake",        expect: no_match, verify: true}  # SR.6 VLM-verify rejects (composition)
+  - {id: cobra-neg-04, query: "red sports car",                            expect: no_match}   # canonical negative test
+  - {id: cobra-neg-05, query: "stainless steel kitchen appliance",         expect: no_match}
+  - {id: cobra-neg-06, query: "two or more people visible in frame",        expect: no_match}
+
+  # --- caption search (Role 4) — ground truth = vision-verified scene content ---
+  - {id: cobra-cap-01, query: "snake in a glass enclosure", modality: caption, expect: match,    time_range: [15, 55], provenance: vision-verified}
+  - {id: cobra-cap-02, query: "red sports car",             modality: caption, expect: no_match, provenance: vision-verified}
+
+  # --- object appearances (Role 5) — ground truth = vision-verified ---
+  # NOTE cobra-obj-01 is a known-hard accuracy target: a spot check showed
+  # YOLO-World @conf 0.25 MISSED the cobra at t=30 (dim, inside a trash can).
+  # The fixture records ground truth (a snake IS present), not current behavior —
+  # expect this to fail until the detector/conf/vocabulary improves.
+  - {id: cobra-obj-01, query: "snake", modality: object, expect: match,    time_range: [0, 60], provenance: vision-verified, verify: true}  # SR.6 VLM-presence finds the snake YOLO can't (novel object)
+  - {id: cobra-obj-02, query: "car",   modality: object, expect: no_match, provenance: vision-verified}
+  - {id: cobra-obj-03, query: "dog",   modality: object, expect: no_match, provenance: vision-verified}
+
+  # --- distinct counts (Role 6) ---
+  - {id: cobra-cnt-01, query: "car", modality: object_count, expect: no_match, provenance: vision-verified}
+
+  # No transcript queries: narrator-speech claims were rejected as unverifiable
+  # from frames; only on-screen captions are verified (those are Role 10 / OCR).
+
+  # --- on-screen text (Role 10) — burned-in captions vision-verified from frames.
+  #     NOTE: OCR is line-level; multi-line captions come back as separate hits
+  #     ("King Cobras are possibly" + "the worst pet reptile"), so cobra-ocr-02's
+  #     match is a partial-overlap hit (0.57), not one hit containing the sentence.
+  - {id: cobra-ocr-01, query: "I bought a cobra",                         modality: on_screen_text, expect: match, time_range: [0, 5],   provenance: vision-verified}
+  - {id: cobra-ocr-02, query: "King Cobras are the worst pet reptile",    modality: on_screen_text, expect: match, time_range: [30, 45], provenance: vision-verified}
+
+future_queries:
+  - {query: "snake reared up in second half of the video",        needs_role: 1,  modality: temporal}  # segments exist (Role 1 done) but no temporal query surface yet
+  # promoted to runnable: burned-in caption overlays -> cobra-ocr-01/02 (Role 10 implemented)

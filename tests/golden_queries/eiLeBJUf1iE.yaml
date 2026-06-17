@@ -1,0 +1,74 @@
+# Machine-readable golden queries. See GXPRSFL0UUA.yaml / README.md for harness semantics.
+video_id: eiLeBJUf1iE
+title: 27 Dresses (2/5) Movie CLIP - All 27 Dresses (2008) HD
+url: https://www.youtube.com/watch?v=eiLeBJUf1iE
+source_key: eiLeBJUf1iE
+default_min_score: 0.10      # calibrated 2026-06-15 on first real run: true-neg <=0.044, true-pos >=0.108 (was 0.05, admitted false hits); matches SR.5 min_cosine
+
+queries:
+  - {id: dresses-pos-01, query: "woman in a green strapless dress",            expect: match, time_range: [0, 64]}
+  - {id: dresses-pos-02, query: "closet full of colorful dresses",             expect: match, time_range: [8, 80]}
+  - {id: dresses-pos-03, query: "man in a gray suit holding dresses",          expect: match, time_range: [40, 120]}
+  - {id: dresses-pos-04, query: "bride and groom at a wedding",                expect: match, time_range: [24, 96], verify: true}  # SR.6 scene-presence: SigLIP scores 0.022 but the VLM confirms the wedding (2/8 in-window)
+  - {id: dresses-pos-05, query: "bridesmaids in pink dresses",                 expect: match, time_range: [88, 104]}
+  - {id: dresses-pos-06, query: "woman in a cowboy hat",                       expect: match, time_range: [104, 120]}
+  - {id: dresses-pos-07, query: "women in southern belle hoop skirt gowns",    expect: match, time_range: [24, 40]}
+  - {id: dresses-pos-08, query: "woman in a red dress twirling",               expect: match, time_range: [96, 112]}
+  - {id: dresses-pos-09, query: "digital camera screen showing a photo",       expect: match, time_range: [120, 136]}
+  - {id: dresses-pos-10, query: "person holding a camera around their neck",   expect: match, time_range: [88, 128]}
+  - {id: dresses-neg-01, query: "car driving on a road",                       expect: no_match}
+  - {id: dresses-neg-02, query: "dog or pet animal",                           expect: no_match}
+  - {id: dresses-neg-03, query: "snowy outdoor winter scene",                  expect: no_match}
+  - {id: dresses-neg-04, query: "people eating at a dinner table",             expect: no_match}
+  - {id: dresses-neg-05, query: "neon city street at night",                   expect: no_match}
+
+  # --- caption search (Role 4) — ground truth = vision-verified scene content ---
+  - {id: dresses-cap-01, query: "women in pink dresses",   modality: caption, expect: match,    time_range: [85, 106], provenance: vision-verified}
+  - {id: dresses-cap-02, query: "movieclips logo",         modality: caption, expect: match,    time_range: [131, 159], provenance: vision-verified}  # widened from [150,159]: Qwen captioned the Fandango Movieclips end-card at 137-143s
+  - {id: dresses-cap-03, query: "snowy mountain",          modality: caption, expect: no_match, provenance: vision-verified}
+
+  # --- transcript search (Role 8) — dialogue not verifiable from frames, so these
+  #     pin the validated Whisper run (regression, not absolute ground truth) ---
+  - {id: dresses-tx-01,  query: "twenty seven dresses",    modality: transcript, expect: match, time_range: [120, 135], provenance: model-regression}
+  - {id: dresses-tx-02,  query: "theme wedding",           modality: transcript, expect: match, time_range: [8, 20],    provenance: model-regression}
+  - {id: dresses-tx-03,  query: "quarterly budget",        modality: transcript, expect: no_match, provenance: model-regression}
+
+  # --- on-screen text (Role 10) — the closing title card is vision-verified.
+  #     2026-06-12 rapidocr run: the card reads as separate lines "27" + "DRESSES"
+  #     @131-133s — each word hits (0.5), no single hit holds the full phrase.
+  - {id: dresses-ocr-01, query: "27 dresses", modality: on_screen_text, expect: match, time_range: [120, 159], provenance: vision-verified}
+
+  # --- object appearances (Role 5) — ground truth = vision-verified ---
+  - {id: dresses-obj-01, query: "person",                  modality: object, expect: match,    provenance: vision-verified}
+  - {id: dresses-obj-02, query: "car",                     modality: object, expect: no_match, provenance: vision-verified}
+
+  # --- distinct counts (Role 6) — bride+groom+bridesmaids+leads all verified ---
+  - {id: dresses-cnt-01, query: "person", modality: object_count, expect: match,
+     count_min: 3, count_max: 30, provenance: vision-verified}
+  - {id: dresses-cnt-02, query: "car",    modality: object_count, expect: no_match, provenance: vision-verified}
+
+# Ask-level questions (Role 11 + deep scan): asserted against CODE-COUNTED attributes.
+ask_questions:
+  - id: dresses-ask-01
+    question: "the girl in first scene, how many time she changes her dress in the entire video clip?"
+    statistic: distinct_states         # changes on montage footage -> distinct outfits
+    expected_min: 17
+    expected_max: 19
+    provenance: human-verified         # user hand-counted 17 changes (= 18 outfits
+                                       # incl. the opening one); measured 18-19
+    note: >
+      Requires the pyscenedetect ingest (.va-shots era, 71 segments) — the
+      histogram-segmented copies undercount. Raw transitions (~26) measure the
+      montage editing, not the changes.
+
+future_queries:
+  # Role 7 IS implemented, but this query stays here: "counting dresses" is not a
+  # general action the ingest-time vocabulary covers. 2026-06-12 X-CLIP run over the
+  # 71 segments labeled the montage dancing(16)/talking(6)/eating(1) = 23 events
+  # (the NO_ACTION abstention foil trimmed 6 borderline labels vs the pre-foil 29) —
+  # a coarse approximation of dress-modeling, none of which is "counting". A specific
+  # action like this needs query-time (on-demand) recognition with the query as the
+  # vocab — the action analogue of GroundingDINO for Role 5. Not built yet.
+  - {query: "person counting the dresses one by one",        needs_role: 7,  modality: action, status: needs_query_time_vocab}
+  # promoted to runnable: "what does the woman say about the dresses" -> dresses-tx-01/02 (Role 8 implemented)
+  # promoted to runnable: "27 dresses movie title card" -> dresses-ocr-01 (Role 10 implemented)

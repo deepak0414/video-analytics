@@ -1,0 +1,52 @@
+# "Real models" config (kept separate from the default stub config so the test
+# suite stays offline). Select via VA_CONFIG_DIR=run-siglip/config.
+active_profile: dgx-spark
+roles:
+  visual_embedder:
+    backend: inproc
+    model: siglip
+  scene_detector:
+    backend: inproc
+    model: pyscenedetect
+  text_embedder:
+    backend: inproc
+    model: BAAI/bge-m3
+  reranker:
+    backend: inproc
+    model: BAAI/bge-reranker-v2-m3
+  vlm_verifier:
+    backend: inproc
+    model: qwen2.5-vl-7b      # SR.6 query-time VLM grounding; reuses the Role-4 bundle
+  speech_to_text:
+    backend: inproc
+    model: whisper
+  speaker_diarizer:
+    backend: inproc
+    model: pyannote
+  vlm_captioner:
+    backend: inproc
+    model: qwen2.5-vl-7b
+  object_detector:
+    backend: inproc
+    model: yolo-world
+  object_tracker:
+    backend: inproc
+    model: bytetrack
+  action_recognizer:
+    backend: inproc
+    model: xclip
+  ocr:
+    backend: inproc
+    model: rapidocr
+  reasoner:
+    backend: inproc
+    model: claude-code
+
+  # Retrieval Layer threshold (SR.5). FLAGGED magic values — calibration targets
+  # for the golden-query harness, not settled constants. Floors sit in the
+  # measured relevant/irrelevant gaps: bge-reranker-v2-m3 scored relevant items
+  # +6.3 down to -2.0 and irrelevant ones -3.7 to -11 (so -3.0 separates);
+  # SigLIP cosine ~0.11-0.18 relevant vs ~0 irrelevant.
+  retriever:
+    min_rerank: -3.0    # cross-encoder logit floor for language items
+    min_cosine: 0.10    # native cosine floor for visual frames (0.05-0.06 = irrelevant noise; relevant >=0.11)

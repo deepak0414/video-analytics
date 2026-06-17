@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- VA workdirs: ingested media, SQLite DBs, vectors, keyframes, caches.
+#     All regenerable from a video's source_key via `va ingest`. NEVER commit. ---
+.va/
+.va-*/
+
+# --- Downloaded / cached model weights (large, fetched on first use) ---
+weights/
+*.pt
+*.onnx
+yolov8s-world.pt
+
+# --- Test media (re-fetched from source_key) ---
+tests/fixtures/*.mp4
+
+# --- Trace artifacts (QA plan T1; regenerable run logs) ---
+traces/
+
+# --- Backups / scratch ---
+*.bak
+*.tmp
+*.log
+
+# --- Claude Code local (personal) settings ---
+.claude/settings.local.json
+.claude/*.local.json
+
+# --- OS ---
+.DS_Store
+Thumbs.db

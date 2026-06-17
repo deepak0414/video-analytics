@@ -1,0 +1,18 @@
+# DGX Spark (GB10, 128GB unified memory). Local-heavy: keep models resident.
+# Per-model LOAD params (device/dtype/quant) live here, keyed by model name.
+
+device: cuda
+dtype: float16
+residency: keep   # keep | unload-after-use (24GB profile would use unload-after-use)
+
+models:
+  siglip:
+    weights: google/siglip-so400m-patch14-384
+    dtype: float16
+  hash:
+    # stub: no real weights; runs anywhere, ignores device
+    device: cpu
+  claude-code:
+    timeout_seconds: 240
+  whisper:
+    model: base

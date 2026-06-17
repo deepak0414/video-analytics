@@ -1,0 +1,102 @@
+# Role -> backend + model choice. This is the hosting-agnostic switch (Principle P2).
+# To move a role off the Spark, change `backend` to `http`/`cloud` and add an `endpoint`.
+# `active_profile` selects the hardware profile under config/profiles/ for LOAD params.
+
+active_profile: dgx-spark
+
+roles:
+  visual_embedder:
+    backend: inproc
+    # `hash` = deterministic stub (no download, used by tests/CI).
+    # `siglip` = real SigLIP SO400M (needs the `siglip` extra: torch+transformers).
+    model: hash
+
+  scene_detector:
+    backend: inproc
+    # `histogram` = dependency-free content-aware detector (default).
+    # `pyscenedetect` = sharper, needs the `scenedetect` extra.
+    model: histogram
+
+  text_embedder:
+    backend: inproc
+    # Retrieval Layer (semantic text search over captions/transcripts/OCR/actions).
+    # `hash` = deterministic lexical-hashing stub (tests/CI).
+    # any HF id (e.g. BAAI/bge-m3) = real transformers text embedder (`text-embed` extra).
+    model: hash
+
+  reranker:
+    backend: inproc
+    # Retrieval Layer cross-encoder reranker (orders candidates by true relevance).
+    # `word-overlap` = deterministic lexical stub (tests/CI).
+    # any HF id (e.g. BAAI/bge-reranker-v2-m3) = real cross-encoder (`rerank` extra).
+    model: word-overlap
+
+  vlm_verifier:
+    backend: inproc
+    # Retrieval Layer SR.6: query-time VLM grounding over a retriever's top-k frames
+    # (attribute/negation/composition checks SigLIP can't do; novel objects YOLO misses).
+    # `passthrough` = no-op stub (tests/CI; results pass through unchanged).
+    # `qwen2.5-vl-7b` = real Qwen2.5-VL, reuses the Role-4 bundle (no extra VRAM).
+    model: passthrough
+
+  speech_to_text:
+    backend: inproc
+    # `sidecar` = deterministic stub reading a <video>.transcript.json (tests/CI).
+    # `whisper` = real OpenAI Whisper (needs the `whisper` extra).
+    model: sidecar
+
+  speaker_diarizer:
+    backend: inproc
+    # `sidecar` = deterministic stub reading <video>.diarization.json (tests/CI).
+    # `pyannote` = real pyannote.audio (needs the `diarize` extra + a HF token
+    # with the gated pyannote/speaker-diarization model accepted).
+    model: sidecar
+
+  vlm_captioner:
+    backend: inproc
+    # `color` = dependency-free dominant-color stub (tests/CI).
+    # `qwen2.5-vl-7b` = real Qwen2.5-VL (needs the `qwenvl` extra).
+    model: color
+
+  object_detector:
+    backend: inproc
+    # `color` = dependency-free color-region stub (tests/CI).
+    # `yolo-world` = real open-vocab YOLO-World (needs the `yolo` extra).
+    model: color
+    # classes: [person, car, dog]   # optional ingest vocabulary override
+
+  object_tracker:
+    backend: inproc
+    # `iou` = dependency-free IoU-association tracker (default; also tests/CI).
+    # `bytetrack` = motion-aware ByteTrack via supervision (needs the `track` extra).
+    model: iou
+
+  action_recognizer:
+    backend: inproc
+    # `motion` = dependency-free motion/static stub from pixel diffs (tests/CI).
+    # `xclip` = real zero-shot X-CLIP (needs the `action` extra).
+    model: motion
+    # actions: [eating, running]   # optional ingest vocabulary override
+
+  ocr:
+    backend: inproc
+    # `sidecar` = deterministic stub reading a <video>.ocr.json (tests/CI).
+    # `rapidocr` = real PP-OCR models on onnxruntime (needs the `ocr` extra; CPU).
+    # (paddlepaddle itself segfaults on aarch64 — see rapidocr_inproc.py.)
+    model: sidecar
+
+  reasoner:
+    backend: inproc
+    # `rule` = deterministic keyword planner + extractive reasoner (tests/CI).
+    # `qwen2.5-vl-7b` = local VLM reasoning (shares the Role-4 model).
+    # `claude-code` = Claude via the logged-in CLI (subscription; dev convenience).
+    # `claude-api` = PLACEHOLDER pending the ANTHROPIC_API_KEY decision.
+    model: rule
+
+  # Retrieval Layer threshold (SR.5): absolute relevance floors. OMITTED here so
+  # the STUB pipeline keeps every hit — stub scores (lexical/color hashes) aren't
+  # calibrated for thresholding. Calibrated floors live in run-*/config next to
+  # the real models they were measured against. To enable:
+  # retriever:
+  #   min_rerank: -3.0   # cross-encoder logit floor (language items)
+  #   min_cosine: 0.05   # SigLIP cosine floor (visual frames)

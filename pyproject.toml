@@ -1,0 +1,72 @@
+[project]
+name = "video-analytics"
+version = "0.1.0"
+description = "Ctrl-F for Video — visual search over ingested videos"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pydantic>=2",
+    "pyyaml",
+    "pillow",
+    "imageio",
+    "imageio-ffmpeg",
+    "yt-dlp",
+]
+
+[project.optional-dependencies]
+# Real SigLIP embedding backend. Heavy; not needed for tests (which use the hash stub).
+siglip = ["torch", "transformers", "sentencepiece", "protobuf"]
+# Sharper Role-1 scene detector (default is the dependency-free histogram backend).
+scenedetect = ["scenedetect[opencv-headless]"]
+# Retrieval Layer (SR.1): semantic text embeddings. Default is the hash-stub embedder.
+# Uses `transformers` directly (BGE/E5 encoders), NOT sentence-transformers — the installed ST
+# is a multimodal build that hard-imports torchcodec, which fails on this aarch64 box. Vendor-
+# neutral; NV-embedqa would be a future `http` backend behind the same TextEmbedder Protocol.
+text-embed = ["transformers"]
+# Retrieval Layer (SR.3): cross-encoder reranker. Default is the word-overlap stub.
+# Also transformers-direct (bge-reranker), avoiding FlagEmbedding/ST → torchcodec.
+rerank = ["transformers"]
+# Real Role-8 speech-to-text (reuses torch). Default is the sidecar stub.
+whisper = ["openai-whisper"]
+# Real Role-9 speaker diarization (pyannote.audio). Default is the sidecar stub.
+# 4.x REQUIRED on this box: pyannote 3.x imports torchaudio.AudioMetaData, which
+# torchaudio 2.11 (pinned by torch 2.12+cu130) removed entirely; 4.x dropped that
+# dependency. Needs a HuggingFace token + the gated pyannote/speaker-diarization
+# model accepted (huggingface-cli login, or set HF_TOKEN).
+diarize = ["pyannote.audio>=4"]
+# Real Role-4 VLM captioner (Qwen2.5-VL). Default is the color stub.
+qwenvl = ["transformers", "accelerate", "qwen-vl-utils", "torchvision"]
+# Real Role-5 open-vocabulary object detector (YOLO-World). Default is the color stub.
+# `clip` is YOLO-World's text encoder for set_classes (ultralytics auto-installs it
+# at runtime otherwise — pinned here so installs are reproducible).
+yolo = ["ultralytics", "clip"]
+# Motion-aware Role-6 tracker (ByteTrack). Default is the dependency-free IoU tracker.
+# Pinned <0.30: supervision deprecates sv.ByteTrack in 0.30 (migrate then).
+track = ["supervision<0.30"]
+# Real Role-7 action recognizer (X-CLIP zero-shot via transformers; reuses torch).
+# Default is the motion/static stub. plan.md named InternVideo2 — custom non-transformers
+# stack, skipped after the paddle-on-aarch64 runtime lesson; VideoMAE alt is closed-vocab.
+action = ["transformers", "torch"]
+# Real Role-10 OCR: PP-OCR det+rec models on onnxruntime via RapidOCR. Default is the
+# sidecar stub. NOT paddleocr: paddlepaddle's inference engine segfaults at predictor
+# init on aarch64 (PIR param loading; v5/v6, mkldnn on/off). CPU-only — no VRAM use.
+ocr = ["rapidocr", "onnxruntime"]
+# Web UI (`va serve`): FastAPI app + uvicorn. See web-frontend-plan.md.
+web = ["fastapi", "uvicorn"]
+dev = ["pytest", "httpx"]  # httpx: required by fastapi.testclient
+
+[project.scripts]
+va = "va.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "golden: real-model golden-query checks (RUN_GOLDEN=1 + GPU + ingested workdir)",
+]
