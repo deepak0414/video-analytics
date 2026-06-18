@@ -83,11 +83,19 @@ change). The shipped ingest win is **B1 (decode-once) alone**.
 `store.count()` then `store.search()` (`query.py:21-23`); each calls `ShardedVectorStore._shards()`
 (`sharded.py:29`), which builds a `NumpyFlatVectorStore` per shard whose `__init__` reads the `.npz` +
 `.json` off disk (`numpy_flat.py:34`). No caching, no mmap.
-→ Persistent in-memory / mmap index held by the process (prerequisite for B4).
+→ Persistent in-memory / mmap index held by the process (prerequisite for B4). **DONE (2026-06-18)** —
+process-level shard cache keyed by `.npz` mtime (`sharded.py`); read-only, identical results;
+multi-video query **12.6→0.33 ms/query (39×)** on an 8-shard SigLIP-scale corpus.
 
 **B4 — Brute-force O(N·D) cosine over the entire corpus** (`numpy_flat.py:69` `self._vecs @ q`). The docs
 already note it "falls over at millions." Cameras hit millions in a week.
-→ Sublinear ANN (§4-C).
+→ Sublinear ANN (LanceDB/Qdrant/usearch, §4-C). **DEFERRED — scale-gated on B8, not a current win
+(2026-06-18).** At PoC scale the matmul is already sub-millisecond (4k vectors @1152-dim → 0.33 ms after
+the B3 cache); it only "falls over at millions", and **that scale only arrives with continuous camera
+ingest (B8)** — ~86k vec/day/camera, millions in ~a week — which isn't built. ANN is also an
+architecture/dependency swap AND *approximate*: at small scale brute-force is both exact and fast, so
+ANN would add recall risk for zero speed gain. Revisit when B8 is real (validate recall@k vs the exact
+brute-force baseline). The B3 shard cache (done) is the persistent index it builds on.
 
 **B5 — SQLite opened, schema-applied, and closed per request.** `Catalog.__init__` runs `apply_schema()`
 (8 `CREATE TABLE` + 6 `CREATE INDEX`) on **every** open (`catalog_sqlite.py:34-36`); the web layer opens/
@@ -106,7 +114,9 @@ value, and batching is what lets **one GPU serve 10 users at once** instead of s
 
 **B8 — No tenancy, no streaming source, no retention.** No `user_id`/`camera_id` columns; `sources/`
 has no RTSP backend; nothing rotates raw footage. These are product gaps, not slowdowns — but they shape
-where the new compiled components sit.
+where the new compiled components sit. **B8 also gates B4**: its continuous camera ingest is what
+produces the million-vector corpus that justifies the ANN swap — until B8 is real there is no scale
+that needs it (brute-force stays sub-ms and exact, so ANN would only add recall risk).
 
 ---
 
@@ -195,7 +205,7 @@ Python data-plane and serving layer they depend on exist.
 |---|---|---|---|
 | **PP.0** | **Benchmark + profile harness**: scripted ingest-time / query-latency / recall@k numbers on a fixed real workdir (extends the golden-query harness). Per the repo rule *determinism ≠ correctness* — every later step is judged against these baselines, and ANN recall is validated vs. the brute-force ground truth. | A `va bench` (or test) prints ingest s/min, query p50/p95, and corpus size; baseline captured. | — |
 | **PP.1** | **Decode-once fan-out** in `ingest.py`: one decode pass feeds both visual embedding and object detection (was two passes over identical frames) — fixes B1. ✅ shipped 2026-06-18: 1.32× total ingest, every video 1.18–1.53× faster, counts identical. *(ffmpeg-side fps sampling for B2 was tested & rejected — see the B2 note.)* | Ingest decodes the file once; wall-clock drops measurably vs PP.0; offline tests still green. | PP.0 |
-| **PP.2** | **Vector engine swap** behind `VectorStore`: persistent/mmap index (fixes B3) → LanceDB/Qdrant/usearch with `video_id`/`user_id`/`camera_id` + time filters (fixes B4). | Query no longer reloads per call; recall@k vs brute-force ≥ target on PP.0 set; remove/reingest still work. | PP.0 |
+| **PP.2** | **Vector engine swap** behind `VectorStore`. Persistent/mmap index (fixes B3) — ✅ shipped as the in-process shard cache. The ANN swap → LanceDB/Qdrant/usearch with `video_id`/`user_id`/`camera_id` + time filters (fixes B4) is **deferred / scale-gated on PP.6** — no million-vector corpus until continuous camera ingest exists. | Index no longer reloads per call (done); for the ANN part: recall@k vs brute-force ≥ target on a scale set; remove/reingest still work. | PP.0; ANN part: PP.6 |
 | **PP.3** | **SQLite hardening**: WAL + `synchronous=NORMAL`, pooled/reused connection, schema applied once, batched hit-lookups (fixes B5); add tenancy columns. (Postgres later, same interface.) | Concurrent reader + ingest writer don't block; `user_id` scoping enforced; tests green. | PP.0 |
 | **PP.4** | **Batched + quantized serving**: SigLIP/Qwen-VL/Whisper behind Triton/vLLM/NIM as `backend: http`; replace serial queues with a GPU-aware batched scheduler (fixes B6, B7). | N concurrent queries batch on one GPU; throughput scales with batch; parity vs in-proc within tolerance. | PP.1 |
 | **PP.5** | **Go control-plane**: API gateway (auth, multi-tenant routing, device mgmt, streaming) + agent host for ≤10 OpenClaw harnesses, fronting the Python ML pool over the role HTTP adapters. | Device API + 10 concurrent agent sessions + per-user auth run outside Python; existing web UI served through it. | PP.3, PP.4 |
