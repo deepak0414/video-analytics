@@ -14,7 +14,7 @@ from typing import Optional
 from uuid import UUID
 
 from va.contracts.video import IngestStatus, ResolvedVideo, SourceType, Video
-from va.storage.structured.schema import apply_schema
+from va.storage.structured.schema import connect
 
 _COLS = [
     "id", "source_type", "source_uri", "source_key", "local_path", "title",
@@ -30,10 +30,7 @@ def _now() -> str:
 class Catalog:
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.row_factory = sqlite3.Row
-        apply_schema(self._conn)
+        self._conn = connect(self.path)
 
     def close(self) -> None:
         self._conn.close()
@@ -91,6 +88,18 @@ class Catalog:
             "SELECT * FROM videos WHERE id = ?", (str(video_id),)
         ).fetchone()
         return self._from_row(r) if r else None
+
+    def get_many(self, video_ids: list[UUID]) -> dict[str, Video]:
+        """Batch-fetch videos by id in ONE query -> {id_str: Video}. Lets the read
+        path resolve many hits' source video without a SELECT per hit."""
+        ids = [str(v) for v in video_ids]
+        if not ids:
+            return {}
+        marks = ", ".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM videos WHERE id IN ({marks})", ids
+        ).fetchall()
+        return {r["id"]: self._from_row(r) for r in rows}
 
     def list(self, limit: Optional[int] = None) -> list[Video]:
         """All videos, newest first. (Consumed by the web layer's GET /api/videos.)"""

@@ -16,6 +16,7 @@ Today only `videos` (Role 0/catalog) and `segments` (Role 1) are written to.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 # --- Role 0: video catalog (the registry; universal join key videos.id) -------
 VIDEOS = """
@@ -143,9 +144,35 @@ ALL_TABLES = [
 
 
 def apply_schema(conn: sqlite3.Connection) -> None:
-    """Create every table + index (idempotent). Run by any store that opens the DB."""
+    """Create every table + index (idempotent). Run by any store that opens the DB.
+
+    Fast path: all tables are created together, so if `videos` already exists the
+    schema is present — skip the 14 DDL + commit. This runs on EVERY store open
+    (and a store opens the DB ~7× per ingest), so the check pays for itself.
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='videos'"
+    ).fetchone() is not None:
+        return
     for ddl in ALL_TABLES:
         conn.execute(ddl)
     for idx in INDEXES:
         conn.execute(idx)
     conn.commit()
+
+
+def connect(path: str | Path) -> sqlite3.Connection:
+    """Open the central correlation DB with the standard setup every store needs:
+    row access by name, **WAL + synchronous=NORMAL** (a reader and the ingest
+    writer no longer block each other, and the write path does far fewer fsyncs),
+    and the schema ensured once. Replaces the per-store `sqlite3.connect` + manual
+    `apply_schema` boilerplate.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    apply_schema(conn)
+    return conn

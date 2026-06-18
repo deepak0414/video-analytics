@@ -5,21 +5,17 @@ repeat question with the same scan target reuses the expensive VLM sweep.
 """
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import List, Tuple
 from uuid import UUID
 
-from va.storage.structured.schema import apply_schema
+from va.storage.structured.schema import connect
 
 
 class ObservationStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.row_factory = sqlite3.Row
-        apply_schema(self._conn)
+        self._conn = connect(self.path)
 
     def close(self) -> None:
         self._conn.close()
