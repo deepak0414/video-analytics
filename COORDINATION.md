@@ -209,3 +209,11 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   HF_TOKEN + the gated model accepted — unavailable in this env, so it's implemented but
   unvalidated; degrades gracefully (speaker stays NULL). Restart any running server to pick
   up the new field/flag.
+- **2026-06-17 (perf):** Added `performance-and-productization-plan.md` — a proposal doc (no code
+  changes yet) for taking the PoC to a DGX Spark appliance (multi-tenant, continuous camera ingest,
+  agent hosting). Relevant to BOTH agents since it touches storage, pipeline, web, and proposes new
+  Go/Rust components. Key proposed seams: vector engine swap behind the existing `VectorStore`
+  Protocol (LanceDB/Qdrant), SQLite→WAL/pooled→Postgres behind the store interface, model serving as
+  `backend: http` (Triton/vLLM/NIM), and two NEW out-of-Python components (Go camera-edge daemon, Go
+  API gateway/agent host) that call the existing role HTTP adapters — spine unchanged. Nothing
+  implemented; no contract changes. Flagged here so neither agent is surprised when these land.
