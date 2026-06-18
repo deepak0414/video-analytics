@@ -9,14 +9,13 @@ per sampled frame.
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 from uuid import UUID
 
 from va.contracts.ocr import OcrLine
-from va.storage.structured.schema import apply_schema
+from va.storage.structured.schema import connect
 
 
 @dataclass
@@ -40,10 +39,7 @@ def _collapsed(s: str) -> str:
 class OcrStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
-        self._conn.row_factory = sqlite3.Row
-        apply_schema(self._conn)
+        self._conn = connect(self.path)
 
     def close(self) -> None:
         self._conn.close()

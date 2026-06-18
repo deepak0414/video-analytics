@@ -57,3 +57,34 @@ def test_failed_status_records_error(tmp_path):
     cat.set_status(v.id, IngestStatus.failed, error="boom")
     got = cat.get(v.id)
     assert got.ingest_status is IngestStatus.failed and got.ingest_error == "boom"
+
+
+def test_connect_uses_wal_and_applies_schema(tmp_path):
+    from va.storage.structured.schema import connect
+
+    conn = connect(tmp_path / "c.db")
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert {"videos", "segments", "object_detections", "transcripts"} <= tables
+    finally:
+        conn.close()
+
+
+def test_get_many_batches_lookup(tmp_path):
+    from uuid import uuid4
+
+    cat = Catalog(tmp_path / "c.db")
+    a, _ = cat.get_or_create(_resolved("aaaaaaaaaaa"))
+    b, _ = cat.get_or_create(_resolved("bbbbbbbbbbb"))
+
+    got = cat.get_many([a.id, b.id])
+    assert set(got) == {str(a.id), str(b.id)}
+    assert got[str(a.id)].source_key == "aaaaaaaaaaa"
+
+    # unknown ids are simply absent; empty input -> empty dict (no query)
+    missing = uuid4()
+    got2 = cat.get_many([a.id, missing])
+    assert str(a.id) in got2 and str(missing) not in got2
+    assert cat.get_many([]) == {}

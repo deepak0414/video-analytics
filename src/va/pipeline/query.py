@@ -27,17 +27,16 @@ def query(text: str, workdir: str = ".va", k: int = 10) -> list[SearchHit]:
 
     catalog = Catalog(ws.catalog_db)
     try:
+        # Resolve every hit's source video in ONE query (distinct video_ids), not
+        # a SELECT per hit. Prefer the live catalog source_uri (in case it
+        # changed); fall back to the payload's stored uri.
+        vids = {h.payload["video_id"] for h in raw_hits if h.payload.get("video_id")}
+        videos = catalog.get_many([UUID(v) for v in vids])
         results: list[SearchHit] = []
         for h in raw_hits:
             p = h.payload
-            # Prefer the live catalog source_uri (in case it changed); fall back
-            # to the payload's stored uri.
-            source_uri = p.get("source_uri", "")
-            vid = p.get("video_id")
-            if vid:
-                v = catalog.get(UUID(vid))
-                if v is not None:
-                    source_uri = v.source_uri
+            v = videos.get(p.get("video_id"))
+            source_uri = v.source_uri if v is not None else p.get("source_uri", "")
             results.append(
                 SearchHit(
                     video_id=UUID(p["video_id"]),
