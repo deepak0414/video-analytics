@@ -18,6 +18,7 @@ from va.pipeline.diarize import assign_speakers
 from va.pipeline.text_index import index_text
 from va.media.frames import keyframes_for_spans, sample_frames
 from va.pipeline.paths import Workspace
+from va.runtime.trace import trace
 from va.registry import (
     get_action_recognizer,
     get_ingest_actions,
@@ -161,34 +162,6 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
             except Exception:
                 ocr_lines = 0
 
-            # Role 5 + 6: object detection, then track association (best-effort).
-            n_detections = 0
-            n_tracks = 0
-            try:
-                detector = get_object_detector()
-                classes = get_ingest_classes()
-                frames_dets: list[tuple[float, list]] = []
-                for batch in _batched(sample_frames(fetched.local_path, fps=fps), _BATCH):
-                    per_image = detector.detect([img for _, img in batch], classes)
-                    for (ts, _), dets in zip(batch, per_image):
-                        frames_dets.append((ts, dets))
-
-                # Role 6: associate detections into persistent tracks. The
-                # tracker also fills video_id/timestamp/track_id on detections.
-                result = get_object_tracker().track(video.id, frames_dets)
-
-                det_store = DetectionStore(ws.catalog_db)
-                det_store.replace_detections(video.id, result.detections)
-                det_store.close()
-                track_store = TrackStore(ws.catalog_db)
-                track_store.replace_tracks(video.id, result.tracks)
-                track_store.close()
-                n_detections = len(result.detections)
-                n_tracks = len(result.tracks)
-            except Exception:
-                n_detections = 0
-                n_tracks = 0
-
             # Role 7: action recognition per Role-1 segment (optional, best-effort).
             n_actions = 0
             try:
@@ -208,13 +181,31 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
             except Exception:
                 n_actions = 0
 
+            # Decode the file ONCE at the target fps and fan the single frame
+            # stream out to BOTH Role 2 (visual embedding, critical) and Role 5
+            # (object detection, best-effort) — previously two separate full decode
+            # passes over the identical frames. Streaming per batch keeps memory to
+            # one batch, not the whole video.
             embedder = get_visual_embedder()
             # per-video vector shard (layout v2): removal = delete the video dir
             store = NumpyFlatVectorStore(video_dir / "vectors")
+
+            # Role 5 detector is optional; if it won't even load we still embed.
+            detector = None
+            classes = None
+            try:
+                detector = get_object_detector()
+                classes = get_ingest_classes()
+            except Exception:
+                detector = None
+            det_ok = detector is not None
+            frames_dets: list[tuple[float, list]] = []
+
             n = 0
             for batch in _batched(sample_frames(fetched.local_path, fps=fps), _BATCH):
                 timestamps = [t for t, _ in batch]
                 images = [img for _, img in batch]
+                # Role 2: visual embedding (critical — a failure aborts the ingest)
                 vecs = embedder.embed_image(images)
                 payloads = [
                     {"video_id": str(video.id), "timestamp": ts,
@@ -223,7 +214,39 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                 ]
                 store.add(vecs, payloads)
                 n += len(batch)
+                # Role 5: object detection (best-effort — guarded so it can never
+                # break the critical embedding above)
+                if det_ok:
+                    try:
+                        per_image = detector.detect(images, classes)
+                        for ts, dets in zip(timestamps, per_image):
+                            frames_dets.append((ts, dets))
+                    except Exception:
+                        det_ok = False
+                        frames_dets = []
             store.persist()
+            trace("ingest", "decode",
+                  f"{n} frames @ {fps}fps -> embedding + detection (single pass)",
+                  frames=n, fps=fps, detection=det_ok)
+
+            # Role 6: associate detections into persistent tracks, then store both
+            # (best-effort). The tracker fills video_id/timestamp/track_id.
+            n_detections = 0
+            n_tracks = 0
+            if det_ok and frames_dets:
+                try:
+                    result = get_object_tracker().track(video.id, frames_dets)
+                    det_store = DetectionStore(ws.catalog_db)
+                    det_store.replace_detections(video.id, result.detections)
+                    det_store.close()
+                    track_store = TrackStore(ws.catalog_db)
+                    track_store.replace_tracks(video.id, result.tracks)
+                    track_store.close()
+                    n_detections = len(result.detections)
+                    n_tracks = len(result.tracks)
+                except Exception:
+                    n_detections = 0
+                    n_tracks = 0
 
             # Retrieval Layer (SR.2): semantic text index over the caption /
             # transcript / OCR / action text (best-effort — needs those rows
