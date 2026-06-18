@@ -11,12 +11,37 @@ production engine (Milvus) replaces this with one collection + a video_id field.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Tuple
 
 import numpy as np
 
 from .base import VectorHit
 from .numpy_flat import NumpyFlatVectorStore
+
+# Process-level cache of loaded shards. `query()` calls `count()` then `search()`,
+# and each rebuilds every shard from disk (np.load + json parse) — so the whole
+# corpus is re-read TWICE per query. Cache the loaded store per shard file, keyed
+# by its mtime (ns): a re-ingest rewrites the .npz -> new mtime -> automatic
+# reload; `va remove` deletes the dir -> the glob no longer yields it. Held for the
+# process lifetime, which is the win for the long-lived web server (the CLI, one
+# query per process, still benefits: count()+search() now load once, not twice).
+_SHARD_CACHE: Dict[str, Tuple[int, NumpyFlatVectorStore]] = {}
+
+
+def _load_shard(npz: Path) -> NumpyFlatVectorStore:
+    key = str(npz)
+    mtime = npz.stat().st_mtime_ns
+    cached = _SHARD_CACHE.get(key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    store = NumpyFlatVectorStore(npz.with_suffix(""))
+    _SHARD_CACHE[key] = (mtime, store)
+    return store
+
+
+def clear_shard_cache() -> None:
+    """Drop the in-process shard cache (tests / explicit invalidation)."""
+    _SHARD_CACHE.clear()
 
 
 class ShardedVectorStore:
@@ -30,7 +55,7 @@ class ShardedVectorStore:
         if not self.videos_root.is_dir():
             return []
         return [
-            NumpyFlatVectorStore(npz.with_suffix(""))
+            _load_shard(npz)
             for npz in sorted(self.videos_root.glob(f"*/{self.shard_name}"))
         ]
 

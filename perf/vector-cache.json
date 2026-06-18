@@ -1,0 +1,238 @@
+{
+  "runs": 5,
+  "fps": 1.0,
+  "videos": [
+    {
+      "video": ".va-shots/videos/GXPRSFL0UUA-red-ferrari-458-italia-racing/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 12.804,
+      "ingest_s_std": 0.465,
+      "ingest_s_min": 12.211,
+      "ingest_s_max": 13.511,
+      "ingest_s_runs": [
+        12.211,
+        12.399,
+        12.837,
+        13.062,
+        13.511
+      ],
+      "query_p50_ms_mean": 2.32,
+      "vectors": 188,
+      "ingest_counts": {
+        "frames_indexed": 188,
+        "segments": 8,
+        "captioned_segments": 8,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    },
+    {
+      "video": ".va-shots/videos/eiLeBJUf1iE-27-dresses-2-5-movie-clip-all-27/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 11.063,
+      "ingest_s_std": 0.113,
+      "ingest_s_min": 10.883,
+      "ingest_s_max": 11.235,
+      "ingest_s_runs": [
+        11.235,
+        10.883,
+        11.071,
+        11.035,
+        11.093
+      ],
+      "query_p50_ms_mean": 2.33,
+      "vectors": 159,
+      "ingest_counts": {
+        "frames_indexed": 159,
+        "segments": 6,
+        "captioned_segments": 6,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 3
+      }
+    },
+    {
+      "video": ".va-cameras/videos/O4Y4K_eo8cI-sparrow-hills-wildlife-came-for/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 27.233,
+      "ingest_s_std": 0.26,
+      "ingest_s_min": 26.829,
+      "ingest_s_max": 27.588,
+      "ingest_s_runs": [
+        26.829,
+        27.363,
+        27.075,
+        27.309,
+        27.588
+      ],
+      "query_p50_ms_mean": 2.33,
+      "vectors": 545,
+      "ingest_counts": {
+        "frames_indexed": 545,
+        "segments": 1,
+        "captioned_segments": 1,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    },
+    {
+      "video": ".va-cameras/videos/ccRuxeSvL-o-fox-videos-garden-wildlife-eufyc/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 34.026,
+      "ingest_s_std": 0.201,
+      "ingest_s_min": 33.857,
+      "ingest_s_max": 34.399,
+      "ingest_s_runs": [
+        34.399,
+        33.941,
+        33.869,
+        33.857,
+        34.066
+      ],
+      "query_p50_ms_mean": 2.35,
+      "vectors": 267,
+      "ingest_counts": {
+        "frames_indexed": 267,
+        "segments": 21,
+        "captioned_segments": 21,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 2
+      }
+    },
+    {
+      "video": ".va-shots/videos/8970ef1c19239224-birdfeeder-0413-1405-mp4/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 33.235,
+      "ingest_s_std": 0.111,
+      "ingest_s_min": 33.053,
+      "ingest_s_max": 33.377,
+      "ingest_s_runs": [
+        33.377,
+        33.053,
+        33.318,
+        33.223,
+        33.206
+      ],
+      "query_p50_ms_mean": 2.35,
+      "vectors": 592,
+      "ingest_counts": {
+        "frames_indexed": 592,
+        "segments": 3,
+        "captioned_segments": 3,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 2
+      }
+    },
+    {
+      "video": ".va-shots/videos/7N68NjL9cMA-kavanaugh-hegseth-patel-bar-cold/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 17.847,
+      "ingest_s_std": 0.194,
+      "ingest_s_min": 17.591,
+      "ingest_s_max": 18.144,
+      "ingest_s_runs": [
+        17.788,
+        17.731,
+        17.982,
+        17.591,
+        18.144
+      ],
+      "query_p50_ms_mean": 2.32,
+      "vectors": 374,
+      "ingest_counts": {
+        "frames_indexed": 374,
+        "segments": 2,
+        "captioned_segments": 2,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    },
+    {
+      "video": ".va-shots/videos/GV1fKl2F-9k-brian-meets-dom-toretto-for-the/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 25.914,
+      "ingest_s_std": 0.053,
+      "ingest_s_min": 25.848,
+      "ingest_s_max": 25.976,
+      "ingest_s_runs": [
+        25.87,
+        25.976,
+        25.903,
+        25.848,
+        25.975
+      ],
+      "query_p50_ms_mean": 2.33,
+      "vectors": 312,
+      "ingest_counts": {
+        "frames_indexed": 312,
+        "segments": 20,
+        "captioned_segments": 20,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 2
+      }
+    },
+    {
+      "video": ".va-shots/videos/xDerjsxFkb4-never-buy-a-cobra-as-a-pet/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 4.39,
+      "ingest_s_std": 0.117,
+      "ingest_s_min": 4.187,
+      "ingest_s_max": 4.546,
+      "ingest_s_runs": [
+        4.423,
+        4.546,
+        4.371,
+        4.425,
+        4.187
+      ],
+      "query_p50_ms_mean": 2.36,
+      "vectors": 60,
+      "ingest_counts": {
+        "frames_indexed": 60,
+        "segments": 4,
+        "captioned_segments": 4,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    }
+  ]
+}
