@@ -67,7 +67,17 @@ extracts audio. ~6 full passes over the file.
 for idx, frame in enumerate(reader):        # frames.py:78 — decodes ALL 30 fps
     if idx % stride == 0:                    # …then keeps 1 fps and discards 29/30
 ```
-→ Drop frames *before* decode (ffmpeg `-vf fps=1`, or seek). ~10–30× on the decode portion.
+→ ~~Drop frames *before* decode (ffmpeg `-vf fps=1`, or seek). ~10–30× on the decode portion.~~
+**Tested & rejected (2026-06-18).** The "before decode" premise is false: inter-frame codecs
+(P/B-frames) can't skip-decode non-keyframes, and ffmpeg's `fps` filter runs *after* the decoder —
+it drops at the output stage, so the decode work is unchanged. The only real saving is the
+pipe-transfer + numpy conversion of the dropped frames, measured **content/codec-specific and
+unreliable: 0.99×–1.60×, marginal even on real static-camera footage** (birdfeeder 1.60× did NOT
+reproduce — EufyCam garden cam 1.09×, Sparrow Hills 0.99×) and an outright regression on motion
+content (toretto 0.88×). A genuine decode speedup needs a *different* mechanism: **NVDEC hardware
+decode** (`-hwaccel cuda`; already planned for the camera edge, §4-A / PP.6) or **keyframe-only
+sampling** (~1/GOP the decode, but irregular keyframe-aligned timestamps — a sampling-semantics
+change). The shipped ingest win is **B1 (decode-once) alone**.
 
 **B3 — Vector search reloads the whole corpus from disk, twice, per query.** `query()` calls
 `store.count()` then `store.search()` (`query.py:21-23`); each calls `ShardedVectorStore._shards()`
@@ -184,7 +194,7 @@ Python data-plane and serving layer they depend on exist.
 | Step | Deliverable | Done when | Depends on |
 |---|---|---|---|
 | **PP.0** | **Benchmark + profile harness**: scripted ingest-time / query-latency / recall@k numbers on a fixed real workdir (extends the golden-query harness). Per the repo rule *determinism ≠ correctness* — every later step is judged against these baselines, and ANN recall is validated vs. the brute-force ground truth. | A `va bench` (or test) prints ingest s/min, query p50/p95, and corpus size; baseline captured. | — |
-| **PP.1** | **Decode-once fan-out** + ffmpeg-side fps sampling in `media/frames.py`: one decode pass yields the frame stream every frame-role consumes (fixes B1, B2). | Ingest decodes the file once; wall-clock drops measurably vs PP.0; offline tests still green. | PP.0 |
+| **PP.1** | **Decode-once fan-out** in `ingest.py`: one decode pass feeds both visual embedding and object detection (was two passes over identical frames) — fixes B1. ✅ shipped 2026-06-18: 1.32× total ingest, every video 1.18–1.53× faster, counts identical. *(ffmpeg-side fps sampling for B2 was tested & rejected — see the B2 note.)* | Ingest decodes the file once; wall-clock drops measurably vs PP.0; offline tests still green. | PP.0 |
 | **PP.2** | **Vector engine swap** behind `VectorStore`: persistent/mmap index (fixes B3) → LanceDB/Qdrant/usearch with `video_id`/`user_id`/`camera_id` + time filters (fixes B4). | Query no longer reloads per call; recall@k vs brute-force ≥ target on PP.0 set; remove/reingest still work. | PP.0 |
 | **PP.3** | **SQLite hardening**: WAL + `synchronous=NORMAL`, pooled/reused connection, schema applied once, batched hit-lookups (fixes B5); add tenancy columns. (Postgres later, same interface.) | Concurrent reader + ingest writer don't block; `user_id` scoping enforced; tests green. | PP.0 |
 | **PP.4** | **Batched + quantized serving**: SigLIP/Qwen-VL/Whisper behind Triton/vLLM/NIM as `backend: http`; replace serial queues with a GPU-aware batched scheduler (fixes B6, B7). | N concurrent queries batch on one GPU; throughput scales with batch; parity vs in-proc within tolerance. | PP.1 |
