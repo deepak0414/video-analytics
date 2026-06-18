@@ -254,6 +254,31 @@ def _cmd_trace(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bench(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    from va.pipeline.bench import bench_all, bench_video, find_all_media, render_bench_all
+
+    qs = args.queries.split("|") if args.queries else None
+    if args.video:                                  # one video, averaged over --runs
+        result = {"runs": args.runs, "fps": args.fps, "videos": [
+            bench_video(args.video, runs=args.runs, workdir=args.bench_workdir,
+                        fps=args.fps, k=args.k, iters=args.iters, queries=qs)]}
+    else:                                           # all videos under workdirs
+        vids = find_all_media()
+        if not vids:
+            print("no media.* found under any workdir; pass --video <path>", file=sys.stderr)
+            return 1
+        result = bench_all(vids, runs=args.runs, workdir=args.bench_workdir,
+                           fps=args.fps, k=args.k, iters=args.iters, queries=qs)
+    print(render_bench_all(result))
+    if args.save:
+        Path(args.save).write_text(json.dumps(result, indent=2))
+        print(f"  saved -> {args.save}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="va", description="Ctrl-F for Video")
     p.add_argument("--workdir", default=".va", help="state dir (db, vectors, cache)")
@@ -333,6 +358,21 @@ def build_parser() -> argparse.ArgumentParser:
                      help="prune: remove files older than N days")
     ptr.add_argument("--all", action="store_true", help="prune: remove all traces")
     ptr.set_defaults(func=_cmd_trace)
+
+    pbn = sub.add_parser("bench",
+                         help="benchmark ingest + query latency in an isolated workdir")
+    pbn.add_argument("--video", default=None,
+                     help="local media file to ingest (default: auto-find a media.* under a workdir)")
+    pbn.add_argument("--bench-workdir", dest="bench_workdir", default=".va-bench",
+                     help="ISOLATED workdir, cleared each run (default: .va-bench)")
+    pbn.add_argument("--runs", type=int, default=5,
+                     help="clean ingest runs per video, averaged (default: 5)")
+    pbn.add_argument("--fps", type=float, default=1.0)
+    pbn.add_argument("-k", type=int, default=10, help="top-k per query")
+    pbn.add_argument("--iters", type=int, default=10, help="query repetitions for p50/p95")
+    pbn.add_argument("--queries", default=None, help="pipe-separated query list")
+    pbn.add_argument("--save", default=None, help="write the baseline JSON to this path")
+    pbn.set_defaults(func=_cmd_bench)
 
     prm = sub.add_parser("remove", help="delete a video everywhere (rows + artifacts)")
     prm.add_argument("video", help="video UUID, source_key, URL, or path")

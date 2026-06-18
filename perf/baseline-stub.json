@@ -1,0 +1,180 @@
+{
+  "runs": 5,
+  "fps": 1.0,
+  "videos": [
+    {
+      "video": ".va-shots/videos/GXPRSFL0UUA-red-ferrari-458-italia-racing/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 14.774,
+      "ingest_s_std": 0.17,
+      "ingest_s_min": 14.462,
+      "ingest_s_max": 14.981,
+      "ingest_s_runs": [
+        14.462,
+        14.812,
+        14.817,
+        14.981,
+        14.799
+      ],
+      "query_p50_ms_mean": 2.79,
+      "vectors": 188,
+      "ingest_counts": {
+        "frames_indexed": 188,
+        "segments": 8,
+        "captioned_segments": 8,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    },
+    {
+      "video": ".va-shots/videos/eiLeBJUf1iE-27-dresses-2-5-movie-clip-all-27/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 12.808,
+      "ingest_s_std": 0.081,
+      "ingest_s_min": 12.67,
+      "ingest_s_max": 12.878,
+      "ingest_s_runs": [
+        12.878,
+        12.761,
+        12.871,
+        12.67,
+        12.858
+      ],
+      "query_p50_ms_mean": 2.79,
+      "vectors": 159,
+      "ingest_counts": {
+        "frames_indexed": 159,
+        "segments": 6,
+        "captioned_segments": 6,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 3
+      }
+    },
+    {
+      "video": ".va-shots/videos/8970ef1c19239224-birdfeeder-0413-1405-mp4/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 41.431,
+      "ingest_s_std": 0.518,
+      "ingest_s_min": 40.844,
+      "ingest_s_max": 42.218,
+      "ingest_s_runs": [
+        41.152,
+        41.086,
+        40.844,
+        41.856,
+        42.218
+      ],
+      "query_p50_ms_mean": 3.22,
+      "vectors": 592,
+      "ingest_counts": {
+        "frames_indexed": 592,
+        "segments": 3,
+        "captioned_segments": 3,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 2
+      }
+    },
+    {
+      "video": ".va-shots/videos/7N68NjL9cMA-kavanaugh-hegseth-patel-bar-cold/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 23.695,
+      "ingest_s_std": 0.054,
+      "ingest_s_min": 23.613,
+      "ingest_s_max": 23.762,
+      "ingest_s_runs": [
+        23.697,
+        23.613,
+        23.663,
+        23.741,
+        23.762
+      ],
+      "query_p50_ms_mean": 3.0,
+      "vectors": 374,
+      "ingest_counts": {
+        "frames_indexed": 374,
+        "segments": 2,
+        "captioned_segments": 2,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    },
+    {
+      "video": ".va-shots/videos/GV1fKl2F-9k-brian-meets-dom-toretto-for-the/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 30.047,
+      "ingest_s_std": 0.177,
+      "ingest_s_min": 29.858,
+      "ingest_s_max": 30.34,
+      "ingest_s_runs": [
+        30.157,
+        30.34,
+        29.95,
+        29.858,
+        29.93
+      ],
+      "query_p50_ms_mean": 2.86,
+      "vectors": 312,
+      "ingest_counts": {
+        "frames_indexed": 312,
+        "segments": 20,
+        "captioned_segments": 20,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 2
+      }
+    },
+    {
+      "video": ".va-shots/videos/xDerjsxFkb4-never-buy-a-cobra-as-a-pet/media.mp4",
+      "runs": 5,
+      "ingest_s_mean": 5.186,
+      "ingest_s_std": 0.09,
+      "ingest_s_min": 5.042,
+      "ingest_s_max": 5.302,
+      "ingest_s_runs": [
+        5.227,
+        5.229,
+        5.042,
+        5.302,
+        5.132
+      ],
+      "query_p50_ms_mean": 2.61,
+      "vectors": 60,
+      "ingest_counts": {
+        "frames_indexed": 60,
+        "segments": 4,
+        "captioned_segments": 4,
+        "transcript_lines": 0,
+        "speakers": 0,
+        "detections": 0,
+        "tracks": 0,
+        "ocr_lines": 0,
+        "action_events": 0,
+        "text_vectors": 1
+      }
+    }
+  ]
+}
