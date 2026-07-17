@@ -7,6 +7,7 @@ source moment.
 from __future__ import annotations
 
 import shutil
+import traceback
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -18,7 +19,7 @@ from va.pipeline.diarize import assign_speakers
 from va.pipeline.text_index import index_text
 from va.media.frames import keyframes_for_spans, sample_frames
 from va.pipeline.paths import Workspace
-from va.runtime.trace import trace
+from va.runtime.trace import trace, traced_run
 from va.registry import (
     get_action_recognizer,
     get_ingest_actions,
@@ -67,8 +68,24 @@ def _batched(it: Iterable, n: int) -> Iterator[list]:
         yield batch
 
 
+def _trace_fail(role: str, exc: Exception) -> None:
+    """Surface a swallowed best-effort role failure in the trace (a warn, not an
+    abort — ingest continues). No-op when tracing is off. Before TR.2 these
+    `except` blocks vanished silently; now a degraded ingest is visible."""
+    trace(role, "failed", f"{type(exc).__name__}: {exc}", level="warn",
+          traceback=traceback.format_exc())
+
+
 def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
+    """Ingest a source. The body runs inside a VA_TRACE-gated trace run (no-op when
+    off); each best-effort role logs success or a visible warn on failure, and the
+    decode pass emits its event."""
     ws = Workspace(workdir)
+    with traced_run("ingest", workdir):
+        return _ingest_impl(uri, ws, fps)
+
+
+def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
     catalog = Catalog(ws.catalog_db)
     try:
         source = resolve_source(uri)
@@ -76,6 +93,7 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
         video, created = catalog.get_or_create(resolved)
 
         if video.ingest_status is IngestStatus.done:
+            trace("ingest", "deduped", f"{resolved.source_key} already done")
             return IngestResult(video=video, deduped=True, frames_indexed=0)
 
         try:
@@ -100,6 +118,9 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                 catalog.set_paths(video.id, new_path, source_uri=new_uri)
                 local_path = new_path
             fetched = fetched.model_copy(update={"local_path": local_path})
+            trace("source", "fetched", fetched.metadata.title or resolved.source_key,
+                  resolution=fetched.metadata.resolution,
+                  duration_s=fetched.metadata.duration_seconds)
 
             catalog.set_status(
                 video.id, IngestStatus.processing,
@@ -114,6 +135,7 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
             ]
             seg_store = SegmentStore(ws.catalog_db)
             seg_store.replace_segments(video.id, segments)
+            trace("scene", "segments", f"{len(segments)} segments")
 
             # Role 4: caption each segment from a keyframe (best-effort; the VLM
             # is heavy, and a failure must not abort the whole ingest).
@@ -124,8 +146,10 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                 for seg, kf in zip(segments, keyframes):
                     seg_store.set_caption(seg.id, captioner.caption(kf))
                     captioned += 1
-            except Exception:
+                trace("caption", "done", f"{captioned}/{len(segments)} segments captioned")
+            except Exception as e:
                 captioned = 0
+                _trace_fail("caption", e)
             seg_store.close()
 
             # Role 8: speech-to-text -> transcripts (recommended, best-effort:
@@ -142,14 +166,18 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                         if turns:
                             lines = assign_speakers(lines, turns)
                             n_speakers = len({ln.speaker for ln in lines if ln.speaker})
-                    except Exception:
+                    except Exception as e:
                         n_speakers = 0
+                        _trace_fail("diarize", e)
                 tx_store = TranscriptStore(ws.catalog_db)
                 tx_store.replace_transcripts(video.id, lines)
                 tx_store.close()
                 transcript_lines = len(lines)
-            except Exception:
+                trace("transcript", "done",
+                      f"{transcript_lines} lines, {n_speakers} speakers")
+            except Exception as e:
                 transcript_lines = 0
+                _trace_fail("transcript", e)
 
             # Role 10: on-screen text -> ocr_results (optional, best-effort).
             ocr_lines = 0
@@ -159,8 +187,10 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                 ocr_store.replace_lines(video.id, lines)
                 ocr_store.close()
                 ocr_lines = len(lines)
-            except Exception:
+                trace("ocr", "done", f"{ocr_lines} lines")
+            except Exception as e:
                 ocr_lines = 0
+                _trace_fail("ocr", e)
 
             # Role 7: action recognition per Role-1 segment (optional, best-effort).
             n_actions = 0
@@ -178,8 +208,10 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                 act_store.replace_events(video.id, events)
                 act_store.close()
                 n_actions = len(events)
-            except Exception:
+                trace("action", "done", f"{n_actions} events")
+            except Exception as exc:
                 n_actions = 0
+                _trace_fail("action", exc)
 
             # Decode the file ONCE at the target fps and fan the single frame
             # stream out to BOTH Role 2 (visual embedding, critical) and Role 5
@@ -196,8 +228,9 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
             try:
                 detector = get_object_detector()
                 classes = get_ingest_classes()
-            except Exception:
+            except Exception as e:
                 detector = None
+                _trace_fail("detect", e)
             det_ok = detector is not None
             frames_dets: list[tuple[float, list]] = []
 
@@ -221,9 +254,10 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                         per_image = detector.detect(images, classes)
                         for ts, dets in zip(timestamps, per_image):
                             frames_dets.append((ts, dets))
-                    except Exception:
+                    except Exception as e:
                         det_ok = False
                         frames_dets = []
+                        _trace_fail("detect", e)
             store.persist()
             trace("ingest", "decode",
                   f"{n} frames @ {fps}fps -> embedding + detection (single pass)",
@@ -244,9 +278,11 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
                     track_store.close()
                     n_detections = len(result.detections)
                     n_tracks = len(result.tracks)
-                except Exception:
+                    trace("track", "done", f"{n_tracks} tracks, {n_detections} detections")
+                except Exception as e:
                     n_detections = 0
                     n_tracks = 0
+                    _trace_fail("track", e)
 
             # Retrieval Layer (SR.2): semantic text index over the caption /
             # transcript / OCR / action text (best-effort — needs those rows
@@ -254,10 +290,16 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
             n_text = 0
             try:
                 n_text = index_text(video.id, video_dir, ws.catalog_db)
-            except Exception:
+                trace("text_index", "done", f"{n_text} text vectors")
+            except Exception as e:
                 n_text = 0
+                _trace_fail("text_index", e)
 
             catalog.set_status(video.id, IngestStatus.done, mark_processed=True)
+            trace("ingest", "done",
+                  f"{n} frames, {len(segments)} segments, {captioned} caps, "
+                  f"{transcript_lines} tx, {n_detections} det, {n_tracks} tracks, "
+                  f"{ocr_lines} ocr, {n_actions} actions, {n_text} text-vecs")
             return IngestResult(
                 video=catalog.get(video.id), deduped=False,
                 frames_indexed=n, segments=len(segments),
