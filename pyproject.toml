@@ -33,7 +33,10 @@ whisper = ["openai-whisper"]
 # torchaudio 2.11 (pinned by torch 2.12+cu130) removed entirely; 4.x dropped that
 # dependency. Needs a HuggingFace token + the gated pyannote/speaker-diarization
 # model accepted (huggingface-cli login, or set HF_TOKEN).
-diarize = ["pyannote.audio>=4"]
+# threadpoolctl: scoped BLAS thread cap during pipeline load — works around an
+# OpenBLAS lost-wakeup deadlock under thread oversubscription (see the WORKAROUND
+# comment in adapters/speaker_diarizer/pyannote_inproc.py).
+diarize = ["pyannote.audio>=4", "threadpoolctl"]
 # Real Role-4 VLM captioner (Qwen2.5-VL). Default is the color stub.
 qwenvl = ["transformers", "accelerate", "qwen-vl-utils", "torchvision"]
 # Real Role-5 open-vocabulary object detector (YOLO-World). Default is the color stub.
