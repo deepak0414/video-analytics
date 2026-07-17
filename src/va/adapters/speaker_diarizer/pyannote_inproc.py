@@ -53,6 +53,7 @@ class PyannoteDiarizer:
 
     def _build(self):
         from pyannote.audio import Pipeline  # deferred heavy import
+        from threadpoolctl import threadpool_limits
         import torch
 
         # Pass an explicit token if we have one (kwarg renamed across versions —
@@ -62,7 +63,37 @@ class PyannoteDiarizer:
         pipe = err = None
         for kw in attempts:
             try:
-                pipe = Pipeline.from_pretrained(self.model, **kw)
+                # WORKAROUND (2026-06): scope BLAS to 1 thread around the model
+                # load ONLY. from_pretrained's PLDA/VBx setup does small-matrix
+                # np.linalg.inv + scipy eigh, and on this box that intermittently
+                # deadlocked forever inside OpenBLAS (futex wait, caught via
+                # faulthandler: pyannote/audio/utils/vbx.py vbx_setup).
+                #
+                # Root cause: thread-pool oversubscription exposing an OpenBLAS
+                # lost-wakeup race. threadpoolctl.threadpool_info() showed FOUR
+                # all-cores-sized pools in this process on a 20-core box (numpy's
+                # OpenBLAS + scipy's OpenBLAS + torch's libgomp + a vendored
+                # libgomp ≈ 80 threads) — heavy preemption stretches the pool's
+                # sleep/wake handshake window until a wakeup is lost and the
+                # caller sleeps forever. Known bug class: numpy#30092,
+                # OpenBLAS#1844, pyannote-audio discussion#1802.
+                #
+                # Why this scope: limits=1 makes OpenBLAS run the (tiny, ~µs)
+                # load-time math inline on the calling thread — no worker
+                # handshake, no race — and is restored on block exit. Nothing
+                # else (torch, GPU stages, the diarization inference itself) is
+                # throttled. NOT a global OPENBLAS_NUM_THREADS=1: that would
+                # serialize BLAS pipeline-wide.
+                #
+                # REVISIT / revert triggers: (a) an upstream OpenBLAS/numpy fix
+                # for the lost-wakeup ships, (b) we build a process-wide thread
+                # -budget primitive (see parallelization-analysis.md) that
+                # coordinates pool sizes properly, or (c) the duplicate BLAS/
+                # OpenMP runtimes get deduped from the env. If a hang ever shows
+                # up in diarize() inference (same futex signature), widen this
+                # same guard around self._pipeline(...) rather than going global.
+                with threadpool_limits(limits=1, user_api="blas"):
+                    pipe = Pipeline.from_pretrained(self.model, **kw)
             except TypeError as e:           # this version doesn't take that kwarg
                 err = e
                 continue
