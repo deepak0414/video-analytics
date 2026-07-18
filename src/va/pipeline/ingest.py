@@ -19,7 +19,7 @@ from va.pipeline.diarize import assign_speakers
 from va.pipeline.text_index import index_text
 from va.media.frames import keyframes_for_spans, sample_frames
 from va.pipeline.paths import Workspace
-from va.runtime.trace import trace, traced_run
+from va.runtime.trace import current_run_id, trace, traced_run
 from va.registry import (
     get_action_recognizer,
     get_ingest_actions,
@@ -295,7 +295,11 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 n_text = 0
                 _trace_fail("text_index", e)
 
-            catalog.set_status(video.id, IngestStatus.done, mark_processed=True)
+            # Stamp the video with this ingest's trace run_id (None when tracing is
+            # off) so a later query/ask trace can point back at the ingest that
+            # produced its data — and any degradations that ingest recorded.
+            catalog.set_status(video.id, IngestStatus.done, mark_processed=True,
+                               ingest_run_id=current_run_id())
             trace("ingest", "done",
                   f"{n} frames, {len(segments)} segments, {captioned} caps, "
                   f"{transcript_lines} tx, {n_detections} det, {n_tracks} tracks, "

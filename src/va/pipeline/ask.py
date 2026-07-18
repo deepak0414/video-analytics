@@ -22,6 +22,7 @@ from va.contracts.query_plan import Answer, QueryPlan
 from va.contracts.video import SourceType, Video
 from va.pipeline.retrieval import retrieve
 from va.pipeline.paths import Workspace
+from va.pipeline.trace_links import trace_ingest_links
 from va.registry import get_reasoner
 from va.runtime.trace import trace, traced_run
 from va.roles.reasoner import Keyframe
@@ -206,6 +207,7 @@ def ask(
                   scan_target=(plan.params or {}).get("scan_target"))
 
         evidence = retrieve(plan, workdir=workdir, k=k)          # SR.4: fused, ranked
+        trace_ingest_links(workdir, {it.video_id for it in evidence.items})
 
         if plan.needs_deep_scan:                                 # Tier 5b
             _deep_scan_into(evidence, plan, workdir, reasoner)

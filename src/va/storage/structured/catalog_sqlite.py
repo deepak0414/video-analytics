@@ -20,6 +20,7 @@ _COLS = [
     "id", "source_type", "source_uri", "source_key", "local_path", "title",
     "duration_seconds", "fps", "resolution", "has_audio", "ingest_status",
     "ingest_error", "created_at", "fetched_at", "processed_at",
+    "last_ingest_run_id",
 ]
 
 
@@ -54,6 +55,7 @@ class Catalog:
             "created_at": v.created_at.isoformat(),
             "fetched_at": v.fetched_at.isoformat() if v.fetched_at else None,
             "processed_at": v.processed_at.isoformat() if v.processed_at else None,
+            "last_ingest_run_id": v.last_ingest_run_id,
         }
 
     @staticmethod
@@ -74,6 +76,7 @@ class Catalog:
             created_at=datetime.fromisoformat(r["created_at"]),
             fetched_at=datetime.fromisoformat(r["fetched_at"]) if r["fetched_at"] else None,
             processed_at=datetime.fromisoformat(r["processed_at"]) if r["processed_at"] else None,
+            last_ingest_run_id=r["last_ingest_run_id"],
         )
 
     # --- ops ---------------------------------------------------------------
@@ -144,6 +147,7 @@ class Catalog:
         local_path: Optional[str] = None,
         mark_fetched: bool = False,
         mark_processed: bool = False,
+        ingest_run_id: Optional[str] = None,
     ) -> None:
         sets = ["ingest_status = ?"]
         vals: list = [status.value]
@@ -155,6 +159,8 @@ class Catalog:
             sets.append("fetched_at = ?"); vals.append(_now())
         if mark_processed:
             sets.append("processed_at = ?"); vals.append(_now())
+        if ingest_run_id is not None:
+            sets.append("last_ingest_run_id = ?"); vals.append(ingest_run_id)
         vals.append(str(video_id))
         self._conn.execute(f"UPDATE videos SET {', '.join(sets)} WHERE id = ?", vals)
         self._conn.commit()

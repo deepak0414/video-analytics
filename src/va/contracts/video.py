@@ -66,6 +66,9 @@ class Video(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     fetched_at: Optional[datetime] = None
     processed_at: Optional[datetime] = None
+    # Trace run_id of the ingest that last processed this video (ingest<->query
+    # trace link). None when it was ingested with tracing off.
+    last_ingest_run_id: Optional[str] = None
 
     @classmethod
     def from_resolved(cls, r: ResolvedVideo) -> "Video":
