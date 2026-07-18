@@ -136,7 +136,18 @@ ingest↔query pointer, which degrades gracefully if ingest tracing isn't wired 
 | **TR.1** | Tracer core: `runtime/trace.py` (`Tracer`, `traced_run(kind, workdir)` ctx-mgr gated by `VA_TRACE`, `trace()` no-op-when-inactive, readable `.trace` writer) + `load_events`/`render_trace` + `va trace` CLI (list / show / `--last` / prune). | Offline tests pass: a `VA_TRACE=1` synth run writes a readable trace; default-off writes nothing; prune works; full suite green (no new files when off). |
 | **TR.2** | Ingest instrumentation — stage events + `model_load` events + **exception capture in the 6 best-effort blocks**. | A forced stub-role failure appears as an `error` event with traceback; counts/timings present; **behavior unchanged** (still best-effort, still completes). |
 | **TR.3** | Query/ask instrumentation — plan (+ rule-floor merge), retrieve tiers (gather/verify/fuse/gate), keyframes, **`reasoner_input` verbatim + `reasoner_output` raw**, answer, deep-scan, self-escalation. | A trace reconstructs an ask end-to-end (evidence in → prompt → response → answer); deep-scan and self-escalation branches are visible. |
-| **TR.4** | Polish — ingest↔query linking (catalog records each video's last ingest `run_id` so a query trace points at the ingests it used) + prune ergonomics. *(Web viewer handed to the web milestone.)* | A query trace names the ingest runs of the videos it touched; prune retention documented. |
+| **TR.4** ✅ | Polish — ingest↔query linking (catalog records each video's last ingest `run_id` so a query trace points at the ingests it used) + prune ergonomics. *(Web viewer handed to the web milestone.)* | A query trace names the ingest runs of the videos it touched; prune retention documented. |
+
+**TR.4 implemented (2026-07-17):** `videos.last_ingest_run_id` (nullable) stores the ingest run
+that last processed each video — stamped in `set_status(done, ingest_run_id=current_run_id())`,
+so it is `NULL` for videos ingested with tracing off. Existing DBs get the column via an additive
+`ALTER` in `apply_schema` (`_ensure_videos_columns`). On the read path a shared helper
+(`pipeline/trace_links.trace_ingest_links`) emits one `link/ingest_runs` event mapping each touched
+video (its 16-char `Workspace._key16`, matching the on-disk dir) → run_id. It is emitted at the
+**traced-run owners** — the `query` CLI command and `ask()` — NOT inside the reusable `query()`
+building block (which `retrieve()` calls), so each run emits the link exactly once. `va trace <run_id>`
+then opens the named ingest trace. **Retention:** traces are local, gitignored artifacts with no
+automatic expiry; prune is opt-in via `va trace prune --keep N` / `--older-than DAYS` / `--all`.
 
 ## Testing strategy
 - **Offline unit tests** (`tests/test_trace.py`): `.trace` write + `load_events` round-trip; the verbatim block is real-newline text (not escaped); **no-op when `VA_TRACE` unset**; best-effort — a write error never raises.

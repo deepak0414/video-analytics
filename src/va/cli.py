@@ -129,12 +129,14 @@ def _cmd_ocr(args: argparse.Namespace) -> int:
 
 def _cmd_query(args: argparse.Namespace) -> int:
     from va.pipeline.query import query
+    from va.pipeline.trace_links import trace_ingest_links
     from va.runtime.trace import trace, traced_run
 
     with traced_run("query", args.workdir):
         hits = query(args.text, workdir=args.workdir, k=args.k)
         trace("retriever", "visual_search", f"{len(hits)} hits",
               top=[{"score": round(h.score, 3), "t": round(h.timestamp, 1)} for h in hits[:3]])
+        trace_ingest_links(args.workdir, {h.video_id for h in hits})
         if getattr(args, "verify", False):
             # SR.6: VLM-verify the candidates (drops attribute/composition false hits).
             # No-op unless a real verifier is configured (VA_CONFIG_DIR=run-*/config).

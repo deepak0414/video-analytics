@@ -35,7 +35,9 @@ CREATE TABLE IF NOT EXISTS videos (
     ingest_error  TEXT,
     created_at    TEXT,
     fetched_at    TEXT,
-    processed_at  TEXT
+    processed_at  TEXT,
+    last_ingest_run_id TEXT   -- trace run_id of the ingest that last wrote this row
+                              -- (ingest<->query trace link); NULL when ingested untraced
 );
 """
 
@@ -142,17 +144,40 @@ ALL_TABLES = [
     ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS,
 ]
 
+# Columns added to `videos` after the initial schema. A DB created before the
+# column existed still has the old table, and the fast path below skips the
+# CREATE (which is `IF NOT EXISTS` anyway), so these must be ensured via ALTER
+# (SQLite has no `ADD COLUMN IF NOT EXISTS`). Additive + nullable only.
+_VIDEOS_ADDED_COLUMNS = {
+    "last_ingest_run_id": "TEXT",
+}
+
+
+def _ensure_videos_columns(conn: sqlite3.Connection) -> None:
+    """Backfill additive columns onto a pre-existing `videos` table. Cheap: one
+    PRAGMA read, and the ALTER runs only the first time a given DB is opened."""
+    have = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
+    added = False
+    for col, decl in _VIDEOS_ADDED_COLUMNS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {decl}")
+            added = True
+    if added:
+        conn.commit()
+
 
 def apply_schema(conn: sqlite3.Connection) -> None:
     """Create every table + index (idempotent). Run by any store that opens the DB.
 
     Fast path: all tables are created together, so if `videos` already exists the
-    schema is present — skip the 14 DDL + commit. This runs on EVERY store open
-    (and a store opens the DB ~7× per ingest), so the check pays for itself.
+    schema is present — skip the 14 DDL + commit (but still ensure additive column
+    migrations). This runs on EVERY store open (and a store opens the DB ~7× per
+    ingest), so the check pays for itself.
     """
     if conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='videos'"
     ).fetchone() is not None:
+        _ensure_videos_columns(conn)
         return
     for ddl in ALL_TABLES:
         conn.execute(ddl)
