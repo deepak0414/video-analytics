@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fast deterministic gates only (<5s). LLM review happens post-commit/pre-push,
+# never here (workflow-trust-plan.md WT.1; latency here breeds --no-verify habits).
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+fail() { echo "pre-commit BLOCKED: $1" >&2; exit 1; }
+
+# 1. Branch guard: main merges via PR only. Override: ALLOW_MAIN_COMMIT=1 (human).
+branch=$(git symbolic-ref --short -q HEAD || echo detached)
+if [ "$branch" = "main" ] && [ -z "${ALLOW_MAIN_COMMIT:-}" ]; then
+  fail "direct commit to main. Create a branch (git checkout -b), or ALLOW_MAIN_COMMIT=1 for a deliberate exception."
+fi
+
+# 2. Artifact guard: workdirs, vectors, DBs, model weights never enter git.
+bad=$(git diff --cached --name-only | grep -E '^\.va|/catalog\.db$|\.npz$|\.pt$|\.onnx$|/media\.mp4$|/weights/' || true)
+[ -n "$bad" ] && fail "workdir/model artifacts staged:
+$bad"
+
+# 3. Secret scan on staged additions.
+leaks=$(git diff --cached -U0 | grep -E '^\+' | grep -nE \
+  'hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|gh[posu]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' || true)
+[ -n "$leaks" ] && fail "possible secret in staged diff:
+$leaks"
+
+# 4. Test-deletion guard: blocks net test removal (renames pass).
+#    Override: ALLOW_TEST_REMOVAL=1 (human), and say why in the commit body.
+removed=$(git diff --cached -U0 -- 'tests/' | grep -cE '^\-\s*def test_' || true)
+added=$(git diff --cached -U0 -- 'tests/' | grep -cE '^\+\s*def test_' || true)
+if [ "${removed:-0}" -gt "${added:-0}" ] && [ -z "${ALLOW_TEST_REMOVAL:-}" ]; then
+  fail "net test deletion: -$removed/+$added test functions. If intentional, rerun with ALLOW_TEST_REMOVAL=1 and say why in the commit body."
+fi
+# Warn (not block) on new skip/xfail markers — legitimate here (strict-xfail
+# convention) but always worth a human glance in the diff.
+newskips=$(git diff --cached -U0 -- 'tests/' | grep -E '^\+.*(pytest\.mark\.skip|xfail)' || true)
+[ -n "$newskips" ] && echo "pre-commit WARNING: new skip/xfail markers:
+$newskips" >&2
+
+# 5. Syntax gate: staged .py files must at least compile.
+pyfiles=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+if [ -n "$pyfiles" ]; then
+  echo "$pyfiles" | xargs .venv/bin/python -m py_compile || fail "staged Python does not compile"
+fi
+exit 0

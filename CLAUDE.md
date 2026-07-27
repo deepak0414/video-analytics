@@ -33,6 +33,7 @@ step and no linter configured.
 python3 -m venv .venv
 .venv/bin/pip install -e .              # core deps; uses the STUB embedder (no GPU/network)
 .venv/bin/pip install -e '.[siglip]'    # optional: real SigLIP (torch+transformers, heavy)
+bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) — once per clone/machine; see workflow-trust-plan.md
 
 # tests (34, no GPU/network — they use the stub embedder + synthetic clips)
 .venv/bin/pytest -q
