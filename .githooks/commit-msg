@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Trailer hygiene (workflow-trust-plan.md WT.1, part 1).
+# The review-lifecycle forced declaration (WT.4) lands with the review machinery.
+set -euo pipefail
+msgfile="$1"
+# Strip any Claude co-author trailer (repo convention: attribution is via sign-off).
+sed -i '/^Co-Authored-By: Claude/d' "$msgfile"
+# Ensure the repo's sign-off trailer exists.
+if ! grep -q '^Signed-off-by: Deepak Gupta (deepak0414) using Claude assistance$' "$msgfile"; then
+  printf '\nSigned-off-by: Deepak Gupta (deepak0414) using Claude assistance\n' >> "$msgfile"
+fi
