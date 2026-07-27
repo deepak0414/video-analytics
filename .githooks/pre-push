@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Push gate (workflow-trust-plan.md WT.2). Gate 1 only for now; the agent-review
+# backstop (Gate 2) and provisional-commit block (Gate 3) land with WT.4.
+# stdin: "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+zero=0000000000000000000000000000000000000000
+fail() { echo "pre-push BLOCKED: $1" >&2; exit 1; }
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # branch deletion — nothing to verify
+
+  # Gate 1: full offline suite (stub backends, no GPU/network; ~31 s).
+  out=$(.venv/bin/pytest -q 2>&1 | tail -8)
+  echo "$out" | grep -qE '^[0-9]+ passed' || fail "offline suite not green:
+$out"
+done
+exit 0
