@@ -206,6 +206,15 @@ def ask(
             trace("planner", "rule_floor", "rule heuristic forced deep_scan", level="warn",
                   scan_target=(plan.params or {}).get("scan_target"))
 
+        # Backfill scan_target for ANY deep-scan plan that lacks one — e.g. an LLM
+        # planner set needs_deep_scan but emitted malformed params that JSON-salvage
+        # dropped. Without this, run_deep_scan falls back to the outfit-biased
+        # DEFAULT_TARGET and scans the wrong subject (measured: bird-ask-01 -> 0
+        # episodes with the Qwen3-VL planner). The rule reasoner derives the target
+        # from the query, so this is planner-agnostic.
+        if plan.needs_deep_scan and not plan.params.get("scan_target"):
+            plan.params["scan_target"] = rule_plan.params.get("scan_target")
+
         evidence = retrieve(plan, workdir=workdir, k=k)          # SR.4: fused, ranked
         trace_ingest_links(workdir, {it.video_id for it in evidence.items})
 
