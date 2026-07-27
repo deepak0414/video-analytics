@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Push gate (workflow-trust-plan.md WT.2). Gate 1 only for now; the agent-review
-# backstop (Gate 2) and provisional-commit block (Gate 3) land with WT.4.
+# Push gate (workflow-trust-plan.md WT.2 + WT.4 backstop).
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -11,8 +10,60 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue   # branch deletion — nothing to verify
 
   # Gate 1: full offline suite (stub backends, no GPU/network; ~31 s).
-  out=$(.venv/bin/pytest -q 2>&1 | tail -8)
-  echo "$out" | grep -qE '^[0-9]+ passed' || fail "offline suite not green:
-$out"
+  # The EXIT CODE is the truth — summary-line grepping matched "33 passed,
+  # 1 error" and failed open on collection errors.
+  # NB: every command in this loop gets </dev/null — the loop is reading the
+  # pushed-refs list from stdin, and a child that reads stdin (headless claude
+  # does) would swallow the remaining refs and fail OPEN for them.
+  if ! out=$(.venv/bin/pytest -q </dev/null 2>&1); then
+    fail "offline suite not green:
+$(echo "$out" | tail -8)"
+  fi
+
+  # Gate 2: agent review BACKSTOP (primary review runs at post-commit on
+  # need_agent_review-subject commits). Re-reviews only content without an
+  # approval — catches skipped lifecycles, manual edits, crashed sessions.
+  git rev-parse -q --verify origin/main >/dev/null || fail "origin/main not found — cannot scope review gates; fetch first."
+  if [ "$remote_sha" = "$zero" ]; then
+    range="origin/main...$local_sha"
+  elif git cat-file -e "$remote_sha" 2>/dev/null; then
+    range="$remote_sha..$local_sha"
+  else
+    # Remote tip unknown locally (stale clone): fail CLOSED by widening the
+    # review scope to the whole branch instead of silently skipping gates.
+    range="origin/main...$local_sha"
+  fi
+  # Docs-only pushes skip review — but instruction-bearing files (CLAUDE.md,
+  # .claude/, hooks, workflows, scripts) shape agent behavior and are NEVER inert
+  # docs, so they always take the review path.
+  files=$(git diff --name-only "$range")
+  if echo "$files" | grep -qvE '\.(md|txt)$' || \
+     echo "$files" | grep -qE '^(\.claude/|\.githooks/|\.github/|scripts/)|^CLAUDE\.md$'; then
+    # Hash the PUSHED ref, not HEAD — per-ref pushes must compare (and bless)
+    # exactly the content that ships.
+    cur=$(scripts/review_scope_hash.sh "$local_sha")
+    if [ -f .git/.review-approved ] && [ "$(cat .git/.review-approved)" = "$cur" ]; then
+      echo "pre-push: content already approved by post-commit review — skipping re-review." >&2
+    else
+      scripts/agent-review.sh "$range" </dev/null || fail "agent review requested changes — see reviews/ ledger. Fix findings or (human-only) waive with AGENT_REVIEW=skip."
+      echo "$cur" > .git/.review-approved
+    fi
+  fi
+
+  # Gate 2b: the audit trail is append-only. The approval hash excludes ledgers,
+  # so a modified/deleted shipped ledger (forged review history) would otherwise
+  # ride an existing approval. Human-only override: ALLOW_LEDGER_EDIT=1.
+  forged=$(git diff --name-status "$range" -- 'reviews/' | grep -E '^[MDR]' || true)
+  if [ -n "$forged" ] && [ -z "${ALLOW_LEDGER_EDIT:-}" ]; then
+    fail "reviews/ ledgers are append-only (audit trail):
+$forged
+If genuinely needed (human decision): ALLOW_LEDGER_EDIT=1 git push."
+  fi
+
+  # Gate 3: provisional commits never ship. A need_agent_review subject means the
+  # lifecycle (review -> human approval -> finalize amend) was not completed.
+  if git log --format=%s "$range" 2>/dev/null | grep -q '^need_agent_review'; then
+    fail "push range contains provisional 'need_agent_review' commits — finalize them (reviewer approve + touch .commit-approved + git commit --amend with the real subject) before pushing."
+  fi
 done
 exit 0

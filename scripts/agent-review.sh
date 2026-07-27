@@ -23,8 +23,8 @@ sha=$(git rev-parse --short HEAD)
 ledger="reviews/$(date +%Y%m%d-%H%M%S)-${branch//\//-}-${sha}.md"
 mkdir -p reviews
 
-# Human-only waiver (bash_guard blocks agents from setting this; every use is
-# recorded so waived pushes stay visible in the audit trail).
+# Human-only waiver by convention now, by mechanism once WT.3's session guards
+# land; every use is recorded so waived pushes stay visible in the audit trail.
 if [ "${AGENT_REVIEW:-}" = "skip" ]; then
   printf '# Review WAIVED by user\n\ndate: %s\nrange: %s\nbranch: %s\n' \
     "$(date -Is)" "$range" "$branch" > "$ledger"
@@ -73,13 +73,15 @@ echo "agent-review: reviewing $range ($stat) ..." >&2
 # Recursion guard: inherited by the headless reviewer session so this repo's hooks
 # (post-commit, stop_gate) no-op inside it — a review can never trigger a review.
 export VA_AGENT_REVIEW=1
+# stderr goes to .git/ (NOT reviews/ — a stray non-.md file there would trip the
+# pre-commit ledgers-only gate at the next `git add reviews/`).
+errlog=".git/agent-review.err"
 raw=$(timeout 480 claude -p "$prompt" \
   --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git blame *),Bash(git status *)" \
-  --output-format json --max-turns 40 2>>"$ledger.err") || {
-    echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $ledger.err" >&2
+  --output-format json --max-turns 40 2>"$errlog") || {
+    echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $errlog" >&2
     exit 1
   }
-rm -f "$ledger.err"
 
 RAW="$raw" LEDGER="$ledger" RANGE="$range" BRANCH="$branch" python3 - <<'PY'
 import datetime

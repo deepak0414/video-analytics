@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Trigger (not gate): commits whose SUBJECT starts with `need_agent_review` fire the
+# fresh-context review immediately (workflow-trust-plan.md WT.4). git ignores this
+# hook's exit code by design; enforcement lives at commit-msg (finalization) and
+# pre-push (Gates 2-3). The nonzero exit + stderr surface loudly in the committing
+# session's tool result — that is the feedback channel.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+[ -n "${VA_AGENT_REVIEW:-}" ] && exit 0        # recursion guard (reviewer session)
+
+subject=$(git log -1 --pretty=%s)
+case "$subject" in
+  need_agent_review*) ;;    # provisional commit: fall through to review
+  *) exit 0 ;;              # checkpoints (wip:) and finalized commits: free
+esac
+git rev-parse -q --verify HEAD^2 >/dev/null && exit 0   # merge commits: skip
+# Fail closed if the baseline is missing (an empty diff must never mean "skip").
+git rev-parse -q --verify origin/main >/dev/null || {
+  echo "post-commit: origin/main not found — cannot scope the review; fetch first." >&2
+  exit 1
+}
+# Docs-only branches: skip (exempt from the lifecycle end-to-end) — except
+# instruction-bearing files (CLAUDE.md, .claude/, hooks, workflows, scripts),
+# which shape agent behavior and always get reviewed.
+files=$(git diff --name-only origin/main..HEAD)
+if ! echo "$files" | grep -qvE '\.(md|txt)$' && \
+   ! echo "$files" | grep -qE '^(\.claude/|\.githooks/|\.github/|scripts/)|^CLAUDE\.md$'; then
+  exit 0
+fi
+
+if scripts/agent-review.sh origin/main..HEAD; then
+  scripts/review_scope_hash.sh > .git/.review-approved
+  echo "post-commit: review APPROVED — present the human a digest (verdict, findings,
+ledger path); after they run 'touch .commit-approved', finalize with:
+    git add reviews/ && git commit --amend   (real subject; sentinel is consumed)" >&2
+else
+  echo "post-commit: review REQUESTED CHANGES — read the newest reviews/ ledger
+entry, fix the critical/major findings, and squash them in with:
+    git commit --amend        (keep the need_agent_review subject; amend re-runs review)
+Push stays blocked until a review approves or the user waives (AGENT_REVIEW=skip)." >&2
+  exit 1
+fi

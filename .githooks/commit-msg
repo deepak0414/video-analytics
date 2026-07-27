@@ -1,11 +1,55 @@
 #!/usr/bin/env bash
-# Trailer hygiene (workflow-trust-plan.md WT.1, part 1).
-# The review-lifecycle forced declaration (WT.4) lands with the review machinery.
+# Trailer hygiene + the review lifecycle's forced declaration
+# (workflow-trust-plan.md WT.1/WT.4): every commit subject is provisional-for-review,
+# a checkpoint, or a finalization of reviewer-approved + human-approved content.
 set -euo pipefail
 msgfile="$1"
-# Strip any Claude co-author trailer (repo convention: attribution is via sign-off).
+cd "$(git rev-parse --show-toplevel)"
+
+# --- Trailer hygiene (unconditional) ---
 sed -i '/^Co-Authored-By: Claude/d' "$msgfile"
-# Ensure the repo's sign-off trailer exists.
 if ! grep -q '^Signed-off-by: Deepak Gupta (deepak0414) using Claude assistance$' "$msgfile"; then
   printf '\nSigned-off-by: Deepak Gupta (deepak0414) using Claude assistance\n' >> "$msgfile"
 fi
+
+# --- Forced declaration ---
+# Exemptions: merges, autosquash fixups.
+git rev-parse -q --verify MERGE_HEAD >/dev/null && exit 0
+subject=$(head -1 "$msgfile")
+case "$subject" in
+  fixup!*|squash!*)   exit 0 ;;
+  need_agent_review*) exit 0 ;;   # provisional: post-commit fires the reviewer
+  wip:*|checkpoint:*) exit 0 ;;   # declared not-done: free
+esac
+# Docs-only work never gets a review (post-commit and pre-push both skip it), so a
+# plain subject is fine when the committed branch AND this commit's staged content
+# are nothing but docs (committed scope — matching the approval-hash philosophy;
+# ledgers are .md and count as docs). Fails CLOSED if origin/main is missing.
+if git rev-parse -q --verify origin/main >/dev/null; then
+  files=$( { git diff --name-only origin/main HEAD 2>/dev/null; \
+             git diff --cached --name-only; } )
+  # Instruction-bearing files (CLAUDE.md, .claude/, hooks, workflows, scripts)
+  # shape agent behavior and are never inert docs.
+  if ! echo "$files" | grep -qvE '\.(md|txt)$' && \
+     ! echo "$files" | grep -qE '^(\.claude/|\.githooks/|\.github/|scripts/)|^CLAUDE\.md$'; then
+    exit 0
+  fi
+fi
+# Plain subject = finalization. Allowed iff the reviewer approved EXACTLY this
+# committed content, the human sentinel exists (D7), and the amend adds nothing
+# beyond reviews/ ledgers (staged content sneaked into a finalize would otherwise
+# dodge the approval until the push backstop). Consume the sentinel on success.
+if [ -f .git/.review-approved ] && \
+   [ "$(cat .git/.review-approved)" = "$(scripts/review_scope_hash.sh)" ] && \
+   [ -z "$(git diff --cached --name-only -- . ':(exclude)reviews/*.md')" ] && \
+   [ -f .commit-approved ]; then
+  rm -f .commit-approved
+  exit 0
+fi
+echo "commit-msg BLOCKED: subject must start with 'need_agent_review' (work complete
+-> review fires) or 'wip:'/'checkpoint:' (not done yet). A plain subject is only for
+finalizing a reviewed commit: requires reviewer verdict=approve for this exact
+committed content, a finalize amend that adds nothing beyond reviews/, AND the human
+having run 'touch .commit-approved' (human-only; WT.3 session guards enforce that
+mechanically once they land)." >&2
+exit 1
