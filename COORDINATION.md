@@ -217,3 +217,12 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   `backend: http` (Triton/vLLM/NIM), and two NEW out-of-Python components (Go camera-edge daemon, Go
   API gateway/agent host) that call the existing role HTTP adapters — spine unchanged. Nothing
   implemented; no contract changes. Flagged here so neither agent is surprised when these land.
+- **2026-07-27 (trust):** Trust-gate layer L1 landed (`workflow-trust-plan.md` WT.0–WT.2 slice,
+  branch `trust/l1-git-hooks`): checked-in git hooks under `.githooks/` (pre-commit: branch/artifact/
+  secret/test-deletion/syntax gates; commit-msg: trailer hygiene — strips `Co-Authored-By: Claude`,
+  appends the repo sign-off; pre-push: full offline suite must be green). **Action for BOTH agents:
+  run `bash scripts/setup-hooks.sh` once on this machine** (sets `core.hooksPath=.githooks`).
+  Commits on main are now blocked (use branches; `ALLOW_MAIN_COMMIT=1` is a human-only override).
+  Sandbox self-tests in `tests/test_trust_hooks.py`. The review lifecycle (post-commit reviewer,
+  `need_agent_review` subjects, human sentinel) comes in the NEXT PR — commit subjects are not yet
+  gated. No pipeline/contract changes.
