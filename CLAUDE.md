@@ -101,6 +101,25 @@ no extra VRAM), `claude-code` (headless `claude -p` on the local subscription lo
 guidance). LLM JSON is parsed tolerantly (`parse_json_block`, `coerce_timestamp` — Qwen
 really does emit `"3.5s"`); unparseable output falls back to the rule reasoner.
 
+## Commit & review lifecycle (trust gates — full spec: workflow-trust-plan.md)
+
+Git hooks enforce this mechanically (activated per machine by `scripts/setup-hooks.sh`;
+already active here). Every commit subject MUST be one of:
+- **`need_agent_review: <desc>`** — work for a task/plan chunk is COMPLETE. The
+  post-commit hook spawns a fresh reviewer agent (headless, read-only, rubric in
+  `scripts/agent-review.sh`); verdict + findings land in `reviews/` and in your session.
+- **`wip:` / `checkpoint:`** — deliberately unfinished. Free, but unapproved content
+  still gets the backstop review at push; it can never reach main unreviewed.
+- **plain subject** — ONLY for finalizing an approved commit (or docs-only branches).
+
+On `request_changes`: fix, `git commit --amend` keeping the tag — review re-fires.
+On `approve`: present the human a digest (verdict, findings, ledger path), then STOP —
+the human approves by running `touch .commit-approved` (human-only; NEVER create it
+yourself). Then `git add reviews/` and `git commit --amend` with the real subject
+(sentinel is consumed; ledger ships inside the commit). Provisional subjects cannot be
+pushed. All overrides (`AGENT_REVIEW=skip`, `ALLOW_MAIN_COMMIT=1`, `ALLOW_TEST_REMOVAL=1`)
+are human-only.
+
 ## Heuristics & validation (engineering conventions)
 
 - **Never introduce hardcoded content, magic values, or canned heuristics silently.** Flag

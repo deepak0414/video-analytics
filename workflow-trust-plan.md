@@ -442,10 +442,12 @@ The full lifecycle:
    path, what changed since last approval.
 5. Human approves by running **`touch .commit-approved`** (human-only — guards block
    agents from creating it; D7).
-6. Committer runs the final `git commit --amend` with the real descriptive subject;
-   commit-msg permits the plain subject (approved hash + sentinel), consumes the
-   sentinel; post-commit sees no tag and stays quiet. History: ONE clean commit,
-   reviewed and human-approved, no tag residue.
+6. Committer runs `git add reviews/` (the ledger ships inside the commit it reviewed
+   — excluded from the approval hash, so this never invalidates it) then the final
+   `git commit --amend` with the real descriptive subject; commit-msg permits the
+   plain subject (approved hash + sentinel), consumes the sentinel; post-commit sees
+   no tag and stays quiet. History: ONE clean commit, reviewed and human-approved,
+   no tag residue.
 7. `pre-push`: approval hash matches → tests only; and no `need_agent_review`
    subject may ship (Gate 3) — provisional commits cannot reach GitHub.
 
@@ -503,6 +505,11 @@ Design decisions (research + user decisions 2026-07-24/25):
   from rollout: if untagged commits start reaching push regularly, tag discipline is
   slipping — the ledger makes it visible; the fallback is inverting the default
   (review every commit, tag to *skip*), which is stricter, never weaker.
+- **As-built deviations (2026-07-27, PR 2):** verdict parsing passes the raw output
+  via an env var into the python heredoc (the drafted `<<'PY' <<<"$raw"` combined
+  two stdin redirects — invalid); `timeout 480` instead of 600 so a full review fits
+  inside tool/CI execution caps with margin; ledger filenames carry seconds
+  (`%Y%m%d-%H%M%S`) so the fix-amend-re-review loop never overwrites an entry.
 
 `.githooks/post-commit`:
 
@@ -552,10 +559,13 @@ re-review):
 #!/usr/bin/env bash
 # Hash of all content not yet on origin/main: committed-but-unpushed + uncommitted
 # tracked changes + untracked files. Changes iff the reviewable content changes.
+# reviews/ is EXCLUDED: ledgers are artifacts of the review itself, so committing
+# them (git add reviews/ during the finalize amend) never invalidates the approval.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
-{ git diff origin/main -- . 2>/dev/null
-  git ls-files --others --exclude-standard | sort | xargs -r sha256sum 2>/dev/null
+{ git diff origin/main -- . ':(exclude)reviews' 2>/dev/null
+  git ls-files -z --others --exclude-standard -- . ':(exclude)reviews' \
+    | sort -z | xargs -0 -r sha256sum 2>/dev/null
 } | sha256sum | cut -d' ' -f1
 ```
 
