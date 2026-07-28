@@ -572,3 +572,12 @@ def test_branch_deletion_push_skips_gates(trust_repo):
     r.set_suite(False)  # gates would fail if they ran
     res = r.push("origin", ":feature/x")
     assert res.returncode == 0
+
+
+def test_deleting_remote_main_is_blocked_at_push(trust_repo):
+    """Matrix row 50's pre-push half: ref deletions skip the other gates, so
+    main's deletion must be refused explicitly (round-16 minor: untested)."""
+    r = trust_repo
+    res = r.push("origin", ":main")
+    assert res.returncode != 0
+    assert "deleting remote main" in res.stderr

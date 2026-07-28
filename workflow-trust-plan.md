@@ -255,7 +255,13 @@ zero=0000000000000000000000000000000000000000
 fail() { echo "pre-push BLOCKED: $1" >&2; exit 1; }
 
 while read -r local_ref local_sha remote_ref remote_sha; do
-  [ "$local_sha" = "$zero" ] && continue   # branch deletion — nothing to verify
+  if [ "$local_sha" = "$zero" ]; then      # remote ref deletion
+    case "$remote_ref" in
+      refs/heads/main|refs/heads/master)
+        fail "deleting remote main is blocked." ;;
+    esac
+    continue                                # other deletions — nothing to verify
+  fi
 
   # Gate 1: full offline suite (stub backends, no GPU/network; ~31 s).
   # The EXIT CODE is the truth — summary-line grepping matched "33 passed,
@@ -341,7 +347,6 @@ existing `.claude/settings.local.json` stays personal/gitignored), plus
   "permissions": {
     "deny": [
       "Bash(git commit --no-verify*)",
-      "Bash(git push --force*)",
       "Bash(git config core.hooksPath*)"
     ]
   },
@@ -391,9 +396,34 @@ Design notes (from the research):
 
 ```python
 #!/usr/bin/env python3
-"""PreToolUse guard for Bash. Blocks gate-bypass and self-approval commands.
-Exit 2 = block (stderr shown to Claude). Exit 0 = allow."""
-import json, re, sys
+"""PreToolUse guard for Bash (workflow-trust-plan.md WT.3).
+
+Blocks gate-bypass, self-approval, and audit-tampering commands inside Claude
+Code sessions. Exit 2 = block (stderr is shown to the agent as the reason);
+exit 0 = allow.
+
+DESIGN (learned the hard way across the PR 3 review rounds): decisions are made
+by TOKENIZING the command the way a shell does, never by matching flag positions
+or by splitting on separator characters with a regex. Every regex attempt leaked
+— flag-position anchors missed `commit --amend -n` and `commit -m x -n`, and
+`[^|;&\\n]*` / `re.split(r"[|;&]")` broke on an ampersand inside a quoted commit
+message, disabling the guard with no intent to evade. Tokenization handles
+quoting, clustering, ordering, and value-consuming flags uniformly.
+
+Bash is still a full shell — this layer is hardening against realistic evasion,
+not a proof; the un-bypassable layer is CI (WT.5).
+"""
+import json
+import os
+import re
+import shlex
+import sys
+
+ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Every write-redirect spelling shlex can emit as one token: >, >>, 1>, 2>>,
+# >| (noclobber override), >& / &> / &>> (fd duplication + merge). Round-11
+# major: a hardcoded 5-item set missed >| and >&.
+REDIRECT = re.compile(r"^(?:\d*(?:>>?\|?|>&\d*)|&>>?)$")
 
 try:
     payload = json.load(sys.stdin)
@@ -401,27 +431,369 @@ except Exception:
     sys.exit(0)  # malformed payload: never brick the session
 cmd = (payload.get("tool_input") or {}).get("command", "") or ""
 
-RULES = [
-    (r"\bgit\b[^|;&\n]*--no-verify",            "--no-verify bypasses this repo's verification hooks (P6: gates have no agent override)."),
-    (r"\bgit\s+commit\b[^|;&\n]*\s-n\b",        "git commit -n is --no-verify; hooks must run."),
-    (r"\bgit\s+push\b[^|;&\n]*(--force\b|\s-f\b)(?![-\w])[^|;&\n]*\b(main|master)\b",
-                                                 "force-push to main is blocked."),
-    (r"\bcore\.hooksPath\b",                     "changing hooksPath disables the trust gates; ask the user."),
-    (r"\bAGENT_REVIEW=skip\b",                   "the review waiver is human-only (P6)."),
-    (r"\.commit-approved\b",                     "the finalization sentinel is human-only (D7): only the user may create or remove it."),
-    (r"\.guard-override\b",                      "the guard override is human-only (P6)."),
-    (r"\bALLOW_TEST_REMOVAL=1\b",                "test-removal override is human-only; explain the need and ask."),
-    (r"\bALLOW_LEDGER_EDIT=1\b",                 "ledger-edit override is human-only (audit trail)."),
-    (r"\bALLOW_MAIN_COMMIT=1\b",                 "main-commit override is human-only."),
-    (r"\bgh\s+pr\s+merge\b",                     "merging PRs is a human action in this repo."),
-    (r"\bgh\s+pr\s+(edit|review)\b[^|;&\n]*(human-reviewed|golden-verified|--approve)",
-                                                 "review labels/approvals are human-only (P3)."),
-    (r"\brm\s+-[a-z]*r[a-z]*f?\s+(/|~|\.git\b)", "destructive delete of repo/system paths."),
-]
-for pattern, reason in RULES:
-    if re.search(pattern, cmd):
-        print(f"BLOCKED: {reason}\nCommand was: {cmd}", file=sys.stderr)
-        sys.exit(2)
+ROOT = os.environ.get("CLAUDE_PROJECT_DIR", ".")
+# Human maintenance window (`touch .guard-override`, honored by path_guard too).
+# Scope is NARROW: it relaxes only the gate-machinery write rules — sentinels,
+# waivers, approvals, ledgers, PR self-approval and push protection stay live.
+OVERRIDE = os.path.exists(os.path.join(ROOT, ".guard-override"))
+
+
+def block(reason):
+    print(f"BLOCKED: {reason}\nCommand was: {cmd}", file=sys.stderr)
+    sys.exit(2)
+
+
+def segments(command):
+    """Split into command segments on shell operators WITHOUT cutting inside
+    quoted arguments (the round-10 critical). Returns lists of tokens.
+
+    NEWLINES ARE COMMAND SEPARATORS: shlex's whitespace_split swallows them, so
+    a multi-line command collapsed into one segment and every rule keyed on the
+    first command name skipped lines 2+ (round-15 critical). Lines are split
+    first — but only OUTSIDE quotes, so a quoted multi-line message stays one
+    token."""
+    toks = []
+    for line in _split_lines_outside_quotes(command):
+        toks += _tokenize(line) + ["\n"]
+    return _group(toks)
+
+
+def _split_lines_outside_quotes(command):
+    """Logical command lines, following POSIX quoting rules:
+    - inside single quotes nothing escapes and newlines are literal data;
+    - a backslash-newline is a LINE CONTINUATION and is removed (round-16
+      critical: keeping it prefixed a newline onto the next token, so `git
+      commit \\<nl>-n` no longer matched any flag rule);
+    - a newline outside quotes separates commands.
+    """
+    lines, cur, quote, i, n = [], [], None, 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":                      # single quotes: literal, no escapes
+            cur.append(ch)
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:          # escape (unquoted or double-quoted)
+            if command[i + 1] == "\n":
+                i += 2                        # line continuation: join lines
+                continue
+            cur.append(ch)
+            cur.append(command[i + 1])
+            i += 2
+            continue
+        if quote == '"':
+            cur.append(ch)
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'":
+            quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        if ch == "\n":
+            lines.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    lines.append("".join(cur))
+    return lines
+
+
+def _tokenize(command):
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: fall back, still quote-naive
+        return command.split()
+
+
+def _group(toks):
+    # Operators AND grouping tokens end a segment, so a write verb wrapped in a
+    # subshell or brace group is still analyzed as its own command (round-11
+    # major: `( touch .commit-approved )` had the group token read as the verb).
+    segs, cur = [], []
+    for t in toks:
+        if t and (all(ch in "|;&\n()" for ch in t) or t in ("{", "}")):
+            if cur:
+                segs.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    if cur:
+        segs.append(cur)
+    return segs
+
+
+def norm(p):
+    p = p.strip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p if p in ("/", "~", "~/") else p.rstrip("/")
+
+
+def parts(p):
+    return [c for c in norm(p).split("/") if c and c != "."]
+
+
+# --- protected artifacts -----------------------------------------------------
+# Never writable by the agent, maintenance window or not: human authority
+# (sentinels), the approval/cache state the gates read, the audit trail, and the
+# test runner the gates depend on.
+SENTINELS = {".commit-approved", ".guard-override", ".review-approved",
+             ".stop-gate-green"}
+
+
+def is_always_protected(path):
+    ps = parts(path)
+    if not ps:
+        return False
+    if ps[-1] in SENTINELS:
+        return True
+    if "reviews" in ps:                                    # the ledger trail
+        return True
+    if ps[-3:] == [".venv", "bin", "pytest"] or ps[-1] == ".venv":
+        return True  # the test runner IS the gates — and so is its venv
+    if ps[-2:] == [".git", "config"] or (".git" in ps and "hooks" in ps):
+        return True                                        # git-side gate config
+    return False
+
+
+def is_machinery(path):
+    ps = parts(path)
+    if not ps:
+        return False
+    if {".githooks", ".claude", ".github"} & set(ps):
+        return True
+    if ps[-2:-1] == ["scripts"] and ps[-1] in (
+            "agent-review.sh", "review_scope_hash.sh", "setup-hooks.sh"):
+        return True
+    return False
+
+
+# Commands that write to the files they are given. (Readers like `cat` are NOT
+# here — reading protected files stays allowed; their redirection targets are
+# caught separately.)
+WRITE_CMDS = {"tee", "cp", "mv", "rm", "ln", "truncate", "dd", "chmod", "chown",
+              "touch", "install", "sed"}
+# Flags whose VALUE is a separate token (so the token after them is data, not a
+# flag). Only genuinely arg-taking ones belong here: -S/--gpg-sign takes an
+# ATTACHED optional keyid and -o/--only takes nothing, so listing them swallowed
+# the next token and let `git commit -S -n` through (round-12 major).
+VALUE_FLAGS = {"-m", "--message", "-F", "--file", "-c", "--reedit-message",
+               "-C", "--reuse-message", "--author", "--date",
+               "-t", "--template", "--cleanup", "--fixup", "--squash",
+               "--trailer"}
+
+
+def command_name(argv):
+    """(basename of the command, its remaining args), skipping leading ENV=value
+    assignments. ONE definition, used by every rule — a rule that read seg[0]
+    directly was disabled by an env prefix (`LC_ALL=C rm -rf .git`, round 13)."""
+    for i, t in enumerate(argv):
+        if ENV_ASSIGN.match(t):
+            continue
+        return os.path.basename(t), argv[i + 1:]
+    return None, []
+
+
+# git global flags that consume the NEXT token, so the subcommand is found by
+# position rather than by searching for a known word anywhere in the segment
+# (a branch literally named `commit` redirected the scan away from push).
+GIT_VALUE_GLOBALS = {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
+                     "--exec-path", "--config-env"}
+
+
+def git_subcommand(seg):
+    """(subcommand, its args) for a git invocation, else (None, [])."""
+    name, rest = command_name(seg)
+    if name != "git":
+        return None, []
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t in GIT_VALUE_GLOBALS:
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        return t, rest[i + 1:]
+    return None, []
+
+
+def write_targets(toks):
+    """Paths this segment could write to: redirection targets, plus the operands
+    of a write command (sed only counts with an in-place flag)."""
+    targets, redirect_next = [], False
+    for t in toks:
+        if redirect_next:
+            targets.append(t)
+            redirect_next = False
+            continue
+        if REDIRECT.match(t):
+            redirect_next = True
+    # Drop redirection operators and their targets (already collected above).
+    argv, skip_next = [], False
+    for t in toks:
+        if skip_next:
+            skip_next = False
+            continue
+        if REDIRECT.match(t):
+            skip_next = True
+            continue
+        argv.append(t)
+    name, rest = command_name(argv)
+    if name in WRITE_CMDS:
+        if name == "sed" and not any(
+                f == "--in-place" or f.startswith("--in-place=")
+                or (f.startswith("-") and not f.startswith("--") and "i" in f)
+                for f in rest if f.startswith("-")):
+            return targets
+        if name == "dd":  # operand syntax: of=<file> is the write target
+            targets += [t.split("=", 1)[1] for t in rest if t.startswith("of=")]
+            return targets
+        targets += [t for t in rest if not t.startswith("-")]
+    return targets
+
+
+for seg in segments(cmd):
+    if not seg:
+        continue
+    lowered = [t.lower() for t in seg]
+
+    # 1. Human-only override tokens (quoting is already stripped by the lexer).
+    for t in seg:
+        if t.startswith("AGENT_REVIEW=") and t.split("=", 1)[1] == "skip":
+            block("the review waiver is human-only (P6).")
+        # The hooks honor ANY non-empty value ([ -z ] tests), so `=yes` waives
+        # just as `=1` does — match the invariant, not the literal (round 14).
+        if "=" in t and t.split("=", 1)[0] in (
+                "ALLOW_TEST_REMOVAL", "ALLOW_MAIN_COMMIT", "ALLOW_LEDGER_EDIT",
+        ) and t.split("=", 1)[1] != "":
+            block("ALLOW_* overrides are human-only; explain the need and ask.")
+        if "core.hookspath" in t.lower() and not OVERRIDE:
+            block("changing hooksPath disables the trust gates; ask the user.")
+
+    # 2. Writes to protected artifacts / gate machinery.
+    for target in write_targets(seg):
+        if is_always_protected(target):
+            block(f"{target} is a human-only artifact or gate state (sentinels, "
+                  "approval/cache files, reviews/ ledgers, the test runner, git "
+                  "config) — the hooks and the user write these, not the agent.")
+        if is_machinery(target) and not OVERRIDE:
+            block(f"{target} is trust-gate machinery — writable only in a human-"
+                  "opened maintenance session (.guard-override).")
+
+    # 3. Destructive deletes of the repo/system.
+    vname, vargs = command_name(seg)
+    if vname == "rm" and any(
+            f == "--recursive" or (not f.startswith("--") and ("r" in f or "R" in f))
+            for f in vargs if f.startswith("-")):
+        for t in vargs:
+            if t.startswith("-"):
+                continue
+            ps, n = parts(t), norm(t)
+            if n in ("/", "~") or n.startswith("~/") or ".git" in ps or \
+                    ".githooks" in ps or ".claude" in ps:
+                block("destructive delete of repo/system paths.")
+
+    # 4. gh self-approval / self-merge (env-prefix safe; attached and short
+    # flag spellings included — round-14 major).
+    gname, gargs = command_name(seg)
+    if gname == "gh" and gargs[:1] == ["pr"]:
+        action = gargs[1] if len(gargs) > 1 else ""
+        if action == "merge":
+            block("merging PRs is a human action in this repo.")
+        if action in ("edit", "review") and any(
+                t in ("--approve", "-a", "--add-label", "human-reviewed",
+                      "golden-verified")
+                or t.startswith("--add-label=") or t.startswith("--body=")
+                and ("human-reviewed" in t or "golden-verified" in t)
+                for t in gargs[2:]):
+            block("review labels/approvals are human-only (P3).")
+
+    # 5. git: hook-skipping flags, in any position/spelling.
+    sub, sub_args = git_subcommand(seg)
+    if sub in ("commit", "push"):
+        skip = False
+        for t in sub_args:
+            if skip:
+                skip = False
+                continue
+            if t in VALUE_FLAGS:
+                skip = True
+                continue
+            if not t.startswith("-") or t == "--":
+                continue
+            if t == "--no-verify":
+                block(f"git {sub} --no-verify skips this repo's verification "
+                      "hooks (P6: gates have no agent override).")
+            # Attached-value forms carry DATA after the value flag: -m'no
+            # changes' tokenizes as -mno changes, whose 'n' is message text,
+            # not a flag (round-16 minor). Cut at the value flag.
+            letters = t[1:]
+            for vf in ("m", "F", "c", "C", "t"):
+                if vf in letters:
+                    letters = letters[:letters.index(vf)]
+            # short -n is --no-verify for commit, --dry-run for push
+            if sub == "commit" and not t.startswith("--") and "n" in letters:
+                block("git commit -n (any position, clustered, or after "
+                      "-m/-F values) is --no-verify; the hooks must run.")
+
+    # 6. Pushes that rewrite or delete main, in every git-native spelling.
+    # Only a real `git push` — `git stash push -f` is a different command.
+    if sub == "push":
+        args = sub_args
+        flags = [t for t in args if t.startswith("-")]
+        nonflags = [t for t in args if not t.startswith("-")]
+
+        def dst(refspec):
+            r = refspec.lstrip("+")
+            d = r.split(":")[-1] if ":" in r else r
+            return d[len("refs/heads/"):] if d.startswith("refs/heads/") else d
+
+        force = any(
+            f in ("--force", "--force-if-includes") or f.startswith("--force-with-lease")
+            or (not f.startswith("--") and "f" in f[1:])
+            for f in flags
+        )
+        deleting = "--delete" in flags or any(
+            not f.startswith("--") and "d" in f[1:] for f in flags)
+        if "--mirror" in flags:
+            block("git push --mirror force-updates and prunes every remote ref, "
+                  "including main.")
+        if force and ("--all" in flags or "--branches" in flags):
+            block("force-push with --all/--branches rewrites remote main without "
+                  "naming it.")
+        refspecs = nonflags[1:] if len(nonflags) > 1 else [
+            t for t in nonflags if t.startswith("+")]
+        dsts = [dst(r) for r in refspecs]
+        if any(d in ("main", "master") for d in dsts):
+            if force or any(r.startswith("+") for r in refspecs):
+                block("force-push to main is blocked (flag, +refspec, refs/heads "
+                      "and reordered forms included).")
+            if deleting or any(r.startswith(":") for r in refspecs):
+                block("deleting remote main is blocked.")
+        if (force or any(r.startswith("+") for r in refspecs)) and (
+                not refspecs or any(d in ("HEAD", "@", "") for d in dsts)):
+            try:
+                import subprocess
+                branch = subprocess.run(
+                    ["git", "-C", ROOT, "symbolic-ref", "--short", "-q", "HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                ).stdout.strip()
+            except Exception:
+                branch = ""
+            if branch in ("main", "master"):
+                block("force-push of the checked-out main rewrites remote main.")
+
 sys.exit(0)
 ```
 
@@ -430,28 +802,62 @@ can grant a temporary opening):
 
 ```python
 #!/usr/bin/env python3
-"""PreToolUse guard for Edit/Write: protect the gate machinery from the agent.
-Human override: `touch .guard-override` (gitignored) grants edits for that session."""
-import json, os, sys
+"""PreToolUse guard for Edit/Write (workflow-trust-plan.md WT.3).
+
+The agent cannot modify its own cage: trust-gate machinery, human-only
+sentinels, and the append-only review ledgers are off-limits to file tools.
+Human override for gate maintenance: `touch .guard-override` (gitignored),
+which opens the session; remove it to close.
+"""
+import json
+import os
+import sys
 
 try:
     payload = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 root = os.environ.get("CLAUDE_PROJECT_DIR", ".")
-if os.path.exists(os.path.join(root, ".guard-override")):
-    sys.exit(0)
+override = os.path.exists(os.path.join(root, ".guard-override"))
 path = (payload.get("tool_input") or {}).get("file_path", "") or ""
 rel = os.path.relpath(path, root) if os.path.isabs(path) else path
+rel = os.path.normpath(rel)
 
-PROTECTED = (".githooks/", ".claude/settings.json", ".claude/hooks/",
-             ".github/workflows/", "scripts/agent-review.sh",
-             "scripts/critical_paths.txt",
-             ".commit-approved", ".guard-override")  # human-only sentinels (D7/P6)
-if any(rel == p or rel.startswith(p) for p in PROTECTED):
-    print(f"BLOCKED: {rel} is trust-gate machinery (P6). Propose the change to the "
-          f"user; they can apply it or `touch .guard-override` to open this session.",
-          file=sys.stderr)
+# Never writable by the agent, even during a maintenance window: the audit
+# trail and the human-authority artifacts.
+ALWAYS_PROTECTED = (
+    "reviews/",                 # append-only audit trail: only agent-review.sh writes here
+    ".commit-approved",         # human-only sentinels (D7/P6)
+    ".guard-override",
+    ".git/.review-approved",    # written only by the hooks after a real review
+    ".git/.stop-gate-green",    # stop-gate cache: written only by the hook (row 44)
+    ".venv/bin/pytest",         # the test runner IS the test gates (row 44)
+    ".git/config",              # one Write of core.hooksPath here disables every git gate
+    ".git/hooks/",              # ditto via direct hook placement
+)
+# Gate machinery: writable only when the human opened a maintenance window.
+MAINTENANCE_PROTECTED = (
+    ".githooks/",
+    ".claude/",                 # settings(.local), hooks, agents — all of it
+    ".github/",
+    "scripts/agent-review.sh",
+    "scripts/review_scope_hash.sh",
+    "scripts/setup-hooks.sh",
+)
+# Sentinel/state files are matched by BASENAME anywhere, not just at their usual
+# path: in a linked worktree the stop-gate cache lives at
+# .git/worktrees/<name>/.stop-gate-green, which a prefix match missed (round-14).
+STATE_BASENAMES = {".commit-approved", ".guard-override", ".review-approved",
+                   ".stop-gate-green"}
+PROTECTED = ALWAYS_PROTECTED + (() if override else MAINTENANCE_PROTECTED)
+if os.path.basename(rel) in STATE_BASENAMES or \
+        any(rel == p or rel.startswith(p) for p in PROTECTED):
+    print(
+        f"BLOCKED: {rel} is trust-gate machinery or a human-only artifact (P6). "
+        f"Propose the change to the user; they can apply it or `touch "
+        f".guard-override` to open this session for gate maintenance.",
+        file=sys.stderr,
+    )
     sys.exit(2)
 sys.exit(0)
 ```
@@ -462,27 +868,37 @@ forever):
 
 ```bash
 #!/usr/bin/env bash
-# Stop hook: block ending the turn while the offline suite is red.
-# Change-detected: skips entirely when src/tests are untouched since last green run.
+# Stop hook (workflow-trust-plan.md WT.3): block ending the turn while the
+# offline suite is red. Change-detected: skips entirely when src/tests are
+# untouched since the last green run. Bounded by Claude Code's 8-consecutive-
+# blocks override, so it cannot loop forever.
 set -uo pipefail
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 [ -x .venv/bin/pytest ] || exit 0
-# Recursion guard: inside the headless reviewer session (WT.4), all repo hooks no-op
-# so a review never triggers tests/reviews of its own.
+# Recursion guard: inside the headless reviewer session (WT.4), all repo hooks
+# no-op so a review never triggers tests/reviews of its own.
 [ -n "${VA_AGENT_REVIEW:-}" ] && exit 0
 
-state=".git/.stop-gate-green"
-cur=$( (git diff HEAD -- src tests pyproject.toml; \
-        git status --porcelain -- src tests) 2>/dev/null | sha256sum | cut -d' ' -f1)
+# Resolve the real git dir: in a linked worktree `.git` is a FILE, and a
+# hardcoded path made the cache write fail silently there (round-5 finding).
+state="$(git rev-parse --git-dir 2>/dev/null || echo .git)/.stop-gate-green"
+# Cache key = HEAD sha + tracked dirtiness + untracked file CONTENT. Names alone
+# (git status) let an edited-but-still-untracked file reuse a stale green
+# (PR 3 round-3 major, reproduced by the reviewer).
+cur=$( (git rev-parse HEAD; \
+        git diff HEAD -- src tests config pyproject.toml .claude .githooks scripts; \
+        git ls-files -z --others --exclude-standard -- src tests config .claude .githooks scripts \
+          | sort -z | xargs -0 -r sha256sum) 2>/dev/null | sha256sum | cut -d' ' -f1)
 [ -f "$state" ] && [ "$(cat "$state")" = "$cur" ] && exit 0
 
-out=$(.venv/bin/pytest -q 2>&1 | tail -8)
-if echo "$out" | grep -qE '^[0-9]+ passed' && ! echo "$out" | grep -qE 'failed|error'; then
+# The EXIT CODE is the truth (a summary grep matched "33 passed, 1 error" —
+# PR 2 round-4 finding). </dev/null: never consume the harness's stdin.
+if out=$(.venv/bin/pytest -q </dev/null 2>&1); then
   echo "$cur" > "$state"
   exit 0
 fi
 echo "Cannot end turn: offline suite is red. Fix before stopping (P1).
-$out" >&2
+$(echo "$out" | tail -8)" >&2
 exit 2
 ```
 
@@ -575,6 +991,9 @@ Design decisions (research + user decisions 2026-07-24/25):
   two stdin redirects — invalid); `timeout 480` instead of 600 so a full review fits
   inside tool/CI execution caps with margin; ledger filenames carry seconds
   (`%Y%m%d-%H%M%S`) so the fix-amend-re-review loop never overwrites an entry.
+  Reviewer timeout raised 480→900 s during PR 3: a guards-sized diff hit the
+  480 s ceiling (empty errlog, fail-closed block — correct behavior, wrong bound);
+  commits that trigger reviews run as background jobs so no tool cap applies.
   **From the first real review's findings (all four fixed before finalize):**
   approval hash re-scoped from worktree to committed branch (major — see the design
   bullet above); missing `origin/main` or an unknown remote sha now fails closed
@@ -601,6 +1020,182 @@ Design decisions (research + user decisions 2026-07-24/25):
   errors (row 36); shipped ledgers are append-only, enforced at pre-commit
   (diff-filter MDR) and again at push (so `--no-verify` forgeries still die),
   with `ALLOW_LEDGER_EDIT=1` as the recorded human-only override (row 37).
+  **WT.3 as-built (2026-07-27, PR 3):** PR 2's round-5 carry landed — bash_guard
+  blocks writes to `.git/.review-approved` (self-blessing) and to `reviews/`
+  (fabricated ledgers), path_guard protects both paths plus all gate machinery;
+  sentinel rules are scoped to write verbs so read-only checks pass (row 39);
+  stop_gate judges pytest by exit code with `</dev/null` (the round-4 class);
+  the guards went LIVE mid-development and blocked their own author — the
+  path_guard/stop_gate wedge (row 40) resolved exactly as designed, via the
+  human's `.guard-override`.
+  **From WT.3 rounds 2-3:** round 2 was a CRITICAL catch — the "fixed" amend had
+  committed a tree byte-identical to the rejected one (the fixes sat unstaged;
+  the committed-scope review model caught exactly what would have shipped).
+  Round 3: stop-gate cache now hashes untracked file CONTENT, not just names
+  (reviewer reproduced the stale-green repro); force-push detection extended to
+  `+refspec` (`git push origin +main`, `+HEAD:main`) and bare `--force` with the
+  upstream branch resolved; bash_guard honors the `.guard-override` maintenance
+  sentinel its own block message advertises (full-exemption semantics, matching
+  path_guard). Guard test tables grew to ~90 cases incl. every demonstrated bypass.
+  **From WT.3 round 4 (two racing reviews, union of 10 findings, all fixed):**
+  git global-flag insertion (git -c/-C before commit/push) no longer evades
+  subcommand anchors; force-push detection is refspec-aware (exact destination
+  component — HEAD/@/refs/heads/ resolved, feature/main-page no longer a false
+  positive); stop-gate cache scope includes the gate machinery the suite tests;
+  stop-gate state + the pytest binary are self-bless-protected like the review
+  hash; the state file resolves `git rev-parse --git-dir` (linked worktrees);
+  the maintenance window is scoped to machinery-write rules only, and the
+  settings deny list no longer over-blocks --force-with-lease to features.
+  **From WT.3 round 5:** quoted refspecs are stripped before destination
+  matching; the hand-rolled verb subsets in the artifact rules were unified on
+  WRITE_VERBS after the reviewer verified ledger-forging (sed -i), approval
+  overwrite (dd), and a pytest symlink attack; path_guard now protects
+  .git/.stop-gate-green and .venv/bin/pytest (Edit/Write parity with row 44);
+  the stop-gate state path resolves the real git dir (the plan documented the
+  linked-worktree fix before the code had it — plan-vs-code drift caught by
+  review).
+  **From WT.3 round 6:** WRITE_VERBS gained long-form spellings (sed
+  --in-place, install); push protection covers --mirror, force --all/--branches,
+  and :main deletions (bash_guard) plus refs/heads/main deletion at pre-push;
+  path_guard protects .git/config and .git/hooks/ (a single Write there would
+  have disabled every git-side gate); stop-gate cache scope includes config/
+  (the suite reads config/roles.yaml). Reminder recorded: the human removes
+  .guard-override at finalize — leaving it relaxes machinery-write rules for
+  every future session on this machine.
+  **Round 7 = APPROVE** (4 minors, all fixed before finalize): `--delete`/`-d`
+  push spellings added to bash_guard (pre-push already blocked them);
+  the commit `-n` rule anchored to flag position so messages containing " -n"
+  are no longer false positives; the stop-gate test helper strips
+  VA_AGENT_REVIEW so its assertions can never go vacuous inside a reviewer
+  session (verified: 123 pass with the guard exported). Seven rounds, 43
+  findings, 11 majors + 1 critical — every one a real defect in code that had
+  passing tests.
+  **Confirming round (round 8) — the payoff for re-reviewing after fixes:** my
+  round-7 minor fix REGRESSED the -n rule (anchoring it to the first flag token
+  let `git commit --amend -n` through — and --amend is the documented finalize
+  command); the same round found that machinery patterns required a trailing
+  slash, so `rm -rf .githooks` (deleting the directory core.hooksPath points at)
+  was allowed. Both fixed with variant-based tests. Lesson recorded: a fix
+  applied AFTER an approval still needs a review round — approvals bless
+  content, not intentions.
+  **Round 9 — the fix that ended the regex arms race:** three successive
+  positional regexes for `-n` each missed a spelling (first-token-only, then
+  flag-run-only, then broken by a value token: `git commit -m x -n`). Replaced
+  with shell tokenization that parses argv the way git does — value flags
+  (-m/-F/--message=…) consume their arguments, so hook-skip flags are caught in
+  ANY position while a commit message merely mentioning them stays legitimate;
+  `git push --no-verify` (which skips pre-push, i.e. the suite AND the review
+  backstop) is covered too, while `git push -n` (dry-run) is not. Structural
+  lesson for future guards: when a rule needs to understand a command's
+  grammar, parse it — do not iterate on patterns.
+  **Round 10 — CRITICAL, and the end of regex guarding entirely:** the
+  write-verb rules joined verb to target with `[^|;&\n]*`, and both tokenizer
+  loops pre-split on `re.split(r"[|;&]")` — so a single `&` inside a quoted
+  argument (e.g. the commit message "feat: ingest & query") made every
+  protected-artifact and machinery rule fail to match, and the reviewer chained
+  it into a full self-approval: write the approval hash, touch the sentinel,
+  finalize, push unreviewed. bash_guard is now built entirely on quote-aware
+  shell tokenization (`shlex` with punctuation_chars): segments split on real
+  operator tokens, write targets come from redirections + write-command
+  operands (incl. `dd of=`), protected paths compare by path COMPONENTS, and
+  readers like `cat` are not gated at all. Rewrite bugs the new tests caught
+  immediately: `cat` mis-listed as a write verb, `dd`'s operand syntax, and
+  `norm("/")` collapsing to empty.
+  **Round 11:** two more structural gaps in the same class — grouping tokens
+  (`( … )`, `{ …; }`) made the group symbol read as the command name, hiding the
+  real write verb; and the redirect-operator list was hardcoded, missing `>|`,
+  `>&`, `&>>`. Both fixed by construction (segments break on grouping tokens;
+  redirects matched by pattern). Pattern across rounds 9-11: every remaining
+  bypass has been "the guard assumed a simpler shell grammar than bash has" —
+  which is exactly why WT.5's CI, where no shell runs at all, is the layer the
+  design calls un-bypassable.
+  **Round 12:** the value-flag skip list wrongly included `-S/--gpg-sign`
+  (attached optional arg) and `-o/--only` (no arg), so the token after them was
+  swallowed — hiding a following `-n`. Fixed by listing only flags whose value
+  is a separate token. Note the trend line: findings per round fell 9 -> 5 -> 5
+  -> 4 -> 4 -> 2, and severity fell from architecture (approval scope) to
+  grammar (shell parsing) to a single flag-table entry. Rounds are converging,
+  and each remaining one costs ~10 min of reviewer time against a real defect
+  class — the loop is still paying for itself, but WT.5 (CI) is what makes the
+  shell layer's residual risk acceptable rather than load-bearing.
+  **Round 13:** both majors were INTERNAL INCONSISTENCY rather than new shell
+  exotica — one rule read `seg[0]` directly while another skipped ENV prefixes
+  (so `LC_ALL=C rm -rf .git` slipped), and the subcommand was chosen by tuple
+  order rather than token position (so a branch named `commit` steered the scan
+  away from `push --no-verify`). Fixed by giving the module ONE `command_name()`
+  and ONE `git_subcommand()` that every rule calls — the same de-duplication
+  lesson the repo already applies to adapters and stores.
+  **Round 14:** three more of the same species — `rm -R`/`--recursive` missed
+  by a lowercase-only check; `ALLOW_*=yes` unguarded because the guard matched
+  `=1` while the hooks test for ANY non-empty value (guard and gate must agree
+  on the INVARIANT, not the spelling); and the gh rules still read positional
+  tokens instead of the shared helper. Plus a worktree-path gap: state files are
+  now matched by basename anywhere. Converged view after 14 rounds: the residual
+  finding rate is now one narrow class per round (a flag spelling, a value form,
+  a path shape), each caught by an adversary that RUNS the guard rather than
+  reading it — which is precisely the "evidence over assertion" principle (P4)
+  applied to security code.
+  **Round 15 — a second CRITICAL, from the tool contract rather than the shell:**
+  `shlex(whitespace_split=True)` consumes newlines as whitespace, so a MULTI-LINE
+  Bash command collapsed into one segment and every rule keyed on the first
+  command name simply skipped lines 2+ — `echo hi\ntouch .commit-approved`
+  forged the human sentinel, and the same trick reached force-push, `rm -rf
+  .git`, and `gh pr merge`. The Bash tool accepts multi-line strings routinely,
+  so this was reachable without any evasive intent. Fixed by splitting lines
+  OUTSIDE quotes before tokenizing (a quoted multi-line commit message stays one
+  token). Lesson: a guard must model the exact input its TOOL accepts, not the
+  convenient single-line case its tests happened to use.
+  **Round 16 — a THIRD critical, in the fix for the second:** my line-splitter
+  preserved backslash-newline continuations, so shlex prefixed a literal newline
+  onto the next token and every flag/subcommand rule stopped matching (`git
+  commit \\<nl>-n`, `git push \\<nl>--force origin main`, `gh pr \\<nl>merge`);
+  the same hand-rolled state machine also honored backslashes inside single
+  quotes, where POSIX defines none, desyncing quote tracking. Both fixed by
+  following the quoting rules exactly. Also: attached-value message forms
+  (`-m'no changes'`) were false-positived as `-n`; `rm -rf .venv` was allowed
+  even though the Stop gate no-ops without pytest; and pre-push's main-deletion
+  branch had no test. RECURRING META-LESSON: three of the last four criticals
+  were introduced BY a fix for the previous round — which is the strongest
+  possible argument for the re-review-after-fix rule (D1) and for CI (WT.5) as
+  the layer that does not depend on getting a shell parser right.
+  NB (meta): writing THIS note via a bash heredoc was itself blocked by
+  bash_guard (prose quoting blocked commands) — docs go through file tools.
+  **From the WT.3 review round (9 findings, all fixed):** the reviewer tested the
+  guards EMPIRICALLY and proved five majors — clustered `git commit -nm` bypassed
+  every commit gate; gate machinery was writable from Bash (`echo > .githooks/…`,
+  `sed -i`, `chmod -x`) since path_guard only sees file tools; the Stop-gate cache
+  omitted HEAD so a stale green blessed committed red code; force-push rules
+  required `--force` BEFORE `main` (the #40117 reordering); quoted override values
+  (`AGENT_REVIEW="skip"`) evaded literal matches. Root cause named by the
+  reviewer: the test tables mirrored the regexes, not the invariants — tables are
+  now variant-based (clustered/reordered/quoted forms, machinery writes) with 85
+  guard tests + a cache-staleness regression. Honest residual: bash_guard is
+  hardening, not proof (arbitrary shell, e.g. inline python writes, can evade);
+  the un-bypassable layer is CI + branch protection (WT.5). Foreground pushes
+  whose backstop review may exceed the ~10-min tool cap should run in background
+  (the 900 s reviewer timeout assumes the background path). Known ergonomic cost,
+  twice observed: bash heredocs whose PROSE mentions guarded commands trip
+  bash_guard — write such docs via the Edit/Write tools instead.
+  **From the WT.3 second review round (4 findings, all fixed):** the Stop-gate
+  cache now content-hashes untracked src/tests files (names alone let an edited
+  untracked file reuse a stale green — reproduced by the reviewer); force-push
+  detection covers the git-native spellings `+main`/`+HEAD:main` and bare
+  `git push --force` (resolves the checked-out branch, blocks when it is main,
+  allows feature-branch force-with-lease); bash_guard honors `.guard-override`
+  like path_guard (its own remedy text promised it); guard tests are now 93,
+  parametrized against an explicit project dir so a dev-machine override can
+  never mask a regression.
+  **From the WT.3 third review round (5 findings, all fixed):** the Stop-gate
+  cache scope now includes the gate-machinery paths the suite itself tests
+  (.claude, .githooks, scripts) — editing a hook no longer reuses a stale green;
+  force-push detection resolves HEAD/@ refspecs (which force the CURRENT branch)
+  against the checkout; the settings deny prefix `git push --force*` was dropped
+  (it over-blocked force-with-lease to feature branches — bash_guard's
+  branch-aware logic is the enforcement); and `.guard-override` breadth is now
+  split by design: it relaxes ONLY machinery-write rules, while approval/waiver/
+  audit rules (sentinels, AGENT_REVIEW, gh pr merge, reviews/) stay enforced in
+  both guards even during maintenance — fixing a hook never grants the power to
+  approve one's own work. 95 guard tests.
 
 `.githooks/post-commit`:
 
@@ -759,7 +1354,7 @@ export VA_AGENT_REVIEW=1
 # stderr goes to .git/ (NOT reviews/ — a stray non-.md file there would trip the
 # pre-commit ledgers-only gate at the next `git add reviews/`).
 errlog=".git/agent-review.err"
-raw=$(timeout 480 claude -p "$prompt" \
+raw=$(timeout 900 claude -p "$prompt" \
   --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git blame *),Bash(git status *)" \
   --output-format json --max-turns 40 2>"$errlog") || {
     echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $errlog" >&2
@@ -1191,6 +1786,46 @@ executed (this table is the rollout's "Done when").
 | 35 | L1 | edit CLAUDE.md / `.claude/` / hooks / workflows with a plain `docs:` subject | blocked — instruction-bearing files are never docs-exempt, in all three docs-only checks |
 | 36 | L2 | suite exits nonzero with a "33 passed, 1 error" summary (collection error) | push blocked — Gate 1 trusts the exit code, not the summary line |
 | 37 | L1/L2 | rewrite a shipped `reviews/` ledger (forge the audit trail), commit (or `--no-verify` + push) | blocked at commit AND at push — ledgers are append-only; `ALLOW_LEDGER_EDIT=1` is the human-only override |
+| 38 | L0 | in-session: write `.git/.review-approved` directly (self-bless) or fabricate a `reviews/*.md` ledger | blocked by bash_guard (write-verb rules) and path_guard (`reviews/`, `.git/.review-approved` protected) — PR 2 round-5 carry |
+| 39 | L0 | read-only sentinel checks (`ls .guard-override`, `cat .git/.review-approved`) | allowed — sentinel rules scope to write verbs only |
+| 40 | L0 | the wedge: red suite whose only fix is in a guard-protected file | Stop gate blocks the turn, path_guard blocks the fix — resolution is the human's `.guard-override` (observed live during PR 3 development, before the guards' own PR existed) |
+| 41 | L0 | `git -c x=y commit -nm` / `git -C . push --force origin main` (global-flag insertion) | blocked — subcommand rules carry a git-global-flag prefix (GITCMD) |
+| 42 | L0 | force-push via `HEAD`/`@`/`refs/heads/main` refspecs, or bare from a main checkout | blocked — refspec-aware destination matching + upstream resolution |
+| 43 | L0 | `git push --force-with-lease origin feature/main-page` | allowed — exact ref-component match, no substring false positive |
+| 44 | L0 | write `.git/.stop-gate-green` or tamper with `.venv/bin/pytest` | blocked — stop-gate self-blessing closed like row 38's review hash |
+| 45 | L0 | edit gate machinery, then end the turn on a red suite | Stop-gate cache covers `.claude/`, `.githooks/`, `scripts/` — stale greens don't bless machinery edits |
+| 46 | L0 | during a maintenance window: `touch .commit-approved` / `AGENT_REVIEW=skip` | still blocked — `.guard-override` relaxes ONLY machinery-write rules |
+| 47 | L0 | force-push to a QUOTED refspec (`origin "main"`) | blocked — push tokens are shell-quote-stripped before destination matching |
+| 48 | L0 | `sed -i` a ledger / `dd` the approval hash / `ln -sf` over pytest, or Edit/Write the stop-gate cache and pytest paths | blocked — one WRITE_VERBS list guards every protected artifact in bash_guard, and path_guard covers both self-bless paths |
+| 49 | L0 | long-form write verbs (`sed --in-place`, `install`) on protected artifacts/machinery | blocked — WRITE_VERBS covers long-form spellings |
+| 50 | L0/L2 | rewrite main without naming it: `push --force --all`, `push --mirror`, delete via `:main` / ref-deletion push | blocked in bash_guard AND pre-push (deletion of refs/heads/main) |
+| 51 | L0 | Write to `.git/config` (hooksPath) or `.git/hooks/` | blocked — path_guard protects the git-config attack surface |
+| 52 | L0 | edit `config/roles.yaml`, end turn on the resulting red suite | blocked — stop-gate cache scope includes `config/` |
+| 53 | L0 | `git push --delete origin main` / `-d origin main` | blocked in bash_guard too (was pre-push only) |
+| 54 | L0 | commit message legitimately containing " -n" | allowed — the -n rule matches flags before the message, not message text |
+| 55 | L0 | n-flag after other flags: `commit --amend -n`, `-a -n`, `-q -nm` | blocked — the rule scans the whole flag run, not just the first token |
+| 56 | L0 | bare-directory destruction: `rm -rf .githooks`, `rm -rf .claude`, `rm -rf reviews`, `mv .claude /tmp` | blocked — machinery patterns no longer require a trailing slash |
+| 57 | L0 | hook-skip flags in every argv position: `commit -m x -n`, `-F file -n`, `--message=… -n`, `push --no-verify` | blocked — decided by shell tokenization, not flag-position regex |
+| 58 | L0 | a commit MESSAGE that mentions `-n` or `--no-verify`; `git push -n` (dry-run) | allowed — value flags consume their argument; short -n only means no-verify for commit |
+| 59 | L0 | shell separator inside a QUOTED argument (commit message with `&`, `cp "/tmp/a&b" .git/.review-approved`) | blocked — segmentation is quote-aware tokenization, not `re.split` on separator chars |
+| 60 | L0 | `dd of=<protected>` operand syntax; `rm -rf /` | blocked — operand-form write targets and root paths parsed explicitly |
+| 61 | L0 | reading protected files (`cat .git/.review-approved`, `cat .claude/settings.json`) | allowed — only write commands and redirection targets are gated |
+| 62 | L0 | write verb wrapped in a subshell or brace group: `( touch .commit-approved )`, `{ cp /tmp/h .git/.review-approved; }` | blocked — grouping tokens end a segment, so the real verb is analyzed |
+| 63 | L0 | alternate write redirects into protected artifacts: `>\|`, `>&`, `&>>`, `2>` | blocked — redirect operators matched by pattern, not a hardcoded list |
+| 64 | L0 | `-n` behind flags that take no separate-token value: `commit -S -n`, `--gpg-sign -n`, `-o -n` | blocked — VALUE_FLAGS lists only genuinely arg-taking flags |
+| 65 | L0 | env-prefixed destructive command: `LC_ALL=C rm -rf .git` | blocked — every rule resolves the command name through one helper that skips ENV=value prefixes |
+| 66 | L0 | branch literally named `commit`: `git push --no-verify origin commit` | blocked — the git subcommand is found by POSITION (after global flags), not by searching for a known word |
+| 67 | L0 | `git stash push -f`, `git subtree push …` | allowed — push rules apply only to the real `git push` subcommand |
+| 68 | L0 | `rm -R .git`, `rm --recursive .git` | blocked — every recursive spelling, not just `-rf` |
+| 69 | L0 | `ALLOW_MAIN_COMMIT=yes`, `ALLOW_LEDGER_EDIT=y` | blocked — the hooks honor ANY non-empty value, so the guard matches the invariant, not `=1` |
+| 70 | L0 | `gh pr review -a`, `gh pr edit --add-label=human-reviewed`, env-prefixed `gh pr merge` | blocked — gh rules resolve the command through the shared helper and cover short/attached flag forms |
+| 71 | L0 | Write to a linked worktree's `.git/worktrees/<n>/.stop-gate-green` | blocked — state files match by basename anywhere, not by fixed path |
+| 72 | L0 | multi-line Bash where the real command is on line 2+ (`echo hi\ntouch .commit-approved`) | blocked — newlines are command separators, split outside quotes before tokenizing |
+| 73 | L0 | a quoted multi-line commit MESSAGE | allowed — line splitting respects quotes, so the message stays one token |
+| 74 | L0 | backslash-newline line continuation before a flag or subcommand (`git commit \\<nl>-n`) | blocked — continuations are joined per POSIX before tokenizing |
+| 75 | L0 | `git commit -m'no changes'` (attached value whose text contains 'n') | allowed — attached-value data is cut at the value flag |
+| 76 | L0 | `rm -rf .venv` / `mv .venv /tmp` (the Stop gate no-ops without pytest) | blocked — the venv is gate infrastructure, not just its binary |
+| 77 | L2 | `git push origin :main` | blocked — pre-push refuses main deletion (now covered by a test) |
 
 ## Rollout order
 

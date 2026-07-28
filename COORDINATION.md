@@ -233,3 +233,12 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   commit with the human's `.commit-approved` sentinel, or on docs-only branches). Pushes block on
   provisional subjects and on unapproved content (backstop review). See the new "Commit & review
   lifecycle" section in CLAUDE.md. Affects BOTH agents' commit habits immediately after this merges.
+- **2026-07-27 (trust):** Session guards landing (branch `trust/l0-session-guards`, plan WT.3):
+  committed `.claude/settings.json` adds PreToolUse guards (bash_guard.py: blocks --no-verify,
+  force-push main, hooksPath changes, human-only override tokens, sentinel/approval-file writes,
+  reviews/ writes, self-merge/label; path_guard.py: blocks Edit/Write to gate machinery + reviews/ +
+  sentinels) and a Stop gate (turn cannot end with a red offline suite; change-detected, exit-code
+  based). **Action for BOTH agents: restart sessions after this merges** (hooks snapshot at start).
+  Gate-machinery edits need the human's guard-override sentinel. Guards demonstrated live during
+  their own development (blocked their author; resolved via the designed human override). NB: bash
+  heredocs whose PROSE mentions override commands trip bash_guard — write docs via the Edit tool.
