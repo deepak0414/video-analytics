@@ -49,6 +49,12 @@ class TrustRepo:
 
     def run(self, *cmd, env=None, text_input=None):
         merged = os.environ.copy()
+        # Never inherit the recursion guard: it short-circuits post-commit, so
+        # inside a reviewer session (agent-review.sh exports it) 5 tests here
+        # would fail and the suite would report a false red — the suite this PR
+        # makes the required check and /verify's evidence artifact must not be
+        # environment-dependent. Tests set it explicitly when they mean it.
+        merged.pop("VA_AGENT_REVIEW", None)
         merged.update(ZERO_ENV)
         merged.update(self.base_env)
         merged.update(env or {})

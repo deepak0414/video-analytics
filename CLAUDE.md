@@ -120,6 +120,24 @@ yourself). Then `git add reviews/` and `git commit --amend` with the real subjec
 pushed. All overrides (`AGENT_REVIEW=skip`, `ALLOW_MAIN_COMMIT=1`, `ALLOW_TEST_REMOVAL=1`,
 `ALLOW_LEDGER_EDIT=1`) are human-only.
 
+**CI gates (WT.5–WT.7)** run on GitHub, beyond reach of any local override — though not
+absolutely: a `pull_request` run executes the PR's own copy of the workflows and of
+`check_critical_paths.sh`, so a PR can weaken the checks that gate it. Branch protection
+pins the required check NAMES server-side (deleting one leaves it unreported and the merge
+blocked), but weakened check *contents* are caught only by human review of `.github/` and
+`scripts/`. The gates are:
+`offline-tests` (the full offline suite — a red suite blocks merge), `evidence` (the PR
+body must carry real pytest counts, not the phrase "tests pass" — run `/verify` to
+generate the block), and `critical-paths` (PRs touching `scripts/critical_paths.txt`
+entries need the `human-reviewed` / `golden-verified` label). Checks re-run on `edited`
+and `labeled`, so fixing a body or adding a label needs no new commit.
+
+**What the labels mean (D9):** they are the human's *attestation*, not proof. Agent
+sessions share the human's GitHub credential, so the guards blocking `gh`/`curl`/etc from
+applying labels are a speed bump against accident, not a guarantee. **Never apply a review
+label yourself** — the label is worthless if you do, and the bounded-review contract (P5)
+is the only thing that depends on it.
+
 **Session guards (WT.3)** are active via `.claude/settings.json`: bash/path guards
 block gate-bypass commands and edits to gate machinery (`.githooks/`, `.claude/`,
 `.github/workflows/`, trust scripts, `reviews/`, the sentinels); a Stop gate blocks

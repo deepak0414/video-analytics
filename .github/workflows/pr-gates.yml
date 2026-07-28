@@ -1,0 +1,52 @@
+# PR-body and human-review gates (workflow-trust-plan.md WT.6 / WT.7).
+#
+# `edited` and `labeled` are deliberate: fixing a PR body or applying a review
+# label must re-run these checks WITHOUT a new commit — that is exactly what
+# WT.7's "Done when" requires.
+name: pr-gates
+on:
+  pull_request:
+    types: [opened, edited, synchronize, labeled, unlabeled]
+
+jobs:
+  # P4 — evidence over assertion: "tests pass" is not evidence, the output is.
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR body must contain a filled EVIDENCE block
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! printf '%s' "$BODY" | grep -q 'EVIDENCE: offline suite'; then
+            echo 'FAIL: missing Evidence section (see .github/pull_request_template.md)'
+            exit 1
+          fi
+          # The marker alone is not evidence — deleting the placeholder is the
+          # natural way to "clean up" the template, and an EMPTY block used to
+          # pass. Require real pytest output (a count + outcome). This also
+          # removes the inverse false positive: a PR that legitimately quotes
+          # the `<paste: …>` placeholder while carrying real output now passes.
+          if ! printf '%s' "$BODY" | grep -qE '[0-9]+ (passed|failed|error)'; then
+            echo 'FAIL: Evidence block has no test output (expected e.g. "411 passed, 2 skipped")'
+            echo '      Run /verify to generate it — never write "tests pass" without the counts.'
+            exit 1
+          fi
+          echo 'evidence present'
+
+  # P5 — bounded human review: a short, explicit list of paths that always get
+  # the user's eyes, proven by a label they apply themselves.
+  critical-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the checker diffs base...HEAD
+          # Check out the PR HEAD, not the default MERGE ref: the merge ref
+          # contains main's newer commits, so `base...HEAD` would attribute
+          # another PR's files to this one and demand labels for them.
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Critical paths require human-reviewed / golden-verified labels
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: bash scripts/check_critical_paths.sh "$BASE" "$LABELS"

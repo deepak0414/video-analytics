@@ -1,6 +1,10 @@
 # Workflow Trust Plan — deterministic gates, hooks, and due-diligence automation
 
-Status: draft for review, 2026-07-23. Nothing in this plan is implemented yet.
+Status: **in rollout**, updated 2026-07-28. WT.0–WT.4 + WT.10 are SHIPPED (PR #13
+L1 git hooks, #14 review lifecycle, #15 session guards — all merged to main); WT.5–WT.7
+(CI gates) are in flight on `trust/l3-ci`; WT.8 (`/lesson`) and the WT.9 deferrals remain.
+Task cards carry as-built notes where reality diverged from the draft — read those before
+implementing from a code block.
 Companion docs: `qa-and-traceability-plan.md` (the QA phase this extends), `CLAUDE.md`
 (conventions this plan mechanizes), `plan.md` (task-card format this follows).
 
@@ -572,7 +576,11 @@ def is_machinery(path):
     if {".githooks", ".claude", ".github"} & set(ps):
         return True
     if ps[-2:-1] == ["scripts"] and ps[-1] in (
-            "agent-review.sh", "review_scope_hash.sh", "setup-hooks.sh"):
+            "agent-review.sh", "review_scope_hash.sh", "setup-hooks.sh",
+            # The WT.7 gate IS these two files, and CI runs the PR's own copy —
+            # unprotected, a PR could neuter the gate it must pass, and the same
+            # PR would then sail through it (PR 4 backstop major).
+            "check_critical_paths.sh", "critical_paths.txt"):
         return True
     return False
 
@@ -704,20 +712,122 @@ for seg in segments(cmd):
                     ".githooks" in ps or ".claude" in ps:
                 block("destructive delete of repo/system paths.")
 
-    # 4. gh self-approval / self-merge (env-prefix safe; attached and short
-    # flag spellings included — round-14 major).
+    # 4. gh self-approval / self-merge / self-labeling (env-prefix safe; attached
+    # and short flag spellings included — round-14 major).
+    # GitHub treats a PR as an issue, so `gh issue edit <PR#> --add-label` and the
+    # REST route both apply REVIEW labels to a PR: gating only `gh pr` left the
+    # WT.7 label gate self-servable (PR 4 backstop major).
     gname, gargs = command_name(seg)
-    if gname == "gh" and gargs[:1] == ["pr"]:
-        action = gargs[1] if len(gargs) > 1 else ""
-        if action == "merge":
+    REVIEW_LABELS = ("human-reviewed", "golden-verified")
+
+    # Any HTTP client can hit the same endpoints with the same token
+    # (`gh auth token` + curl was demonstrated by the PR 4 backstop). Blocking
+    # them is a SPEED BUMP against accident, not a guarantee: with a shared
+    # credential, anything the human can do the agent can do. See D9 in
+    # workflow-trust-plan.md — the real fix is a separate, label-incapable
+    # credential for agent sessions.
+    if gname in ("curl", "wget", "http", "https", "httpie", "xh"):
+        joined_http = " ".join(gargs)
+        if "api.github.com" in joined_http or "/repos/" in joined_http:
+            if any(lbl in joined_http for lbl in REVIEW_LABELS) or re.search(
+                    r"/(labels|reviews|merge)\b", joined_http) or any(
+                    m in joined_http for m in ("addLabelsToLabelable", "addLabels",
+                                               "mergePullRequest",
+                                               "addPullRequestReview")):
+                block("applying review labels / approvals / merges over HTTP is "
+                      "human-only (P5). NB: this is defense-in-depth, not a "
+                      "guarantee — see D9.")
+    # Every spelling that PRINTS the credential, not just `gh auth token`:
+    # `gh auth status --show-token` / `-t` emits the same secret.
+    if gname == "gh" and gargs[:1] == ["auth"]:
+        if gargs[1:2] == ["token"] or any(
+                t in ("--show-token", "-t") or t.startswith("--show-token=")
+                for t in gargs[1:]):
+            block("extracting the human's credential is forbidden — it is the key "
+                  "to every human-only action (labels, approvals, merges).")
+    # Persistent flags may sit between the noun and the action
+    # (`gh issue -R owner/repo edit …`), so positions are parsed, not assumed —
+    # the same leak class git_subcommand() exists to avoid (PR 4 backstop major).
+    GH_VALUE_FLAGS = {"-R", "--repo", "-H", "--hostname", "-F", "--field",
+                      "-f", "--raw-field", "-X", "--method", "-H", "--header",
+                      "-q", "--jq", "-t", "--template", "-i", "--input"}
+
+    def gh_words(args):
+        out, i = [], 0
+        while i < len(args):
+            t = args[i]
+            if t in GH_VALUE_FLAGS:
+                i += 2
+                continue
+            if t.startswith("-"):
+                i += 1
+                continue
+            out.append(t)
+            i += 1
+        return out
+
+    if gname == "gh":
+        words = gh_words(gargs)
+        # `gh alias set m 'pr merge'` then `gh m 14` renames the action past every
+        # noun/action rule. Aliases are opaque to a static guard, so block their
+        # CREATION rather than pretend to resolve them (finalize-round minor).
+        if words[:1] == ["alias"] and words[1:2] in (["set"], ["import"]):
+            block("installing gh aliases hides the real subcommand from the "
+                  "guards (`alias set`, and `alias import` from a file); ask "
+                  "the user instead.")
+        noun = words[0] if words else ""
+        action = words[1] if len(words) > 1 else ""
+        # Any mention of a review label anywhere in a gh command is decisive:
+        # -f 'labels[]=human-reviewed', a GraphQL mutation body, --add-label=…
+        if noun == "pr" and action == "merge":
             block("merging PRs is a human action in this repo.")
-        if action in ("edit", "review") and any(
-                t in ("--approve", "-a", "--add-label", "human-reviewed",
-                      "golden-verified")
-                or t.startswith("--add-label=") or t.startswith("--body=")
-                and ("human-reviewed" in t or "golden-verified" in t)
-                for t in gargs[2:]):
-            block("review labels/approvals are human-only (P3).")
+        # Reading label state is legitimate (checking whether the human has
+        # applied one); only APPLYING is human-only (PR 4 backstop minor).
+        # Applying a label is signalled by a FLAG (--add-label/--approve) or an
+        # API field — never by prose. Blocking any command whose text mentions a
+        # label name false-blocked `gh pr create/edit --body "<filled template>"`,
+        # because the repo's own template names both labels: the guard was
+        # breaking the lifecycle steps that open and fix a PR. Prose is not an
+        # action; the explicit-flag rule below is what actually gates this.
+        if noun in ("pr", "issue") and action in ("edit", "review") and any(
+                t in ("--approve", "-a", "--add-label")
+                or t.startswith(("--add-label=", "--approve="))
+                for t in gargs):
+            block("review labels/approvals are human-only (P3/P5).")
+        # REST/GraphQL: routes with an explicit verb, PATCH/POST on an issue or
+        # pull (PRs ARE issues), and label/review/merge GraphQL mutations.
+        if noun == "api":
+            joined = " ".join(gargs)
+            # A route alone is not an action: `gh api …/issues/N/labels` with no
+            # method is a GET, and reading label state is legitimate (row 89).
+            # Only an explicit mutating method — or a GraphQL mutation — counts.
+            explicit_method = re.search(
+                r"(^|\s)(-X\s*|--method[= ])([A-Z]+)", joined)
+            # gh api sends POST automatically when fields are supplied, so
+            # `gh api …/labels -f 'labels[]=x'` is a mutation with no -X at all.
+            has_fields = any(
+                t in ("-f", "-F", "--field", "--raw-field", "--input")
+                or t.startswith(("-f", "-F", "--field=", "--raw-field=", "--input="))
+                for t in gargs)
+            verb = (explicit_method.group(3) if explicit_method
+                    else ("POST" if has_fields else "GET"))
+            if verb != "GET" and any(
+                    s in joined for s in ("/labels", "/reviews", "/merge")) or any(
+                    s in joined for s in ("addLabelsToLabelable", "addLabels",
+                                          "mergePullRequest", "addPullRequestReview")):
+                block("applying labels / approving / merging via the API is "
+                      "human-only (P3/P5).")
+            # Attached spellings (-XPATCH, --method=PATCH) and body-from-file
+            # forms (--input f, -F q=@f) keep the method/label out of argv, so
+            # match the method textually and treat any file-fed body on an
+            # issue/pull route as mutating (PR 4 backstop major).
+            mutating = bool(re.search(r"(^|\s)(-X\s*|--method[= ])(PATCH|POST|PUT|DELETE)\b",
+                                      joined))
+            body_from_file = bool(re.search(r"(--input|[-][fF]\s*\S*@)", joined))
+            if (mutating or body_from_file) and (
+                    re.search(r"/(issues|pulls)/\d+", joined) or "graphql" in gargs):
+                block("mutating a PR/issue (or a GraphQL mutation) via the API is "
+                      "human-only (P3/P5) — labels and approvals come from the user.")
 
     # 5. git: hook-skipping flags, in any position/spelling.
     sub, sub_args = git_subcommand(seg)
@@ -843,6 +953,10 @@ MAINTENANCE_PROTECTED = (
     "scripts/agent-review.sh",
     "scripts/review_scope_hash.sh",
     "scripts/setup-hooks.sh",
+    # The WT.7 gate is made of these two, and CI executes the PR's own copy —
+    # unprotected, a PR could neuter the gate it must pass (PR 4 backstop major).
+    "scripts/check_critical_paths.sh",
+    "scripts/critical_paths.txt",
 )
 # Sentinel/state files are matched by BASENAME anywhere, not just at their usual
 # path: in a linked worktree the stop-gate cache lives at
@@ -1354,7 +1468,11 @@ export VA_AGENT_REVIEW=1
 # stderr goes to .git/ (NOT reviews/ — a stray non-.md file there would trip the
 # pre-commit ledgers-only gate at the next `git add reviews/`).
 errlog=".git/agent-review.err"
-raw=$(timeout 900 claude -p "$prompt" \
+# 1800s: review cost scales with BRANCH size, not commit size — the backstop
+# re-reads the whole range every round, so a long-lived branch eventually times
+# out (480 -> 900 -> 1800 across PRs 3-4). The real fix is smaller PRs; this is
+# the ceiling that keeps fail-closed from becoming fail-stuck.
+raw=$(timeout 1800 claude -p "$prompt" \
   --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git blame *),Bash(git status *)" \
   --output-format json --max-turns 40 2>"$errlog") || {
     echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $errlog" >&2
@@ -1425,27 +1543,60 @@ button is disabled; a green PR shows the check passing in ≤ ~5 min.
 `.github/workflows/offline-tests.yml`:
 
 ```yaml
+# The strongest gate — but NOT an absolute one (workflow-trust-plan.md WT.5).
+#
+# Local gates (git hooks, session guards) are hardening: 17 review rounds on the
+# session guards showed a determined shell can usually find one more spelling,
+# and every local gate is deliberately human-overridable. This job runs on
+# GitHub's machine, where there is no session to snapshot, no shell to out-parse
+# and no sentinel to forge.
+#
+# The honest limit (found by review, do not restore the stronger claim): a
+# `pull_request` run executes the PR-HEAD copy of this file and of
+# scripts/check_critical_paths.sh, so a PR can weaken the very checks that gate
+# it. What still holds is branch protection: the required CONTEXT names are
+# fixed server-side, so deleting or renaming a check leaves it never-reported
+# and the merge stays blocked. Weakening a check's *contents* while keeping its
+# name is caught only by human review of .github/ and scripts/ — which is the
+# `human-reviewed` label, and per D9 that is attestation, not proof.
 name: offline-tests
 on:
   pull_request:
   push:
     branches: [main]
+
 jobs:
   offline-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      # cache-dependency-path is REQUIRED here: this repo is pyproject-only with
+      # no requirements.txt, and setup-python keys its pip cache off a hashed
+      # dependency file. Without it the step can error before installing
+      # anything, which would make the required check permanently red.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install (stub backends only — no GPU, no model downloads)
+          cache-dependency-path: pyproject.toml
+
+      # Stub backends only: no GPU, no model downloads, no network in-test.
+      # -e is LOAD-BEARING: configuration.py resolves config/ as
+      # parents[2]/"config", which sits outside src/ and is not package data.
+      # [web] is not optional either: tests/test_web.py imports
+      # fastapi.testclient unguarded, so a missing extra is a collection error.
+      - name: Install (stub backends only)
         run: |
           python -m venv .venv
+          .venv/bin/pip install --upgrade pip
           .venv/bin/pip install -e '.[web,dev]'
+
+      # The golden modules already skip themselves without RUN_GOLDEN; -m keeps
+      # a future module that forgets that guard from pulling a GPU path into CI.
       - name: Offline suite
-        run: .venv/bin/pytest -q
+        run: .venv/bin/pytest -q -m "not golden"
 ```
 
 Branch protection (run once; requires the check to have run at least once so the
@@ -1456,7 +1607,9 @@ gh api -X PUT repos/deepak0414/video-analytics/branches/main/protection \
   --input - <<'JSON'
 {
   "required_status_checks": { "strict": true,
-    "checks": [ { "context": "offline-tests" } ] },
+    "checks": [ { "context": "offline-tests" },
+                { "context": "evidence" },
+                { "context": "critical-paths" } ] },
   "enforce_admins": false,
   "required_pull_request_reviews": null,
   "restrictions": null,
@@ -1479,6 +1632,25 @@ Notes / risks:
   enforcement is WT.7's `golden-verified` label, not CI. A self-hosted Spark runner is
   explicitly deferred (matches qa-and-traceability-plan's CI/CD deferral).
 
+**As-built (2026-07-28, PR 4) — CI-readiness audit before the first run.** Two install
+facts make the drafted YAML wrong as written; both would have produced a red first run:
+- **The `web` extra is not optional for the offline suite.** `tests/test_web.py:10`
+  imports `fastapi.testclient` unguarded, so a missing extra is a collection ERROR, not
+  a skip. Install `-e '.[web,dev]'`.
+- **The install must stay editable.** `src/va/configuration.py:22` resolves config as
+  `Path(__file__).resolve().parents[2] / "config"`; `config/` lives outside `src/` and is
+  not package data, so a non-editable install breaks `load_config()` (and with it every
+  e2e test). `-e` is load-bearing, not a convenience.
+Also added: `-m "not golden"` on the CI invocation. The golden modules already skip at
+module level without `RUN_GOLDEN`, so this is belt-and-braces against a future module
+that forgets the guard silently pulling a GPU path into CI.
+Verified clean for CI (no change needed): core deps carry no torch/CUDA; `imageio-ffmpeg`
+ships its binary in the wheel (no first-use download); no test touches the network, GPU,
+or the checked-out repo's git state; `tests/test_trust_hooks.py` / `test_trust_guards.py`
+build their own bare origin + clone and neutralize `GIT_CONFIG_GLOBAL/SYSTEM`, so
+`actions/checkout@v4`'s shallow clone, detached HEAD and absent git identity cannot
+affect them. Expected runtime ~1–3 min on a 2-core runner (~389 offline tests).
+
 ### WT.6 — Evidence over assertion, machine-checked
 
 **Goal:** every PR body carries pasted evidence (test output, golden results,
@@ -1496,22 +1668,24 @@ output.
 ```markdown
 ## What & why
 
-<!-- one paragraph; link the plan doc + task IDs this implements -->
+<!-- One paragraph. Link the plan doc + task IDs this implements. -->
 
 ## Done-when mapping
 
-<!-- each plan "Done when" item this PR claims, one line each -->
+<!-- Each plan "Done when" item this PR claims, one line each. -->
 
 ## Evidence
 
-<!-- REQUIRED (CI-checked). Paste real output — never say "tests pass" without it. -->
+<!-- REQUIRED and CI-checked (P4: evidence over assertion). Paste REAL output —
+     never write "tests pass" without the numbers. `/verify` generates this block. -->
 
 ```text
 EVIDENCE: offline suite
 <paste: .venv/bin/pytest -q tail>
 ```
 
-- [ ] Golden gate run (required if adapters/pipeline/config touched — label `golden-verified`):
+- [ ] Golden gate run — required if `src/va/adapters/`, `src/va/pipeline/` or any
+      `config/` was touched (then also apply the `golden-verified` label):
 
 ```text
 EVIDENCE: golden gate (or "not required because ...")
@@ -1519,8 +1693,8 @@ EVIDENCE: golden gate (or "not required because ...")
 
 ## Review
 
-- [ ] Agent review ledger committed under `reviews/` (pre-push writes it)
-- [ ] Critical paths touched? → user has read them (label `human-reviewed`)
+- [ ] Agent review ledger committed under `reviews/` (post-commit writes it)
+- [ ] Critical paths touched? → the user has read them and applied `human-reviewed`
 ```
 
 `pr-gates.yml` `evidence` job (checks the marker AND that it isn't the empty
@@ -1539,8 +1713,12 @@ jobs:
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
-          echo "$BODY" | grep -q 'EVIDENCE: offline suite' || { echo 'missing Evidence section'; exit 1; }
-          echo "$BODY" | grep -q '<paste:' && { echo 'Evidence section still contains template placeholder'; exit 1; }
+          if ! printf '%s' "$BODY" | grep -q 'EVIDENCE: offline suite'; then
+            echo 'missing Evidence section'; exit 1
+          fi
+          if printf '%s' "$BODY" | grep -q '<paste:'; then
+            echo 'Evidence section still contains template placeholder'; exit 1
+          fi
           echo "evidence present"
   critical-paths:   # defined in WT.7
     runs-on: ubuntu-latest
@@ -1558,19 +1736,37 @@ jobs:
 
 ```markdown
 ---
-description: Run all local gates and emit a paste-ready Evidence block for the PR body
+description: Run the local gates and emit a paste-ready Evidence block for the PR body
 allowed-tools: ["Bash", "Read"]
 ---
 
-Run the offline suite (.venv/bin/pytest -q) and `git status --short`. If the branch
-touches adapters/pipeline/config, remind that the golden gate is required and print
-the exact RUN_GOLDEN command from CLAUDE.md. Then output a single fenced block:
+Run the offline suite and report it as evidence, not as a claim (P4).
 
+1. Run `.venv/bin/pytest -q` and capture the summary line verbatim.
+2. Run `git status --short` and `git diff --name-only origin/main...HEAD`.
+3. If the diff touches `src/va/adapters/`, `src/va/pipeline/` or any `config/`
+   directory, say that the golden gate is REQUIRED for this PR and print the exact
+   command from CLAUDE.md (`RUN_GOLDEN=1 VA_CONFIG_DIR=run-claude/config
+   GOLDEN_WORKDIR=.va-shots .venv/bin/pytest -m golden`) — it needs the Spark's GPU
+   and a pre-ingested workdir, so it cannot run in CI.
+
+Then output exactly one fenced block, ready to paste into the PR body:
+
+```text
 EVIDENCE: offline suite
-<the actual pytest tail — never summarize or say "passed" without the line count>
-
-Include failures verbatim if any. This block is the artifact; do not editorialize.
+<the actual pytest tail — the real counts, never a summary>
 ```
+
+Rules: paste failures verbatim if the suite is red; never write "passed" without the
+test count; do not editorialize around the block. The block IS the artifact.
+```
+
+**As-built (2026-07-28, PR 4).** The drafted `evidence` step had a latent failure: its
+second check was `grep -q '<paste:' && { …; exit 1; }`, and when that grep correctly finds
+nothing the compound returns non-zero — as the step's LAST command, that fails the job on
+a *good* PR. Rewritten as `if … then … fi` (shown above). Trigger types keep `edited` and
+`labeled` deliberately: fixing a PR body or adding a label must re-run the checks WITHOUT
+a new commit, which is exactly what WT.7's "Done when" requires.
 
 ### WT.7 — Bounded human review: the critical-path contract
 
@@ -1587,17 +1783,41 @@ doing it via `gh`) turns it green without new commits.
 purpose; a long list collapses back into "review everything" which means nothing):
 
 ```text
-# pattern (git pathspec)                      required-label
+# Bounded human review (workflow-trust-plan.md WT.7 / P5).
+#
+# PRs touching these paths require the named label before CI goes green. The
+# list is deliberately SHORT: a long list collapses back into "review
+# everything", which means nothing. Reviewed quarterly.
+#
+#   human-reviewed   = the user has read this diff themselves.
+#   golden-verified  = the golden gate was run on the Spark and its output is
+#                      pasted in the PR's Evidence section.
+#
+# Labels are applied by the human in the GitHub UI; bash_guard.py blocks agents
+# from setting them via gh (matrix row 70).
+#
+# pattern (path prefix)                       required-label
+
+# --- the one shared DB schema + the deletion path ---
 src/va/storage/structured/schema.py           human-reviewed
-src/va/storage/structured/migrations*         human-reviewed
-src/va/contracts/                             human-reviewed
-src/va/pipeline/ingest.py                     human-reviewed
+src/va/storage/structured/migrations          human-reviewed
 src/va/cli.py                                 human-reviewed
+src/va/pipeline/ingest.py                     human-reviewed
+
+# --- evolution-tolerant runtime contracts (QueryPlan/Evidence/Answer) ---
+src/va/contracts/                             human-reviewed
+
+# --- the verification layer itself: a hallucinated fixture poisons everything
+#     downstream (see the cobra-kitchen audit in CLAUDE.md) ---
 tests/golden_queries/                         human-reviewed
+
+# --- the trust machinery: gates that can be weakened silently ---
 .githooks/                                    human-reviewed
 .claude/                                      human-reviewed
 .github/                                      human-reviewed
 scripts/                                      human-reviewed
+
+# --- model/backend behavior: needs the real-model gate, not just stubs ---
 src/va/adapters/                              golden-verified
 src/va/pipeline/                              golden-verified
 config/                                       golden-verified
@@ -1615,21 +1835,212 @@ output is in the PR Evidence section."
 
 ```bash
 #!/usr/bin/env bash
-set -euo pipefail
-base="$1"; labels="${2:-}"
-changed=$(git diff --name-only "$base"...HEAD)
+# Bounded human review (workflow-trust-plan.md WT.7).
+# Usage: check_critical_paths.sh <base-sha> "<space-separated PR labels>"
+# Exit 0 = every touched critical path carries its required label; 1 = missing.
+#
+# NB: no `set -e` — `grep -q` returning 1 on a non-match is the NORMAL path here,
+# and errexit would abort the scan at the first unmatched pattern (making the
+# gate silently pass). Failures are accumulated explicitly instead.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+base="${1:?usage: check_critical_paths.sh <base-sha> [labels]}"
+labels="${2:-}"
+table="scripts/critical_paths.txt"
+
+[ -f "$table" ] || { echo "FAIL: $table missing — the gate cannot verify anything"; exit 1; }
+
+# Three-dot: what THIS branch changed since it diverged, ignoring main's moves.
+# -M + --name-status so RENAMES yield BOTH paths: `--name-only` reports only the
+# destination, so `git mv src/va/cli.py src/va/cli_main.py` would have escaped the
+# exact-file patterns entirely (PR 4 backstop minor).
+# core.quotepath=off: git C-quotes non-ASCII paths by default ("sch\303\251ma.py"),
+# which never matches a literal prefix — fail-open on exactly the files this gate
+# exists to catch. -z + NUL parsing also keeps paths with spaces intact.
+raw=$(git -c core.quotepath=off diff -M --name-status "$base"...HEAD) || {
+  echo "FAIL: cannot diff against '$base' (fetch-depth: 0 required in CI)"; exit 1; }
+# Lines are TAB-delimited: "STATUS<TAB>path" (or "R100<TAB>old<TAB>new").
+# cut -f2- keeps every path field, tr splits renames onto their own lines —
+# TAB-splitting (not whitespace) so paths containing SPACES survive intact.
+# NB: -z is unusable here — bash cannot hold NUL bytes in a variable, so a
+# NUL-delimited stream collapses into a single line under command substitution.
+changed=$(printf '%s\n' "$raw" | cut -f2- | tr '\t' '\n')
+
 missing=0
-while read -r pattern label; do
-  [ -z "$pattern" ] && continue; case "$pattern" in \#*) continue;; esac
-  if echo "$changed" | grep -q "^${pattern}"; then
-    if ! echo " $labels " | grep -q " ${label} "; then
+while read -r pattern label _rest; do
+  case "$pattern" in ""|\#*) continue ;; esac
+  [ -n "${label:-}" ] || continue
+  # Pure-bash PREFIX matching over the file list. Not `grep` through a pipe:
+  # with pipefail a large `changed` list makes printf die of SIGPIPE once grep
+  # matches early, the pipeline returns 141, and a genuinely touched critical
+  # path reads as untouched — fail-open exactly on the huge PRs where bounded
+  # review matters most. `case` is also literal-prefix (grep -F was unanchored
+  # substring: `web/scripts/app.js` would have demanded a `scripts/` label).
+  hit=0
+  while IFS= read -r f; do
+    case "$f" in "$pattern"*) hit=1; break ;; esac
+  done <<EOF
+$changed
+EOF
+  if [ "$hit" -eq 1 ]; then
+    if printf ' %s ' "$labels" | grep -qF -- " $label "; then
+      echo "ok:   '$pattern' touched, label '$label' present"
+    else
       echo "FAIL: '$pattern' touched but PR lacks label '$label'"
       missing=1
     fi
   fi
-done < scripts/critical_paths.txt
-exit $missing
+done < "$table"
+
+if [ "$missing" -ne 0 ]; then
+  echo
+  echo "Critical paths need a human in the loop (P5). The user applies the label"
+  echo "in the GitHub UI after reading the diff; agents are guard-blocked from"
+  echo "setting it. Re-runs on 'labeled' — no new commit needed."
+fi
+exit "$missing"
 ```
+
+**As-built (2026-07-28, PR 4).** Two corrections to the drafted checker, both about
+failing OPEN: (1) `set -euo pipefail` + `grep -q` aborts the scan at the first pattern
+that does NOT match — which is the normal case — so the gate would pass silently after
+one miss; errexit is dropped and failures accumulate explicitly. (2) A missing
+`critical_paths.txt` or an unresolvable base sha now fails CLOSED with a message instead
+of scanning nothing and exiting 0. Matching uses `grep -qF` (fixed strings) so a path
+containing regex metacharacters cannot misbehave, and the table is read with a `_rest`
+catch-all so trailing words in a row can never be mistaken for a label. Six unit tests
+cover this in `tests/test_trust_guards.py` (label required / wrong label / no label
+needed / comments ignored / two labels on one PR / missing table).
+
+NB: the table lists `scripts/` and `.claude/` under `human-reviewed`, so every trust PR —
+including the one that introduces this gate — requires the human label. That is the
+intended behavior.
+
+**As-built (2026-07-28, PR 4 backstop review — 5 findings).** The push-time backstop caught
+a real hole in the gate's own premise: **`gh issue edit <PR#> --add-label` applies review
+labels to a PR** (GitHub models PRs as issues), and bash_guard gated only `gh pr …` — so an
+agent could have applied its own `human-reviewed` label and turned the critical-path check
+green with no human ever reading the diff. Now `gh issue` and the `gh api …/labels|reviews|merge`
+REST routes are blocked too (row 81). Also: the checker's `printf | grep -qF` form died of
+SIGPIPE under `pipefail` on large file lists and failed OPEN (row 82), and `grep -F` matched
+substrings rather than path prefixes (row 83) — both replaced with pure-bash `case` prefix
+matching. Plan hygiene: the PR-template code block had been corrupted by a sync helper that
+stops at the first closing fence — the template CONTAINS nested ```text fences, so the block
+kept a stale duplicate. Lesson for the sync scripts: nested fences make naive fence-matching
+wrong; verify synced blocks, do not assume.
+
+**Backstop round 2 (4 findings) — the CI gate would never have gone green.** `cache: pip`
+on a pyproject-only repo can error at the setup step *before installing anything*, which
+would have left the new required check permanently red and blocked every merge;
+`cache-dependency-path: pyproject.toml` makes it explicit (row 84). The label hole was
+still open by two more routes — `gh api -X PATCH …/issues/N -f 'labels[]=…'` (no `/labels`
+in the path) and GraphQL mutations (row 85) — and, most instructively, `gh issue -R o/r
+edit …` slipped past because the new gh rule read noun/action at FIXED ARGV POSITIONS: the
+exact leak class `git_subcommand()` was written to eliminate in round 13, reintroduced in
+new code in the same session (row 86). Standing lesson, now twice-earned: when adding a
+rule, reuse the parsing helper — a fresh positional shortcut is a fresh bypass.
+
+**Backstop round 3 (6 findings) — the gate could disable itself.** The sharpest finding of
+PR 4: `scripts/check_critical_paths.sh` and `critical_paths.txt` were NOT in the guards'
+protected sets, and `pr-gates.yml` executes the PR's OWN copy of them — so a PR could
+delete the `scripts/` row (or make the checker `exit 0`) and then sail through the gate it
+had just disabled. Both files are now guarded like the other trust scripts (row 87). Also
+fixed: attached API method spellings and file-fed bodies (`-XPATCH … --input p.json`,
+`-F query=@mutation.graphql`) kept the method and the label string out of argv (row 88);
+label READS are no longer blocked, only applications (row 89); renames are caught by
+diffing `-M --name-status` and taking both paths (row 90); and the branch-protection
+recipe now requires all three contexts — it listed only `offline-tests`, so the evidence
+and critical-path checks would have been advisory while COORDINATION.md announced them as
+merge-blocking. Test-quality lesson: the SIGPIPE regression test wrote ~14 KB, which FITS
+in the 64 KB pipe buffer — it would have passed against the very bug it was named for.
+A regression test that cannot reproduce the original failure is decoration.
+
+**Operational lesson (PR 4): review cost scales with BRANCH size, not commit size.**
+The backstop re-reviews `origin/main...HEAD` every round, so a branch that keeps growing
+gets slower every round — the timeout went 480s (PR 2) -> 900s (PR 3) -> 1800s (PR 4),
+and round 4 of PR 4 hit the ceiling and blocked the push with an empty error log (correct
+fail-closed behavior, wrong reason). Two implications: (1) prefer SMALLER PRs — the
+lifecycle rewards them structurally, since review time is roughly proportional to
+cumulative branch diff; (2) a timeout is indistinguishable from a hostile reviewer crash,
+so it must stay fail-closed, with the human waiver as the escape hatch.
+
+**Backstop round 4 (4 findings) — the label's guarantee is weaker than the docs claimed.**
+`gh auth token` + `curl` applies a label with the same credential, and *no CI layer sits
+above the label because CI is what consumes it as proof*. HTTP clients are now blocked as
+defense-in-depth (row 91) and the overclaim in CLAUDE.md/COORDINATION.md is corrected, but
+the honest conclusion is recorded as **D9**: with a shared credential, client-side blocking
+is a speed bump, not a guarantee. Also fixed: the evidence check accepted an EMPTY block
+(deleting the placeholder was the natural "cleanup") — it now requires real counts (row
+92); `critical-paths` checked out the MERGE ref, so another PR merging to main could
+demand labels on an unrelated PR (row 93); and — most consequentially for this PR — the
+`trust_repo` fixture inherited `VA_AGENT_REVIEW`, so **inside a reviewer session the suite
+reported 5 false failures**, which is exactly the artifact this PR makes the required check
+and `/verify`'s evidence.
+
+**Backstop round 5 — the reviewer caught a cross-session contamination (CRITICAL).**
+`git add -A tests` swept the OTHER session's uncommitted `tests/test_migrations.py` into
+this branch's commit; that test imports `MIGRATIONS`/`SCHEMA_VERSION` from a `schema.py`
+change that exists only in the shared worktree. On a clean checkout — i.e. the CI job this
+very PR introduces — pytest collection would have failed, turning the branch's own
+required check permanently red (row 95). Fixed by rebuilding the commit from an explicit
+file list rather than `-A` on a directory. Two lessons: (1) **never `git add -A` a
+directory in a shared worktree** — stage explicit paths, because the "other agent's files"
+problem is exactly what COORDINATION.md exists to manage; (2) the test-deletion guard
+correctly blocked the naive `--amend` fix (it looked like removing 7 tests), and the right
+move was to rebuild the commit rather than reach for the human-only override — a gate
+firing on a legitimate action is a signal to change the approach, not to escalate.
+Also fixed: `gh auth status --show-token` printed the credential the round-4 speed bump
+was written to protect (row 94).
+
+**Finalize round — APPROVE with 2 minors (both fixed before shipping).** The critical-path
+checker read git's default C-quoted output, so a non-ASCII filename (`sch\303\251ma.py`)
+never matched a literal prefix and needed no label — fail-open on precisely the files the
+gate protects; now `core.quotepath=off` with TAB-delimited parsing, which also keeps paths
+containing spaces intact (row 96). NB an implementation trap found while fixing it: `-z`
+is unusable here because **bash cannot store NUL bytes in a variable**, so a NUL-delimited
+stream collapses to one line under command substitution — the first fix broke 5 tests and
+the suite caught it immediately. Second minor: `gh alias set m 'pr merge'` renames a
+subcommand past every noun/action rule; since aliases are opaque to a static guard, alias
+CREATION is now refused rather than pretending to resolve them (row 97).
+
+**Confirming round — APPROVE with 3 minors, and two of them were the guard blocking
+LEGITIMATE work:** `gh api …/issues/N/labels` with no method is a GET, and reading label
+state is explicitly allowed by row 89 — the route-substring match had made it un-runnable
+(row 99); and `gh pr create --body "$(cat body.md)"` was refused because the repo's own PR
+template mentions both label names, i.e. the guard blocked the very lifecycle step that
+opens a PR (row 100). Third: `--show-token=true` slipped the credential guard — the
+attached-spelling class, now closed for the third time in this project. Worth stating as a
+standing lesson: **an over-broad guard is a defect too.** Every false block pushes the
+agent toward a workaround, and a workaround is exactly the behavior the guards exist to
+prevent; measure a rule by both what it stops and what it breaks.
+
+**Final round — APPROVE, 3 minors, fixed at the ROOT rather than by another spelling.**
+Two of the three were false blocks again (`gh pr edit --body "<filled template>"`), which
+made the underlying error clear: the guard treated *any command whose text mentioned a
+label name* as an application. **Prose is not an action.** Applying a label is signalled by
+a FLAG (`--add-label`, `--approve`) or an API field — so the blanket text rule is gone and
+the explicit-flag rule does the gating (row 102). Removing it immediately exposed a real
+gap the tests caught in seconds: `gh api …/labels -f 'labels[]=x'` carries no `-X`, but
+**gh api sends POST when fields are present** — encoded properly now (row 103). Also
+closed: `gh alias import` (file-based sibling of `alias set`, row 101) and GraphQL mutation
+names on the curl path (row 104). Rounds since finalize: approve/approve/approve, findings
+2 -> 3 -> 3, all minors, all speed-bump or false-block class — the convergence signal that
+says stop.
+
+**Closing round — APPROVE, and the most important finding was about a CLAIM, not code.**
+The reviewer rejected this PR's own framing: calling CI "the un-bypassable layer" overstates
+it, because a `pull_request` run executes the **PR-head copy** of the workflow YAML and of
+`check_critical_paths.sh` — so a PR can weaken the checks that gate it. What actually holds
+is narrower and worth stating precisely: **branch protection pins the required CONTEXT
+names server-side**, so deleting or renaming a check leaves it never-reported and the merge
+stays blocked; weakening a check's *contents* while keeping its name is caught only by
+human review of `.github/` and `scripts/` — i.e. by the `human-reviewed` label, which per
+D9 is attestation, not proof. The claim is corrected in the workflow header and CLAUDE.md.
+Also: `--approve=true` (attached spelling, row 105), and the now-dead `mentions_label`
+variable removed along with the comment that still described the deleted blanket rule —
+stale comments describing removed behavior are how the next reader gets misled.
+**Stopping here:** four consecutive approves, findings 2/3/3/3, all minors of the
+speed-bump or false-block class. The remaining tail is enumeration, not risk.
 
 ### WT.8 — The compounding ledger (make lessons permanent)
 
@@ -1826,6 +2237,34 @@ executed (this table is the rollout's "Done when").
 | 75 | L0 | `git commit -m'no changes'` (attached value whose text contains 'n') | allowed — attached-value data is cut at the value flag |
 | 76 | L0 | `rm -rf .venv` / `mv .venv /tmp` (the Stop gate no-ops without pytest) | blocked — the venv is gate infrastructure, not just its binary |
 | 77 | L2 | `git push origin :main` | blocked — pre-push refuses main deletion (now covered by a test) |
+| 78 | L1 | critical path touched, PR lacks its label (`schema.py` without `human-reviewed`) | `critical-paths` red; label added in the UI turns it green with NO new commit (automated half: 6 unit tests) |
+| 79 | L1 | `critical_paths.txt` deleted or base sha unresolvable | gate fails CLOSED (never scans nothing and passes) |
+| 80 | L3 | PR body still holds the `<paste:` placeholder | `evidence` red; a good PR body passes (the drafted `&&` form failed good PRs) |
+| 81 | L0 | self-label via `gh issue edit <PR#> --add-label human-reviewed` or `gh api …/issues/N/labels` | blocked — GitHub treats PRs as issues, so gating only `gh pr` left the WT.7 gate self-servable |
+| 82 | L1 | critical path inside a ~2,000-file PR | still detected — prefix matching is pure bash (the piped form died of SIGPIPE and failed OPEN on exactly the large PRs that need review most) |
+| 83 | L1 | `web/scripts/app.js` (contains, but is not under, `scripts/`) | no label required — matching is anchored prefix, not substring |
+| 84 | L3 | first CI run on a pyproject-only repo | `setup-python` pins `cache-dependency-path: pyproject.toml`, so the cache step cannot error before install |
+| 85 | L0 | label via `gh api -X PATCH …/issues/N -f 'labels[]=human-reviewed'` or a GraphQL `addLabelsToLabelable` mutation | blocked — any mention of a review label in a gh command is decisive, plus mutating PATCH/POST on `/issues/N` or `/pulls/N` |
+| 86 | L0 | `gh issue -R owner/repo edit <PR#> --add-label` (persistent flag between noun and action) | blocked — gh nouns/actions are parsed past flags and their values, not read at fixed positions |
+| 87 | L0 | edit `scripts/check_critical_paths.sh` or `critical_paths.txt` (Bash or Edit) | blocked — the WT.7 gate machinery is protected like the other trust scripts; CI runs the PR's own copy, so an unprotected gate could be neutered by the PR it must gate |
+| 88 | L0 | `gh api -XPATCH …/issues/N --input body.json`, `gh api graphql -F query=@f` | blocked — method matched textually (attached spellings) and any file-fed body on an issue/pull route counts as mutating |
+| 89 | L0 | `gh pr list --label human-reviewed` (read-only) | allowed — reading label state is legitimate; only applying is human-only |
+| 90 | L1 | rename a critical file (`git mv src/va/cli.py …`) | caught — the checker diffs `-M --name-status` and considers BOTH rename paths |
+| 91 | L0 | `curl`/`wget` POST to `/issues/N/labels`, or `gh auth token` | blocked — speed bump only; see D9, a shared credential makes client-side blocking non-final |
+| 92 | L3 | PR body with the EVIDENCE marker but no output under it | `evidence` red — the check requires real counts (`N passed`), not just the marker |
+| 93 | L3 | unrelated PR merges to main while this PR is open | no spurious label demand — `critical-paths` checks out the PR HEAD, not the merge ref |
+| 94 | L0 | `gh auth status --show-token` / `-t` | blocked — every spelling that PRINTS the credential, not just `gh auth token` |
+| 95 | L1/L2 | `git add -A <dir>` sweeps another session's uncommitted work into a commit | caught by review: the committed test imported from an uncommitted module, which would have turned the branch's own required check red on a clean checkout |
+| 96 | L1 | critical file with a non-ASCII name (`schéma.py`) or a space in it | caught — `core.quotepath=off` + TAB-delimited parsing (default C-quoting made it fail OPEN) |
+| 97 | L0 | `gh alias set m 'pr merge'` then `gh m 14`; httpie's `https` binary | blocked — alias CREATION is refused (aliases are opaque to a static guard) and `https` joins the client list |
+| 98 | L0 | `gh auth status --show-token=true` (attached value) | blocked — the attached-spelling class, closed for the third time |
+| 99 | L0 | `gh api repos/o/r/issues/N/labels` with no method (a GET) | allowed — a route is not an action; only an explicit mutating method or a GraphQL mutation counts |
+| 100 | L0 | `gh pr create --body "<filled PR template>"` (template text names both labels) | allowed — `create` cannot apply a label; blocking it broke a lifecycle-required action |
+| 101 | L0 | `gh alias import aliases.yml` | blocked — alias installation from a FILE, sibling of `alias set` |
+| 102 | L0 | `gh pr edit N --body "<filled template>"` | allowed — prose naming a label is not an application; the `--add-label`/`--approve` flag rule is what gates it |
+| 103 | L0 | `gh api …/labels -f 'labels[]=x'` (no `-X`) | blocked — `gh api` sends POST automatically when fields are present |
+| 104 | L0 | `curl …/graphql -d '{"query":"mutation{addLabelsToLabelable…"}'` | blocked — GraphQL mutation names now match on the HTTP-client path too |
+| 105 | L0 | `gh pr review N --approve=true` (attached value) | blocked — attached spellings now covered for `--approve` as well as `--add-label` |
 
 ## Rollout order
 
@@ -1891,6 +2330,23 @@ WT.4 (everything else is static config + shell).
   guarantee — independence comes from the reviewer, authority from the human
   sentinel. Optional future ergonomics: a `/commit` slash command that walks
   lifecycle steps 1–6; revisit if digest quality or staging hygiene slips.
+
+- **D9 — what the `human-reviewed` label actually proves. RESOLVED 2026-07-28 (user
+  decision: option (c)).** Raised by PR 4's backstop: the agent session runs with the
+  human's own GitHub credential, and `gh auth token` + `curl -X POST .../issues/N/labels`
+  was demonstrated working. Blocking `gh` alone was never sufficient, and enumerating HTTP
+  clients is the same losing game as enumerating shell spellings. **Decision: the label is
+  a CEREMONY MARKER, not proof.** It records that the human intended to attest, and the
+  guards (now covering `gh`, `curl`, `wget`, `http/httpie/xh`, and `gh auth token`) keep an
+  agent from applying it *by accident or convenience* — a speed bump, explicitly not a
+  guarantee. Docs say so plainly; no gate downstream treats it as cryptographic evidence.
+  **Upgrade path if the claim ever needs to be real (option (a)):** issue a fine-grained
+  PAT WITHOUT `issues:write` for agent sessions and keep the label-capable credential out
+  of the agent environment — the only change that makes "human-only" true rather than
+  customary. **Revisit when:** a second person (or an unattended/cron agent) works in this
+  repo, or the bounded-review claim starts carrying weight beyond this one owner.
+  What does NOT depend on the label: the offline suite, the fresh-context reviewer, branch
+  protection, and every git-level gate. Only WT.7's bounded-review *claim* softens.
 
 ## Non-goals
 
