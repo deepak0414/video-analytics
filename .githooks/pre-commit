@@ -16,6 +16,21 @@ bad=$(git diff --cached --name-only | grep -E '^\.va|/catalog\.db$|\.npz$|\.pt$|
 [ -n "$bad" ] && fail "workdir/model artifacts staged:
 $bad"
 
+# 2b. reviews/ is ledgers-only: the approval hash excludes reviews/*.md, so any
+#     other file type there could ride an approval unreviewed. Refuse at entry.
+badrev=$(git diff --cached --name-only | grep '^reviews/' | grep -vE '\.md$|\.gitkeep$' || true)
+[ -n "$badrev" ] && fail "reviews/ may contain only .md ledgers:
+$badrev"
+
+# 2c. Ledgers are append-only (audit trail): modifying or deleting a committed
+#     one is history forgery. Human-only override: ALLOW_LEDGER_EDIT=1.
+modrev=$(git diff --cached --name-only --diff-filter=MDR -- 'reviews/' || true)
+if [ -n "$modrev" ] && [ -z "${ALLOW_LEDGER_EDIT:-}" ]; then
+  fail "reviews/ ledgers are append-only:
+$modrev
+If genuinely needed (human decision): ALLOW_LEDGER_EDIT=1."
+fi
+
 # 3. Secret scan on staged additions.
 leaks=$(git diff --cached -U0 | grep -E '^\+' | grep -nE \
   'hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|gh[posu]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' || true)

@@ -81,10 +81,12 @@ hooksPath and a deliberately bad commit (see §8 validation matrix) is rejected.
 ```bash
 #!/usr/bin/env bash
 # Activate the repo's checked-in git hooks and Claude Code hooks.
+# One manual step per clone/machine — everything else is mechanical after this.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 git config core.hooksPath .githooks
-chmod +x .githooks/* .claude/hooks/* scripts/agent-review.sh 2>/dev/null || true
+chmod +x .githooks/* scripts/*.sh 2>/dev/null || true
+chmod +x .claude/hooks/* 2>/dev/null || true
 echo "hooksPath: $(git config core.hooksPath)"
 echo "Claude Code hooks are read from .claude/settings.json automatically."
 echo "NOTE: restart any running Claude Code session to pick up hook changes"
@@ -110,7 +112,8 @@ and a normal commit completes in < 5 s (timed).
 
 ```bash
 #!/usr/bin/env bash
-# Fast deterministic gates only (<5s). LLM review happens at pre-push, not here.
+# Fast deterministic gates only (<5s). LLM review happens post-commit/pre-push,
+# never here (workflow-trust-plan.md WT.1; latency here breeds --no-verify habits).
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 fail() { echo "pre-commit BLOCKED: $1" >&2; exit 1; }
@@ -126,15 +129,29 @@ bad=$(git diff --cached --name-only | grep -E '^\.va|/catalog\.db$|\.npz$|\.pt$|
 [ -n "$bad" ] && fail "workdir/model artifacts staged:
 $bad"
 
-# 3. Secret scan on staged additions (pattern proven in this repo's history).
+# 2b. reviews/ is ledgers-only: the approval hash excludes reviews/*.md, so any
+#     other file type there could ride an approval unreviewed. Refuse at entry.
+badrev=$(git diff --cached --name-only | grep '^reviews/' | grep -vE '\.md$|\.gitkeep$' || true)
+[ -n "$badrev" ] && fail "reviews/ may contain only .md ledgers:
+$badrev"
+
+# 2c. Ledgers are append-only (audit trail): modifying or deleting a committed
+#     one is history forgery. Human-only override: ALLOW_LEDGER_EDIT=1.
+modrev=$(git diff --cached --name-only --diff-filter=MDR -- 'reviews/' || true)
+if [ -n "$modrev" ] && [ -z "${ALLOW_LEDGER_EDIT:-}" ]; then
+  fail "reviews/ ledgers are append-only:
+$modrev
+If genuinely needed (human decision): ALLOW_LEDGER_EDIT=1."
+fi
+
+# 3. Secret scan on staged additions.
 leaks=$(git diff --cached -U0 | grep -E '^\+' | grep -nE \
   'hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|gh[posu]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY' || true)
 [ -n "$leaks" ] && fail "possible secret in staged diff:
 $leaks"
 
-# 4. Test-deletion guard (the #1 agent adversarial risk per Kent Beck: agents
-#    'cheating, for example by disabling or deleting tests').
-#    Blocks net test removal; renames (delete+add) pass. Override: ALLOW_TEST_REMOVAL=1.
+# 4. Test-deletion guard: blocks net test removal (renames pass).
+#    Override: ALLOW_TEST_REMOVAL=1 (human), and say why in the commit body.
 removed=$(git diff --cached -U0 -- 'tests/' | grep -cE '^\-\s*def test_' || true)
 added=$(git diff --cached -U0 -- 'tests/' | grep -cE '^\+\s*def test_' || true)
 if [ "${removed:-0}" -gt "${added:-0}" ] && [ -z "${ALLOW_TEST_REMOVAL:-}" ]; then
@@ -161,20 +178,21 @@ Also add `.commit-approved` and `.guard-override` to `.gitignore` (WT.1 delivera
 
 ```bash
 #!/usr/bin/env bash
+# Trailer hygiene + the review lifecycle's forced declaration
+# (workflow-trust-plan.md WT.1/WT.4): every commit subject is provisional-for-review,
+# a checkpoint, or a finalization of reviewer-approved + human-approved content.
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
 msgfile="$1"
+cd "$(git rev-parse --show-toplevel)"
 
 # --- Trailer hygiene (unconditional) ---
-# Strip any Claude co-author trailer (repo convention: attribution is via sign-off).
 sed -i '/^Co-Authored-By: Claude/d' "$msgfile"
 if ! grep -q '^Signed-off-by: Deepak Gupta (deepak0414) using Claude assistance$' "$msgfile"; then
   printf '\nSigned-off-by: Deepak Gupta (deepak0414) using Claude assistance\n' >> "$msgfile"
 fi
 
-# --- Forced declaration (WT.4 lifecycle) ---
-# Every commit subject is one of: provisional-for-review, checkpoint, or a
-# finalization of an already-approved commit. Merges and autosquash are exempt.
+# --- Forced declaration ---
+# Exemptions: merges, autosquash fixups.
 git rev-parse -q --verify MERGE_HEAD >/dev/null && exit 0
 subject=$(head -1 "$msgfile")
 case "$subject" in
@@ -182,16 +200,27 @@ case "$subject" in
   need_agent_review*) exit 0 ;;   # provisional: post-commit fires the reviewer
   wip:*|checkpoint:*) exit 0 ;;   # declared not-done: free
 esac
-# Docs-only branches never get a review (post-commit and pre-push both skip them),
-# so a plain subject is fine when nothing but docs differs from origin/main.
-if ! { git diff --name-only origin/main 2>/dev/null; \
-       git ls-files --others --exclude-standard; } | grep -qvE '\.(md|txt)$'; then
-  exit 0
+# Docs-only work never gets a review (post-commit and pre-push both skip it), so a
+# plain subject is fine when the committed branch AND this commit's staged content
+# are nothing but docs (committed scope — matching the approval-hash philosophy;
+# ledgers are .md and count as docs). Fails CLOSED if origin/main is missing.
+if git rev-parse -q --verify origin/main >/dev/null; then
+  files=$( { git diff --name-only origin/main HEAD 2>/dev/null; \
+             git diff --cached --name-only; } )
+  # Instruction-bearing files (CLAUDE.md, .claude/, hooks, workflows, scripts)
+  # shape agent behavior and are never inert docs.
+  if ! echo "$files" | grep -qvE '\.(md|txt)$' && \
+     ! echo "$files" | grep -qE '^(\.claude/|\.githooks/|\.github/|scripts/)|^CLAUDE\.md$'; then
+    exit 0
+  fi
 fi
 # Plain subject = finalization. Allowed iff the reviewer approved EXACTLY this
-# content AND the human sentinel exists (D7). Consume the sentinel on success.
+# committed content, the human sentinel exists (D7), and the amend adds nothing
+# beyond reviews/ ledgers (staged content sneaked into a finalize would otherwise
+# dodge the approval until the push backstop). Consume the sentinel on success.
 if [ -f .git/.review-approved ] && \
    [ "$(cat .git/.review-approved)" = "$(scripts/review_scope_hash.sh)" ] && \
+   [ -z "$(git diff --cached --name-only -- . ':(exclude)reviews/*.md')" ] && \
    [ -f .commit-approved ]; then
   rm -f .commit-approved
   exit 0
@@ -199,8 +228,9 @@ fi
 echo "commit-msg BLOCKED: subject must start with 'need_agent_review' (work complete
 -> review fires) or 'wip:'/'checkpoint:' (not done yet). A plain subject is only for
 finalizing a reviewed commit: requires reviewer verdict=approve for this exact
-content AND the human having run 'touch .commit-approved' (human-only; agents are
-guard-blocked from creating it)." >&2
+committed content, a finalize amend that adds nothing beyond reviews/, AND the human
+having run 'touch .commit-approved' (human-only; WT.3 session guards enforce that
+mechanically once they land)." >&2
 exit 1
 ```
 
@@ -217,6 +247,7 @@ tail shown; a docs-only push skips review and completes in < 45 s.
 
 ```bash
 #!/usr/bin/env bash
+# Push gate (workflow-trust-plan.md WT.2 + WT.4 backstop).
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -226,24 +257,55 @@ fail() { echo "pre-push BLOCKED: $1" >&2; exit 1; }
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue   # branch deletion — nothing to verify
 
-  # Gate 1: full offline suite (~31 s measured; stub backends, no GPU/network).
-  out=$(.venv/bin/pytest -q 2>&1 | tail -8)
-  echo "$out" | grep -qE '^[0-9]+ (passed|passed,)' || fail "offline suite not green:
-$out"
+  # Gate 1: full offline suite (stub backends, no GPU/network; ~31 s).
+  # The EXIT CODE is the truth — summary-line grepping matched "33 passed,
+  # 1 error" and failed open on collection errors.
+  # NB: every command in this loop gets </dev/null — the loop is reading the
+  # pushed-refs list from stdin, and a child that reads stdin (headless claude
+  # does) would swallow the remaining refs and fail OPEN for them.
+  if ! out=$(.venv/bin/pytest -q </dev/null 2>&1); then
+    fail "offline suite not green:
+$(echo "$out" | tail -8)"
+  fi
 
   # Gate 2: agent review BACKSTOP (primary review runs at post-commit on
-  # `need_agent_review`-tagged commits, WT.4). Re-reviews only content without an
-  # approval — catches forgotten tags, manual edits, and crashed sessions.
-  if [ "$remote_sha" = "$zero" ]; then range="origin/main...$local_sha"; else range="$remote_sha..$local_sha"; fi
-  # Docs-only pushes skip review.
-  if git diff --name-only "$range" 2>/dev/null | grep -qvE '\.(md|txt)$'; then
-    cur=$(scripts/review_scope_hash.sh)
+  # need_agent_review-subject commits). Re-reviews only content without an
+  # approval — catches skipped lifecycles, manual edits, crashed sessions.
+  git rev-parse -q --verify origin/main >/dev/null || fail "origin/main not found — cannot scope review gates; fetch first."
+  if [ "$remote_sha" = "$zero" ]; then
+    range="origin/main...$local_sha"
+  elif git cat-file -e "$remote_sha" 2>/dev/null; then
+    range="$remote_sha..$local_sha"
+  else
+    # Remote tip unknown locally (stale clone): fail CLOSED by widening the
+    # review scope to the whole branch instead of silently skipping gates.
+    range="origin/main...$local_sha"
+  fi
+  # Docs-only pushes skip review — but instruction-bearing files (CLAUDE.md,
+  # .claude/, hooks, workflows, scripts) shape agent behavior and are NEVER inert
+  # docs, so they always take the review path.
+  files=$(git diff --name-only "$range")
+  if echo "$files" | grep -qvE '\.(md|txt)$' || \
+     echo "$files" | grep -qE '^(\.claude/|\.githooks/|\.github/|scripts/)|^CLAUDE\.md$'; then
+    # Hash the PUSHED ref, not HEAD — per-ref pushes must compare (and bless)
+    # exactly the content that ships.
+    cur=$(scripts/review_scope_hash.sh "$local_sha")
     if [ -f .git/.review-approved ] && [ "$(cat .git/.review-approved)" = "$cur" ]; then
       echo "pre-push: content already approved by post-commit review — skipping re-review." >&2
     else
-      scripts/agent-review.sh "$range" || fail "agent review requested changes — see reviews/ ledger. Fix findings or (human-only) waive with AGENT_REVIEW=skip."
+      scripts/agent-review.sh "$range" </dev/null || fail "agent review requested changes — see reviews/ ledger. Fix findings or (human-only) waive with AGENT_REVIEW=skip."
       echo "$cur" > .git/.review-approved
     fi
+  fi
+
+  # Gate 2b: the audit trail is append-only. The approval hash excludes ledgers,
+  # so a modified/deleted shipped ledger (forged review history) would otherwise
+  # ride an existing approval. Human-only override: ALLOW_LEDGER_EDIT=1.
+  forged=$(git diff --name-status "$range" -- 'reviews/' | grep -E '^[MDR]' || true)
+  if [ -n "$forged" ] && [ -z "${ALLOW_LEDGER_EDIT:-}" ]; then
+    fail "reviews/ ledgers are append-only (audit trail):
+$forged
+If genuinely needed (human decision): ALLOW_LEDGER_EDIT=1 git push."
   fi
 
   # Gate 3: provisional commits never ship. A need_agent_review subject means the
@@ -349,6 +411,7 @@ RULES = [
     (r"\.commit-approved\b",                     "the finalization sentinel is human-only (D7): only the user may create or remove it."),
     (r"\.guard-override\b",                      "the guard override is human-only (P6)."),
     (r"\bALLOW_TEST_REMOVAL=1\b",                "test-removal override is human-only; explain the need and ask."),
+    (r"\bALLOW_LEDGER_EDIT=1\b",                 "ledger-edit override is human-only (audit trail)."),
     (r"\bALLOW_MAIN_COMMIT=1\b",                 "main-commit override is human-only."),
     (r"\bgh\s+pr\s+merge\b",                     "merging PRs is a human action in this repo."),
     (r"\bgh\s+pr\s+(edit|review)\b[^|;&\n]*(human-reviewed|golden-verified|--approve)",
@@ -442,10 +505,12 @@ The full lifecycle:
    path, what changed since last approval.
 5. Human approves by running **`touch .commit-approved`** (human-only — guards block
    agents from creating it; D7).
-6. Committer runs the final `git commit --amend` with the real descriptive subject;
-   commit-msg permits the plain subject (approved hash + sentinel), consumes the
-   sentinel; post-commit sees no tag and stays quiet. History: ONE clean commit,
-   reviewed and human-approved, no tag residue.
+6. Committer runs `git add reviews/` (the ledger ships inside the commit it reviewed
+   — excluded from the approval hash, so this never invalidates it) then the final
+   `git commit --amend` with the real descriptive subject; commit-msg permits the
+   plain subject (approved hash + sentinel), consumes the sentinel; post-commit sees
+   no tag and stays quiet. History: ONE clean commit, reviewed and human-approved,
+   no tag residue.
 7. `pre-push`: approval hash matches → tests only; and no `need_agent_review`
    subject may ship (Gate 3) — provisional commits cannot reach GitHub.
 
@@ -487,12 +552,14 @@ Design decisions (research + user decisions 2026-07-24/25):
   status by design; the loud stderr in the Bash tool result is the writer's feedback,
   and enforcement lives in the approval hash checked at pre-push (and PR gates).
   Trigger and gate are decoupled; both are mechanical.
-- **Review scope is the whole branch (`origin/main..HEAD`), not just the last
-  commit.** Otherwise an approval after a later tagged commit would hash-bless
-  earlier untagged (never-reviewed) commits. Cumulative scope keeps the approval
-  honest; the hash cache keeps repeat runs free. Uncommitted leftovers at commit time
-  make the hash differ from the committed content, which fails safe (backstop
-  re-reviews at push).
+- **Review scope, hash scope, and ship scope are the same thing: the committed
+  branch (`origin/main..HEAD`, excluding `reviews/`).** Whole-branch (not
+  last-commit) so an approval can never hash-bless earlier unreviewed commits;
+  committed-only so uncommitted/untracked edits never enter the hash — they can't
+  be blessed, and they don't ship; committing them changes the hash and triggers
+  the backstop. (The first real review of PR 2 caught the original worktree-scoped
+  hash blessing dirty edits — matrix row 29 is its regression test.) The finalize
+  amend may stage nothing beyond `reviews/` ledgers (commit-msg enforces).
 - **Recursion guard:** `agent-review.sh` exports `VA_AGENT_REVIEW=1`; every hook
   (post-commit, stop_gate) exits 0 when it is set, so the reviewer's own headless
   session — which runs in this same project directory with these same hooks — can
@@ -503,13 +570,47 @@ Design decisions (research + user decisions 2026-07-24/25):
   from rollout: if untagged commits start reaching push regularly, tag discipline is
   slipping — the ledger makes it visible; the fallback is inverting the default
   (review every commit, tag to *skip*), which is stricter, never weaker.
+- **As-built deviations (2026-07-27, PR 2):** verdict parsing passes the raw output
+  via an env var into the python heredoc (the drafted `<<'PY' <<<"$raw"` combined
+  two stdin redirects — invalid); `timeout 480` instead of 600 so a full review fits
+  inside tool/CI execution caps with margin; ledger filenames carry seconds
+  (`%Y%m%d-%H%M%S`) so the fix-amend-re-review loop never overwrites an entry.
+  **From the first real review's findings (all four fixed before finalize):**
+  approval hash re-scoped from worktree to committed branch (major — see the design
+  bullet above); missing `origin/main` or an unknown remote sha now fails closed
+  (block / widen to whole-branch scope) instead of silently skipping gates; hook
+  messages no longer claim guard-blocking that only lands with WT.3; the interactive
+  `code-reviewer` subagent pins `tools: Read, Grep, Glob, Bash` in frontmatter
+  instead of inheriting all tools.
+  **From the second review round (again all four fixed):** the hash exclusion
+  narrowed from all of `reviews/` to `reviews/*.md` + a pre-commit ledgers-only
+  gate, closing the smuggle-code-via-reviews/ tunnel (matrix row 31); Gate 2 hashes
+  the pushed sha instead of HEAD so per-ref pushes compare exactly what ships (row
+  32); commit-msg's docs-only exemption fails closed without `origin/main` and uses
+  committed+staged scope; the plan's verbatim code blocks are now script-synced
+  with the as-built files.
+  **From the third round:** pre-push loop children run `</dev/null` — a live
+  reviewer reading the hook's stdin was swallowing the remaining pushed-ref lines
+  and failing OPEN for them (row 33; the fake reviewer now reads stdin like the
+  real one so the sandbox can catch this class); reviewer stderr moved to
+  `.git/agent-review.err` so a crashed review can't poison `reviews/` (row 34);
+  instruction-bearing files (CLAUDE.md, `.claude/`, `.githooks/`, `.github/`,
+  `scripts/`) are excluded from every docs-only exemption (row 35).
+  **From the fourth round:** Gate 1 judges the suite by pytest's exit code — the
+  summary-line grep matched "33 passed, 1 error" and failed open on collection
+  errors (row 36); shipped ledgers are append-only, enforced at pre-commit
+  (diff-filter MDR) and again at push (so `--no-verify` forgeries still die),
+  with `ALLOW_LEDGER_EDIT=1` as the recorded human-only override (row 37).
 
 `.githooks/post-commit`:
 
 ```bash
 #!/usr/bin/env bash
-# Trigger (not gate): commits tagged `need_agent_review` fire the fresh-context
-# review immediately. git ignores this hook's exit code; the gate is at pre-push.
+# Trigger (not gate): commits whose SUBJECT starts with `need_agent_review` fire the
+# fresh-context review immediately (workflow-trust-plan.md WT.4). git ignores this
+# hook's exit code by design; enforcement lives at commit-msg (finalization) and
+# pre-push (Gates 2-3). The nonzero exit + stderr surface loudly in the committing
+# session's tool result — that is the feedback channel.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 [ -n "${VA_AGENT_REVIEW:-}" ] && exit 0        # recursion guard (reviewer session)
@@ -520,19 +621,31 @@ case "$subject" in
   *) exit 0 ;;              # checkpoints (wip:) and finalized commits: free
 esac
 git rev-parse -q --verify HEAD^2 >/dev/null && exit 0   # merge commits: skip
-# Docs-only branches: skip.
-git diff --name-only origin/main..HEAD 2>/dev/null | grep -qvE '\.(md|txt)$' || exit 0
+# Fail closed if the baseline is missing (an empty diff must never mean "skip").
+git rev-parse -q --verify origin/main >/dev/null || {
+  echo "post-commit: origin/main not found — cannot scope the review; fetch first." >&2
+  exit 1
+}
+# Docs-only branches: skip (exempt from the lifecycle end-to-end) — except
+# instruction-bearing files (CLAUDE.md, .claude/, hooks, workflows, scripts),
+# which shape agent behavior and always get reviewed.
+files=$(git diff --name-only origin/main..HEAD)
+if ! echo "$files" | grep -qvE '\.(md|txt)$' && \
+   ! echo "$files" | grep -qE '^(\.claude/|\.githooks/|\.github/|scripts/)|^CLAUDE\.md$'; then
+  exit 0
+fi
 
 if scripts/agent-review.sh origin/main..HEAD; then
   scripts/review_scope_hash.sh > .git/.review-approved
-  echo "post-commit: review APPROVED — pre-push will skip re-review." >&2
+  echo "post-commit: review APPROVED — present the human a digest (verdict, findings,
+ledger path); after they run 'touch .commit-approved', finalize with:
+    git add reviews/ && git commit --amend   (real subject; sentinel is consumed)" >&2
 else
   echo "post-commit: review REQUESTED CHANGES — read the newest reviews/ ledger
 entry, fix the critical/major findings, and squash them in with:
-    git commit --amend        (keep the need_agent_review tag; amend re-runs review)
+    git commit --amend        (keep the need_agent_review subject; amend re-runs review)
 Push stays blocked until a review approves or the user waives (AGENT_REVIEW=skip)." >&2
-  exit 1   # git ignores this, but the nonzero status + stderr surface loudly in the
-           # committing session's Bash tool result.
+  exit 1
 fi
 ```
 - **Fresh context by construction:** a new `claude -p` process knows nothing of the
@@ -550,23 +663,30 @@ re-review):
 
 ```bash
 #!/usr/bin/env bash
-# Hash of all content not yet on origin/main: committed-but-unpushed + uncommitted
-# tracked changes + untracked files. Changes iff the reviewable content changes.
+# One canonical definition of "the content the reviewer approved": the COMMITTED
+# branch scope, origin/main..<commit> (default HEAD; pre-push passes the pushed
+# sha so per-ref pushes hash exactly what ships). Uncommitted/untracked edits
+# never enter the hash, so they can never be blessed by an approval — committing
+# them changes this hash and triggers the pre-push backstop.
+# Only reviews/*.md ledgers are excluded (they are artifacts of the review itself,
+# added during the finalize amend); any NON-ledger file under reviews/ stays in
+# the hash, so it cannot ride an approval unreviewed (pre-commit also rejects it).
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
-{ git diff origin/main -- . 2>/dev/null
-  git ls-files --others --exclude-standard | sort | xargs -r sha256sum 2>/dev/null
-} | sha256sum | cut -d' ' -f1
+commit="${1:-HEAD}"
+git diff origin/main "$commit" -- . ':(exclude)reviews/*.md' 2>/dev/null \
+  | sha256sum | cut -d' ' -f1
 ```
 
 `scripts/agent-review.sh`:
 
 ```bash
 #!/usr/bin/env bash
-# Fresh-context adversarial review via headless Claude.
+# Fresh-context adversarial review via headless Claude (workflow-trust-plan.md WT.4).
 # Usage: scripts/agent-review.sh <git-range>     (pre-push backstop mode)
-#        scripts/agent-review.sh --worktree      (turn-end mode: everything vs origin/main)
-# Exit 0 = approved; 1 = changes requested (findings in reviews/ ledger).
+#        scripts/agent-review.sh --worktree      (everything vs origin/main)
+# Exit 0 = approved (or human-waived); 1 = changes requested / review failed
+# (fail-closed). Findings + full review text land in a reviews/ ledger entry.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 mode="${1:?usage: agent-review.sh <git-range>|--worktree}"
@@ -583,10 +703,11 @@ Start with: git diff ${range}   and   git log --oneline ${range}"
 fi
 branch=$(git symbolic-ref --short -q HEAD || echo detached)
 sha=$(git rev-parse --short HEAD)
-ledger="reviews/$(date +%Y%m%d-%H%M)-${branch//\//-}-${sha}.md"
+ledger="reviews/$(date +%Y%m%d-%H%M%S)-${branch//\//-}-${sha}.md"
 mkdir -p reviews
 
-# Human-only waiver (bash_guard.py blocks the agent from setting this).
+# Human-only waiver by convention now, by mechanism once WT.3's session guards
+# land; every use is recorded so waived pushes stay visible in the audit trail.
 if [ "${AGENT_REVIEW:-}" = "skip" ]; then
   printf '# Review WAIVED by user\n\ndate: %s\nrange: %s\nbranch: %s\n' \
     "$(date -Is)" "$range" "$branch" > "$ledger"
@@ -599,6 +720,7 @@ if [ "$range" = "worktree" ]; then
 else
   stat=$(git diff --stat "$range" | tail -1)
 fi
+
 prompt="You are a fresh-context adversarial code reviewer for this repo. You did NOT
 write this code; your job is to find what is wrong with it, not to praise it.
 
@@ -634,40 +756,53 @@ echo "agent-review: reviewing $range ($stat) ..." >&2
 # Recursion guard: inherited by the headless reviewer session so this repo's hooks
 # (post-commit, stop_gate) no-op inside it — a review can never trigger a review.
 export VA_AGENT_REVIEW=1
-raw=$(timeout 600 claude -p "$prompt" \
+# stderr goes to .git/ (NOT reviews/ — a stray non-.md file there would trip the
+# pre-commit ledgers-only gate at the next `git add reviews/`).
+errlog=".git/agent-review.err"
+raw=$(timeout 480 claude -p "$prompt" \
   --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git blame *),Bash(git status *)" \
-  --output-format json --max-turns 40 2>>"$ledger.err") || {
-    echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $ledger.err" >&2
+  --output-format json --max-turns 40 2>"$errlog") || {
+    echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $errlog" >&2
     exit 1
   }
-rm -f "$ledger.err"
 
-python3 - "$ledger" "$range" "$branch" <<'PY' <<<"$raw"
-import json, re, sys, datetime
-ledger, rng, branch = sys.argv[1], sys.argv[2], sys.argv[3]
-raw = sys.stdin.read()
+RAW="$raw" LEDGER="$ledger" RANGE="$range" BRANCH="$branch" python3 - <<'PY'
+import datetime
+import json
+import os
+import re
+import sys
+
+raw = os.environ["RAW"]
+ledger, rng, branch = os.environ["LEDGER"], os.environ["RANGE"], os.environ["BRANCH"]
 try:
     result = json.loads(raw).get("result", raw)
 except Exception:
     result = raw
-m = re.findall(r"```json\s*(\{.*?\})\s*```", result, re.S)
-verdict, findings = "request_changes", []
-if m:
+blocks = re.findall(r"```json\s*(\{.*?\})\s*```", str(result), re.S)
+verdict, findings = "request_changes", []  # unparseable verdict stays fail-closed
+if blocks:
     try:
-        v = json.loads(m[-1])
+        v = json.loads(blocks[-1])
         verdict = v.get("verdict", "request_changes")
-        findings = v.get("findings", [])
+        findings = v.get("findings", []) or []
     except Exception:
-        pass  # unparseable verdict stays fail-closed
+        pass
 with open(ledger, "w") as f:
-    f.write(f"# Agent review — {verdict}\n\ndate: {datetime.datetime.now().isoformat()}\n"
-            f"range: {rng}\nbranch: {branch}\nfindings: {len(findings)}\n\n")
+    f.write(
+        f"# Agent review — {verdict}\n\ndate: {datetime.datetime.now().isoformat()}\n"
+        f"range: {rng}\nbranch: {branch}\nfindings: {len(findings)}\n\n"
+    )
     for x in findings:
-        f.write(f"- **{x.get('severity','?')}** `{x.get('file','?')}:{x.get('line','?')}` "
-                f"— {x.get('issue','')}\n  - scenario: {x.get('scenario','')}\n")
-    f.write("\n---\n\n## Full review\n\n" + result + "\n")
-print(f"agent-review: {verdict} ({len(findings)} findings) — ledger: {ledger}",
-      file=sys.stderr)
+        f.write(
+            f"- **{x.get('severity', '?')}** `{x.get('file', '?')}:{x.get('line', '?')}` "
+            f"— {x.get('issue', '')}\n  - scenario: {x.get('scenario', '')}\n"
+        )
+    f.write("\n---\n\n## Full review\n\n" + str(result) + "\n")
+print(
+    f"agent-review: {verdict} ({len(findings)} findings) — ledger: {ledger}",
+    file=sys.stderr,
+)
 sys.exit(0 if verdict == "approve" else 1)
 PY
 ```
@@ -1047,6 +1182,15 @@ executed (this table is the rollout's "Done when").
 | 26 | L1 | commit with `need_agent_review` in the body but not the subject | blocked by commit-msg with guidance (the trigger is subject-line, per the lifecycle) |
 | 27 | L2 | push a reviewer-approved but never-finalized provisional commit | blocked by pre-push Gate 3 (no `need_agent_review` subject may ship) |
 | 28 | L1 | plain-subject commit on a docs-only branch | allowed (docs are exempt from the review lifecycle end-to-end) |
+| 29 | L1/L2 | approval granted while dirty tracked edits exist; edits later committed as `wip:` and pushed | backstop review fires (hash covers committed scope only — dirty edits are never blessed) |
+| 30 | L1 | stage an extra file into the finalize amend | blocked by commit-msg (finalize may add nothing beyond reviews/ ledgers) |
+| 31 | L1/L2 | put a non-.md file under `reviews/` | pre-commit blocks it; smuggled past local hooks with `--no-verify`, the push backstop still reviews it (hash excludes only `reviews/*.md`) |
+| 32 | L2 | with an approved branch checked out, push an unreviewed sibling ref | Gate 2 hashes the pushed sha, not HEAD — the sibling gets its own review |
+| 33 | L2 | multi-ref push where the first ref's live review reads stdin | remaining refs still gated (loop children run `</dev/null`) — Gate 3 blocks a provisional sibling |
+| 34 | L2 | headless reviewer crashes/times out | push blocked fail-closed; stderr log in `.git/`, never in `reviews/` (ledgers-only invariant survives) |
+| 35 | L1 | edit CLAUDE.md / `.claude/` / hooks / workflows with a plain `docs:` subject | blocked — instruction-bearing files are never docs-exempt, in all three docs-only checks |
+| 36 | L2 | suite exits nonzero with a "33 passed, 1 error" summary (collection error) | push blocked — Gate 1 trusts the exit code, not the summary line |
+| 37 | L1/L2 | rewrite a shipped `reviews/` ledger (forge the audit trail), commit (or `--no-verify` + push) | blocked at commit AND at push — ledgers are append-only; `ALLOW_LEDGER_EDIT=1` is the human-only override |
 
 ## Rollout order
 

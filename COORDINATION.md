@@ -226,3 +226,10 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   Sandbox self-tests in `tests/test_trust_hooks.py`. The review lifecycle (post-commit reviewer,
   `need_agent_review` subjects, human sentinel) comes in the NEXT PR — commit subjects are not yet
   gated. No pipeline/contract changes.
+- **2026-07-27 (trust):** Review lifecycle landing (branch `trust/l2-review-lifecycle`, plan WT.4):
+  **commit subjects are now gated.** Every commit must declare itself — `need_agent_review: <desc>`
+  (complete work → post-commit hook spawns a fresh reviewer agent; findings in `reviews/`),
+  `wip:`/`checkpoint:` (unfinished, free), or a plain subject (only when finalizing an approved
+  commit with the human's `.commit-approved` sentinel, or on docs-only branches). Pushes block on
+  provisional subjects and on unapproved content (backstop review). See the new "Commit & review
+  lifecycle" section in CLAUDE.md. Affects BOTH agents' commit habits immediately after this merges.
