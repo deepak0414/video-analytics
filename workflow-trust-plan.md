@@ -391,9 +391,17 @@ Design notes (from the research):
 
 ```python
 #!/usr/bin/env python3
-"""PreToolUse guard for Bash. Blocks gate-bypass and self-approval commands.
-Exit 2 = block (stderr shown to Claude). Exit 0 = allow."""
-import json, re, sys
+"""PreToolUse guard for Bash (workflow-trust-plan.md WT.3).
+
+Blocks gate-bypass, self-approval, and audit-tampering commands inside Claude
+Code sessions. Exit 2 = block (stderr is shown to the agent as the reason);
+exit 0 = allow. Deny rules in settings.json cover the same ground but are
+string-prefix based and evadable (claude-code issue #40117) — these regexes are
+the enforcement layer.
+"""
+import json
+import re
+import sys
 
 try:
     payload = json.load(sys.stdin)
@@ -402,21 +410,36 @@ except Exception:
 cmd = (payload.get("tool_input") or {}).get("command", "") or ""
 
 RULES = [
-    (r"\bgit\b[^|;&\n]*--no-verify",            "--no-verify bypasses this repo's verification hooks (P6: gates have no agent override)."),
-    (r"\bgit\s+commit\b[^|;&\n]*\s-n\b",        "git commit -n is --no-verify; hooks must run."),
-    (r"\bgit\s+push\b[^|;&\n]*(--force\b|\s-f\b)(?![-\w])[^|;&\n]*\b(main|master)\b",
-                                                 "force-push to main is blocked."),
-    (r"\bcore\.hooksPath\b",                     "changing hooksPath disables the trust gates; ask the user."),
-    (r"\bAGENT_REVIEW=skip\b",                   "the review waiver is human-only (P6)."),
-    (r"\.commit-approved\b",                     "the finalization sentinel is human-only (D7): only the user may create or remove it."),
-    (r"\.guard-override\b",                      "the guard override is human-only (P6)."),
-    (r"\bALLOW_TEST_REMOVAL=1\b",                "test-removal override is human-only; explain the need and ask."),
-    (r"\bALLOW_LEDGER_EDIT=1\b",                 "ledger-edit override is human-only (audit trail)."),
-    (r"\bALLOW_MAIN_COMMIT=1\b",                 "main-commit override is human-only."),
-    (r"\bgh\s+pr\s+merge\b",                     "merging PRs is a human action in this repo."),
+    (r"\bgit\b[^|;&\n]*--no-verify",
+     "--no-verify bypasses this repo's verification hooks (P6: gates have no agent override)."),
+    (r"\bgit\s+commit\b[^|;&\n]*\s-n\b",
+     "git commit -n is --no-verify; hooks must run."),
+    (r"\bgit\s+push\b[^|;&\n]*(--force\b|\s-f\b)[^|;&\n]*\b(main|master)\b",
+     "force-push to main is blocked."),
+    (r"\bcore\.hooksPath\b",
+     "changing hooksPath disables the trust gates; ask the user."),
+    (r"\bAGENT_REVIEW=skip\b",
+     "the review waiver is human-only (P6)."),
+    (r"\bALLOW_TEST_REMOVAL=1\b",
+     "test-removal override is human-only; explain the need and ask."),
+    (r"\bALLOW_MAIN_COMMIT=1\b",
+     "main-commit override is human-only."),
+    (r"\bALLOW_LEDGER_EDIT=1\b",
+     "ledger-edit override is human-only (audit trail)."),
+    (r"(\btouch\b|\brm\b|\bmv\b|\bcp\b|\btee\b|>>?)[^|;&\n]*\.commit-approved\b",
+     "the finalization sentinel is human-only (D7): only the user may create or remove it."),
+    (r"(\btouch\b|\brm\b|\bmv\b|\bcp\b|\btee\b|>>?)[^|;&\n]*\.guard-override\b",
+     "the guard override is human-only (P6)."),
+    (r"(\btouch\b|\brm\b|\bmv\b|\bcp\b|\btee\b|>>?)[^|;&\n]*\.review-approved\b",
+     "the approval hash is written only by the hooks after a real review — self-blessing is forbidden."),
+    (r"(>>?|\btee\b|\bcp\b|\bmv\b|\btouch\b|\brm\b)[^|;&\n]*\breviews/",
+     "reviews/ ledgers are written only by agent-review.sh (append-only audit trail)."),
+    (r"\bgh\s+pr\s+merge\b",
+     "merging PRs is a human action in this repo."),
     (r"\bgh\s+pr\s+(edit|review)\b[^|;&\n]*(human-reviewed|golden-verified|--approve)",
-                                                 "review labels/approvals are human-only (P3)."),
-    (r"\brm\s+-[a-z]*r[a-z]*f?\s+(/|~|\.git\b)", "destructive delete of repo/system paths."),
+     "review labels/approvals are human-only (P3)."),
+    (r"\brm\s+-\S*r\S*\s+([^|;&\n]*\s)?(\.git(/\S*)?|/|~/?)(\s|$)",
+     "destructive delete of repo/system paths."),
 ]
 for pattern, reason in RULES:
     if re.search(pattern, cmd):
@@ -430,9 +453,16 @@ can grant a temporary opening):
 
 ```python
 #!/usr/bin/env python3
-"""PreToolUse guard for Edit/Write: protect the gate machinery from the agent.
-Human override: `touch .guard-override` (gitignored) grants edits for that session."""
-import json, os, sys
+"""PreToolUse guard for Edit/Write (workflow-trust-plan.md WT.3).
+
+The agent cannot modify its own cage: trust-gate machinery, human-only
+sentinels, and the append-only review ledgers are off-limits to file tools.
+Human override for gate maintenance: `touch .guard-override` (gitignored),
+which opens the session; remove it to close.
+"""
+import json
+import os
+import sys
 
 try:
     payload = json.load(sys.stdin)
@@ -443,15 +473,29 @@ if os.path.exists(os.path.join(root, ".guard-override")):
     sys.exit(0)
 path = (payload.get("tool_input") or {}).get("file_path", "") or ""
 rel = os.path.relpath(path, root) if os.path.isabs(path) else path
+rel = os.path.normpath(rel)
 
-PROTECTED = (".githooks/", ".claude/settings.json", ".claude/hooks/",
-             ".github/workflows/", "scripts/agent-review.sh",
-             "scripts/critical_paths.txt",
-             ".commit-approved", ".guard-override")  # human-only sentinels (D7/P6)
+PROTECTED = (
+    ".githooks/",
+    ".claude/settings.json",
+    ".claude/hooks/",
+    ".claude/agents/code-reviewer.md",
+    ".github/workflows/",
+    "scripts/agent-review.sh",
+    "scripts/review_scope_hash.sh",
+    "scripts/setup-hooks.sh",
+    "reviews/",                 # append-only audit trail: only agent-review.sh writes here
+    ".commit-approved",         # human-only sentinels (D7/P6)
+    ".guard-override",
+    ".git/.review-approved",    # written only by the hooks after a real review
+)
 if any(rel == p or rel.startswith(p) for p in PROTECTED):
-    print(f"BLOCKED: {rel} is trust-gate machinery (P6). Propose the change to the "
-          f"user; they can apply it or `touch .guard-override` to open this session.",
-          file=sys.stderr)
+    print(
+        f"BLOCKED: {rel} is trust-gate machinery or a human-only artifact (P6). "
+        f"Propose the change to the user; they can apply it or `touch "
+        f".guard-override` to open this session for gate maintenance.",
+        file=sys.stderr,
+    )
     sys.exit(2)
 sys.exit(0)
 ```
@@ -462,13 +506,15 @@ forever):
 
 ```bash
 #!/usr/bin/env bash
-# Stop hook: block ending the turn while the offline suite is red.
-# Change-detected: skips entirely when src/tests are untouched since last green run.
+# Stop hook (workflow-trust-plan.md WT.3): block ending the turn while the
+# offline suite is red. Change-detected: skips entirely when src/tests are
+# untouched since the last green run. Bounded by Claude Code's 8-consecutive-
+# blocks override, so it cannot loop forever.
 set -uo pipefail
 cd "${CLAUDE_PROJECT_DIR:-.}" || exit 0
 [ -x .venv/bin/pytest ] || exit 0
-# Recursion guard: inside the headless reviewer session (WT.4), all repo hooks no-op
-# so a review never triggers tests/reviews of its own.
+# Recursion guard: inside the headless reviewer session (WT.4), all repo hooks
+# no-op so a review never triggers tests/reviews of its own.
 [ -n "${VA_AGENT_REVIEW:-}" ] && exit 0
 
 state=".git/.stop-gate-green"
@@ -476,13 +522,14 @@ cur=$( (git diff HEAD -- src tests pyproject.toml; \
         git status --porcelain -- src tests) 2>/dev/null | sha256sum | cut -d' ' -f1)
 [ -f "$state" ] && [ "$(cat "$state")" = "$cur" ] && exit 0
 
-out=$(.venv/bin/pytest -q 2>&1 | tail -8)
-if echo "$out" | grep -qE '^[0-9]+ passed' && ! echo "$out" | grep -qE 'failed|error'; then
+# The EXIT CODE is the truth (a summary grep matched "33 passed, 1 error" —
+# PR 2 round-4 finding). </dev/null: never consume the harness's stdin.
+if out=$(.venv/bin/pytest -q </dev/null 2>&1); then
   echo "$cur" > "$state"
   exit 0
 fi
 echo "Cannot end turn: offline suite is red. Fix before stopping (P1).
-$out" >&2
+$(echo "$out" | tail -8)" >&2
 exit 2
 ```
 
@@ -601,6 +648,15 @@ Design decisions (research + user decisions 2026-07-24/25):
   errors (row 36); shipped ledgers are append-only, enforced at pre-commit
   (diff-filter MDR) and again at push (so `--no-verify` forgeries still die),
   with `ALLOW_LEDGER_EDIT=1` as the recorded human-only override (row 37).
+  **WT.3 as-built (2026-07-27, PR 3):** PR 2's round-5 carry landed — bash_guard
+  blocks writes to `.git/.review-approved` (self-blessing) and to `reviews/`
+  (fabricated ledgers), path_guard protects both paths plus all gate machinery;
+  sentinel rules are scoped to write verbs so read-only checks pass (row 39);
+  stop_gate judges pytest by exit code with `</dev/null` (the round-4 class);
+  the guards went LIVE mid-development and blocked their own author — the
+  path_guard/stop_gate wedge (row 40) resolved exactly as designed, via the
+  human's `.guard-override`. Guard scripts have 57 unit tests (blocked/allowed
+  command and path tables, stop-gate green/red/cache/recursion).
 
 `.githooks/post-commit`:
 
@@ -1191,6 +1247,9 @@ executed (this table is the rollout's "Done when").
 | 35 | L1 | edit CLAUDE.md / `.claude/` / hooks / workflows with a plain `docs:` subject | blocked — instruction-bearing files are never docs-exempt, in all three docs-only checks |
 | 36 | L2 | suite exits nonzero with a "33 passed, 1 error" summary (collection error) | push blocked — Gate 1 trusts the exit code, not the summary line |
 | 37 | L1/L2 | rewrite a shipped `reviews/` ledger (forge the audit trail), commit (or `--no-verify` + push) | blocked at commit AND at push — ledgers are append-only; `ALLOW_LEDGER_EDIT=1` is the human-only override |
+| 38 | L0 | in-session: write `.git/.review-approved` directly (self-bless) or fabricate a `reviews/*.md` ledger | blocked by bash_guard (write-verb rules) and path_guard (`reviews/`, `.git/.review-approved` protected) — PR 2 round-5 carry |
+| 39 | L0 | read-only sentinel checks (`ls .guard-override`, `cat .git/.review-approved`) | allowed — sentinel rules scope to write verbs only |
+| 40 | L0 | the wedge: red suite whose only fix is in a guard-protected file | Stop gate blocks the turn, path_guard blocks the fix — resolution is the human's `.guard-override` (observed live during PR 3 development, before the guards' own PR existed) |
 
 ## Rollout order
 
