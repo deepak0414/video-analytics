@@ -7,7 +7,13 @@ zero=0000000000000000000000000000000000000000
 fail() { echo "pre-push BLOCKED: $1" >&2; exit 1; }
 
 while read -r local_ref local_sha remote_ref remote_sha; do
-  [ "$local_sha" = "$zero" ] && continue   # branch deletion — nothing to verify
+  if [ "$local_sha" = "$zero" ]; then      # remote ref deletion
+    case "$remote_ref" in
+      refs/heads/main|refs/heads/master)
+        fail "deleting remote main is blocked." ;;
+    esac
+    continue                                # other deletions — nothing to verify
+  fi
 
   # Gate 1: full offline suite (stub backends, no GPU/network; ~31 s).
   # The EXIT CODE is the truth — summary-line grepping matched "33 passed,

@@ -49,3 +49,6 @@ Thumbs.db
 # --- Trust-gate sentinels (human-only, per-machine; workflow-trust-plan.md) ---
 .commit-approved
 .guard-override
+
+# --- Personal Claude Code settings (permissions allowlist etc.) ---
+.claude/settings.local.json

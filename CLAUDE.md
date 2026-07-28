@@ -117,8 +117,17 @@ On `approve`: present the human a digest (verdict, findings, ledger path), then 
 the human approves by running `touch .commit-approved` (human-only; NEVER create it
 yourself). Then `git add reviews/` and `git commit --amend` with the real subject
 (sentinel is consumed; ledger ships inside the commit). Provisional subjects cannot be
-pushed. All overrides (`AGENT_REVIEW=skip`, `ALLOW_MAIN_COMMIT=1`, `ALLOW_TEST_REMOVAL=1`)
-are human-only.
+pushed. All overrides (`AGENT_REVIEW=skip`, `ALLOW_MAIN_COMMIT=1`, `ALLOW_TEST_REMOVAL=1`,
+`ALLOW_LEDGER_EDIT=1`) are human-only.
+
+**Session guards (WT.3)** are active via `.claude/settings.json`: bash/path guards
+block gate-bypass commands and edits to gate machinery (`.githooks/`, `.claude/`,
+`.github/workflows/`, trust scripts, `reviews/`, the sentinels); a Stop gate blocks
+ending a turn with a red offline suite. Gate maintenance requires the human's
+`touch .guard-override` (remove it after) — it relaxes ONLY the machinery-write
+guards; approval/waiver/audit rules (sentinels, `AGENT_REVIEW`, `gh pr merge`,
+`reviews/`) stay enforced even then. Hooks snapshot at session start — restart
+sessions after guard changes.
 
 ## Heuristics & validation (engineering conventions)
 
