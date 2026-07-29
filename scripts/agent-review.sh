@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Fresh-context adversarial review via headless Claude (workflow-trust-plan.md WT.4).
-# Usage: scripts/agent-review.sh <git-range>     (pre-push backstop mode)
-#        scripts/agent-review.sh --worktree      (everything vs origin/main)
+# Usage: scripts/agent-review.sh [--print-prompt] <git-range>|--worktree
+#   <git-range>     pre-push backstop mode
+#   --worktree      everything vs origin/main
+#   --print-prompt  emit the assembled prompt and exit (no claude call) — the
+#                   drift test for the single-sourced rubric (matrix row 106)
 # Exit 0 = approved (or human-waived); 1 = changes requested / review failed
 # (fail-closed). Findings + full review text land in a reviews/ ledger entry.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
-mode="${1:?usage: agent-review.sh <git-range>|--worktree}"
+print_only=0
+if [ "${1:-}" = "--print-prompt" ]; then print_only=1; shift; fi
+mode="${1:?usage: agent-review.sh [--print-prompt] <git-range>|--worktree}"
 if [ "$mode" = "--worktree" ]; then
   range="worktree"
   scope="the working tree: every change not yet on origin/main — committed-but-
@@ -23,9 +28,10 @@ sha=$(git rev-parse --short HEAD)
 ledger="reviews/$(date +%Y%m%d-%H%M%S)-${branch//\//-}-${sha}.md"
 mkdir -p reviews
 
-# Human-only waiver by convention now, by mechanism once WT.3's session guards
-# land; every use is recorded so waived pushes stay visible in the audit trail.
-if [ "${AGENT_REVIEW:-}" = "skip" ]; then
+# Human-only waiver — checked AFTER --print-prompt below, so print mode never
+# writes a spurious WAIVED ledger when the env var lingers in a shell (review
+# finding, WT.11 round 1); every real-run use is recorded in the audit trail.
+if [ "$print_only" = 0 ] && [ "${AGENT_REVIEW:-}" = "skip" ]; then
   printf '# Review WAIVED by user\n\ndate: %s\nrange: %s\nbranch: %s\n' \
     "$(date -Is)" "$range" "$branch" > "$ledger"
   echo "agent-review: WAIVED (ledger: $ledger)" >&2
@@ -38,36 +44,30 @@ else
   stat=$(git diff --stat "$range" | tail -1)
 fi
 
-prompt="You are a fresh-context adversarial code reviewer for this repo. You did NOT
-write this code; your job is to find what is wrong with it, not to praise it.
+# The rubric is SINGLE-SOURCED from the reviewer agent file (WT.11): the awk
+# strips the frontmatter (everything through the second `---`). Fail CLOSED if
+# the file moves or the extraction breaks — an empty rubric must never silently
+# produce a lenient review.
+rubric=$(awk 'f{print} /^---$/{c++; if (c==2) f=1}' .claude/agents/code-reviewer.md)
+if [ -z "$rubric" ]; then
+  echo "agent-review: rubric extraction from .claude/agents/code-reviewer.md came back EMPTY — refusing to review with no rubric (fail-closed)." >&2
+  exit 1
+fi
 
-Review ONLY ${scope}
-Read any file you need for context (read-only).
-If a reviews/ ledger entry disputes one of your earlier findings with a reasoned
-explanation, re-judge that finding on the merits rather than repeating it.
+prompt="${rubric}
 
-Report ONLY (scope discipline — no style/naming/preference comments):
-1. Correctness bugs: logic errors, inverted conditions, off-by-one, broken error paths.
-2. Contract breaks: changes to function signatures/behavior listed in COORDINATION.md,
-   schema changes without migration handling, vector-space/config mismatches.
-3. Repo-rule violations from CLAUDE.md: silently introduced hardcoded content or
-   canned heuristics; determinism claimed as correctness without ground-truth
-   validation; best-effort roles now able to abort ingest.
-4. Test integrity: tests deleted/weakened/gamed; new code paths with zero coverage
-   that the plan's 'Done when' implies should be tested.
-5. If a plan doc in the repo covers this change, gaps between the diff and its
-   'Done when' items.
-
-For each finding: severity (critical|major|minor), file:line, one-sentence issue,
-and the concrete failure scenario. If you verify a suspicion by reading more code and
-it dissolves, do not report it.
+For THIS review, override the default scope. Review ONLY ${scope}
 
 End your reply with EXACTLY one fenced json block:
 \`\`\`json
 {\"verdict\": \"approve|request_changes\", \"findings\": [{\"severity\": \"...\",
 \"file\": \"...\", \"line\": 0, \"issue\": \"...\", \"scenario\": \"...\"}]}
-\`\`\`
-Verdict rule: request_changes iff any critical or major finding."
+\`\`\`"
+
+if [ "$print_only" = 1 ]; then
+  printf '%s\n' "$prompt"
+  exit 0
+fi
 
 echo "agent-review: reviewing $range ($stat) ..." >&2
 # Recursion guard: inherited by the headless reviewer session so this repo's hooks
