@@ -106,19 +106,19 @@ really does emit `"3.5s"`); unparseable output falls back to the rule reasoner.
 Git hooks enforce this mechanically (activated per machine by `scripts/setup-hooks.sh`;
 already active here). Every commit subject MUST be one of:
 - **`need_agent_review: <desc>`** — work for a task/plan chunk is COMPLETE. The
-  post-commit hook spawns a fresh reviewer agent (headless, read-only, rubric in
-  `scripts/agent-review.sh`); verdict + findings land in `reviews/` and in your session.
+  post-commit hook spawns a fresh reviewer (headless, read-only; rubric single-sourced
+  from `.claude/agents/code-reviewer.md`); verdict + findings land in `reviews/`.
 - **`wip:` / `checkpoint:`** — deliberately unfinished. Free, but unapproved content
   still gets the backstop review at push; it can never reach main unreviewed.
 - **plain subject** — ONLY for finalizing an approved commit (or docs-only branches).
 
-On `request_changes`: fix, `git commit --amend` keeping the tag — review re-fires.
-On `approve`: present the human a digest (verdict, findings, ledger path), then STOP —
-the human approves by running `touch .commit-approved` (human-only; NEVER create it
-yourself). Then `git add reviews/` and `git commit --amend` with the real subject
-(sentinel is consumed; ledger ships inside the commit). Provisional subjects cannot be
-pushed. All overrides (`AGENT_REVIEW=skip`, `ALLOW_MAIN_COMMIT=1`, `ALLOW_TEST_REMOVAL=1`,
-`ALLOW_LEDGER_EDIT=1`) are human-only.
+**The committer's full procedure is `/task-commit`**: scope check, combination check
+(affected roles×backends×profiles cells + their tests), documentation check (new
+surface documented in the same change; unsure → ask in the digest), review loop,
+four-section digest, STOP for the human's `touch .commit-approved` (human-only; NEVER
+create it), finalize. **Final commit messages describe the change for an uninformed
+reader** — shorthand IDs (WT.x/RI.x) only as trailing references. All overrides
+(`AGENT_REVIEW=skip`, the `ALLOW_*` family) are human-only.
 
 **CI gates (WT.5–WT.7)** run on GitHub, beyond reach of any local override — though not
 absolutely: a `pull_request` run executes the PR's own copy of the workflows and of

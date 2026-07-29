@@ -255,3 +255,13 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   label marks intent rather than proving it (see D9 in workflow-trust-plan.md). Checks re-run on
   `edited`/`labeled`, so fixing a body or adding a label needs no new commit. Golden gate stays
   manual on the Spark.
+- **2026-07-29 (trust):** Role instructions landing (branch `trust/role-instructions`, plan WT.11).
+  **Action for BOTH agents:** completed tasks are now committed via the **`/task-commit`**
+  procedure (scope check, combination check, documentation check, review loop, four-section
+  digest — the digest must name affected backend/config/profile combinations with tests run,
+  documentation added or open doc questions, and the proposed final commit message). The
+  reviewer rubric moved: `.claude/agents/code-reviewer.md` is now the SINGLE source —
+  `scripts/agent-review.sh` assembles its prompt from it (drift-tested), so rubric edits happen
+  in one file only. Final commit messages must read plainly for uninformed readers; shorthand
+  IDs (WT.x/RI.x) only as trailing references. Disputes of review findings go in
+  workflow-trust-plan.md, never in `reviews/`.

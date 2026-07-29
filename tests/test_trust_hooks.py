@@ -141,6 +141,13 @@ def trust_repo(tmp_path):
     (work / "scripts").mkdir(exist_ok=True)
     for script in (REPO_ROOT / "scripts").glob("*.sh"):
         shutil.copy(script, work / "scripts" / script.name)
+    # agent-review.sh single-sources its rubric from the reviewer agent file
+    # (WT.11) and fails closed without it — sandbox parity requires the copy.
+    (work / ".claude" / "agents").mkdir(parents=True)
+    shutil.copy(
+        REPO_ROOT / ".claude" / "agents" / "code-reviewer.md",
+        work / ".claude" / "agents" / "code-reviewer.md",
+    )
     for hook in (work / ".githooks").iterdir():
         hook.chmod(0o755)
     for script in (work / "scripts").iterdir():
@@ -455,6 +462,35 @@ def test_plain_docs_subject_fails_closed_without_origin_main(trust_repo):
     res = r.commit("docs: add notes")
     assert res.returncode != 0
     assert "commit-msg BLOCKED" in res.stderr
+
+
+def test_reviewer_rubric_is_single_sourced_from_agent_file(trust_repo):
+    """Matrix row 106: an edit to the reviewer agent file must appear in the
+    prompt agent-review.sh assembles — the rubric cannot drift between the
+    interactive twin and the enforced headless path."""
+    # (Also covers the round-1 finding: print mode must ignore a lingering
+    # waiver env var instead of writing a spurious WAIVED ledger.)
+    r = trust_repo
+    marker = "DRIFT-CANARY-9a7f: flag any use of the frobnicate() helper."
+    agent_file = r.root / ".claude" / "agents" / "code-reviewer.md"
+    agent_file.write_text(agent_file.read_text() + f"\n{marker}\n")
+    before = len(r.ledgers())
+    res = r.run(
+        "bash", "scripts/agent-review.sh", "--print-prompt", "--worktree",
+        env={"AGENT_REVIEW": "skip"},  # print mode must ignore a lingering waiver
+    )
+    assert res.returncode == 0
+    assert marker in res.stdout
+    assert "Review ONLY" in res.stdout  # scope appendix still present
+    assert len(r.ledgers()) == before  # no spurious WAIVED ledger from print mode
+
+
+def test_missing_rubric_fails_closed(trust_repo):
+    r = trust_repo
+    (r.root / ".claude" / "agents" / "code-reviewer.md").write_text("---\n")
+    res = r.run("bash", "scripts/agent-review.sh", "--print-prompt", "--worktree")
+    assert res.returncode != 0
+    assert "fail-closed" in res.stderr
 
 
 def test_recursion_guard_disables_hooks_in_reviewer_session(trust_repo):

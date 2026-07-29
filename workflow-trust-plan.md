@@ -3,7 +3,8 @@
 Status: **DELIVERED**, updated 2026-07-29. WT.0–WT.8 and WT.10 are shipped and merged:
 PR #13 (L1 git hooks), #14 (review lifecycle), #15 (session guards), #16 (CI gates +
 branch protection), #17 (compounding ledger). What remains is the WT.9 deferral table,
-which is future work rather than unfinished work.
+which is future work rather than unfinished work — plus **WT.11 (role instructions
+for committer & reviewer), added 2026-07-29 and in progress** as the arc's closing PR.
 
 **Built and deliberately dropped** — recorded so nobody rebuilds them assuming they were
 merely forgotten:
@@ -2275,6 +2276,9 @@ Not in scope now; recorded so the triggers are explicit (model-analysis.md style
 | Golden gate in CI | self-hosted runner on the Spark executing `-m golden` nightly against `.va-shots` | matches qa-and-traceability-plan's deferred CI/CD; revisit when the Spark has idle headroom |
 | Observability-as-trust | Ronacher pattern: pidfile process manager + dual logging so agents self-verify against logs | when the web service becomes long-running/multi-process |
 | Self-observing-loop guard | block `until ! pgrep -f X` where the pattern is written in the matcher call (both of this session's hung watchers) | its own PR — see the WT.8 scope decision for the recommended small shape and the five rounds of real findings to keep |
+| Test-matrix map (WT.11/RI.5) | `scripts/test_matrix.txt`: path patterns → required test selections/evidence items, checked by the CI evidence gate — mechanizes the committer's configuration-matrix duty | footage profiles merge, or the first combination-specific regression ships |
+| Per-check reviewer files (WT.11/RI.5) | Amp-style `.claude/checks/*.md`, one subagent per check — "a stronger guarantee each check is actually checked" | a review round misses a whole finding category |
+| Interactive-reviewer memory (WT.11/RI.5) | `memory: project` on the code-reviewer agent so the interactive twin accumulates recurring findings (the enforced headless reviewer stays memoryless by design) | ledger-based dispute/recurrence memory proves insufficient |
 
 ### WT.10 — Trust-layer self-tests (the §8 matrix as code)
 
@@ -2337,6 +2341,98 @@ latency), 9–13 as observed in a live session, 14–16 (GitHub CI + branch prot
 rollout; the A set runs forever.
 
 ---
+
+### WT.11 — Role instructions: committer & reviewer (added 2026-07-29)
+
+**Goal:** the two agent roles get durable, single-sourced instructions delivered by
+mechanism — unifying practitioner practice (research provenance in §9: Cherny's
+command files, Beck's commit invariants, Codex's risk+safe-path review rules, Amp's
+checks isolation, Anthropic's writer/reviewer split, Aider's scope hygiene, Every's
+commit-authority rules) — without adding any new writable surface (the failure mode
+that killed dropped PR 6: instruction FILES only, all guard-protected, maintenance-
+window editable).
+
+**Design rules learned in this plan, applied here:**
+- Every committer duty gets a mirrored reviewer check — advisory duties get teeth
+  through the reviewer, not new hooks.
+- The **digest is the enforcement point for judgment duties**: mandatory sections
+  put each duty in front of the human at the sentinel moment; an empty section is
+  visible exactly when authority is exercised.
+- **Shorthand IDs are conversation vocabulary, not commit language** (user decision
+  2026-07-29): `WT.x`/`RI.x`/matrix-row numbers are free in digests, sessions, and
+  plan docs; final commit messages and PR bodies must carry meaning in plain
+  description an uninformed reader can follow — IDs may appear only as trailing
+  references after a self-sufficient description. The finalize amend is where the
+  translation happens; rubric item 8 is the mirror check.
+
+Task cards (RI = role instructions):
+
+**RI.0 · Plan update · this section + matrix rows 106–108 + WT.9/§9 additions ·
+Done when: committed (docs commit) · Depends on: —**
+
+**RI.1 · Single-source the reviewer rubric · `agent-review.sh` assembles its prompt
+from `.claude/agents/code-reviewer.md` (frontmatter stripped) + scope line +
+verdict-format appendix; new `--print-prompt` mode emits the assembled prompt
+without calling claude · Done when: sandbox test edits a marker into the agent file
+and asserts it appears in `--print-prompt` output (row 106) · Depends on: —**
+
+Sketch (prompt assembly):
+
+```bash
+rubric=$(awk 'f{print} /^---$/{c++; if(c==2) f=1}' .claude/agents/code-reviewer.md)
+prompt="${rubric}
+
+Review ONLY ${scope}
+${VERDICT_FORMAT_APPENDIX}"
+```
+
+Includes the dispute-channel fix owed since dropped PR 6: the rubric's rebuttal
+line points at THIS PLAN's dispute records, not at a `reviews/` ledger the
+committer cannot write.
+
+**RI.2 · Committer procedure file `.claude/commands/task-commit.md` · ordered
+procedure with abort rule; scope discipline (never stage other sessions' files);
+Beck commit invariants (one logical unit; structural vs behavioral not mixed);
+configuration-matrix duty (name affected roles×backends×profiles cells, tests per
+cell, golden applicability); documentation duty (new env vars/flags/config
+keys/harness modes documented in the right file in the same change — unsure →
+open question in the digest, never guess); digest template with four mandatory
+sections (Verdict & findings + ledger paths / Affected combinations & tests run /
+Documentation added & open doc questions / Proposed final commit message); the
+shorthand→description translation rule at finalize · Done when: a real task-commit
+is driven end-to-end via `/task-commit` and the digest shows all four sections
+(row 107) · Depends on: —**
+
+**RI.3 · CLAUDE.md slims to gate-summary + pointers (`/task-commit`, the reviewer
+agent file, this plan) · Done when: the lifecycle section carries no procedure
+detail that `/task-commit` owns, and net CLAUDE.md size does not grow ·
+Depends on: RI.2**
+As-built (2026-07-29, after two review rounds flagged the original wording):
+procedure detail moved out and net size held at baseline (322 lines), but the
+full <200-line consolidation is **deferred** — the remaining trust-section lines
+are each load-bearing warnings (PR-weakens-checks caveat, label attestation,
+override scope), and the doc's other 200 lines are architecture reference whose
+consolidation is a separate, riskier edit than this task. Revisit when CLAUDE.md
+next gains a section, with the pruning test from the docs: "would removing this
+cause mistakes? If not, cut it."
+
+**RI.4 · Reviewer rubric upgrades (single source after RI.1) · (a) repo rules
+recast risk+safe-path; (b) item 6 combination coverage; (c) item 7 documentation
+parity (grep the diff for os.environ/getenv/new CLI args/config keys); (d) item 8
+commit-message clarity (flag shorthand-dependent final messages; provisional
+subjects exempt); (e) noise governance (a rule producing repeated false positives
+is narrowed via /lesson + a reviewed lifecycle commit) and "apply CLAUDE.md
+conventions, don't restate them"; (f) dispute channel → this plan · Done when:
+rubric contains items 6–8 and the first real review after merge applies them ·
+Depends on: RI.1**
+
+**RI.5 · Deferred (recorded in WT.9's table with triggers) · test-matrix map;
+per-check reviewer files; interactive-reviewer `memory: project` · Done when:
+table rows exist · Depends on: —**
+
+**RI.6 · Validation · rows 106–108; the WT.11 lifecycle commit itself is driven via
+`/task-commit` and its finalized message obeys the shorthand rule — the closing
+commit demonstrates its own rules · Depends on: all**
 
 ## §8 Validation matrix — every gate gets adversarially tested at rollout
 
@@ -2453,6 +2549,9 @@ executed (this table is the rollout's "Done when").
 | 103 | L0 | `gh api …/labels -f 'labels[]=x'` (no `-X`) | blocked — `gh api` sends POST automatically when fields are present |
 | 104 | L0 | `curl …/graphql -d '{"query":"mutation{addLabelsToLabelable…"}'` | blocked — GraphQL mutation names now match on the HTTP-client path too |
 | 105 | L0 | `gh pr review N --approve=true` (attached value) | blocked — attached spellings now covered for `--approve` as well as `--add-label` |
+| 106 | L2 | edit a marker into `.claude/agents/code-reviewer.md`, run `agent-review.sh --print-prompt` | marker appears in the assembled prompt — the rubric is single-sourced, drift is impossible (automated, WT.11) |
+| 107 | process | digest arrives missing a mandatory section (combinations / documentation / proposed final message) | human declines the sentinel until complete — PENDING: record the first live `/task-commit` observation here |
+| 108 | L2 | finalized commit message whose meaning depends on shorthand IDs (`feat: implement RI.1`) | reviewer flags it under rubric item 8 — PENDING: record the first live observation here |
 
 ## Rollout order
 
@@ -2568,3 +2667,9 @@ WT.4 (everything else is static config + shell).
 | Agents delete/weaken tests → treat as the primary adversarial risk | Kent Beck (Jun 2025); tdd-guard | newsletter.pragmaticengineer.com/p/tdd-ai-agents…; github.com/nizos/tdd-guard |
 | Dangerous-command PreToolUse blockers; tool-call audit logging | disler/claude-code-hooks-mastery | github.com/disler/claude-code-hooks-mastery |
 | Absence of any gate = failure within 24 h on anything real | Jack Dorsey's Bitchat (Jul 2025) | inc.com/chloe-aiello/security-flaws-with-jack-dorseys-bitchat… |
+| Committer as ordered procedure with abort rule (/commit-push-pr); role files in .claude/, CLAUDE.md as thin gate-index | Boris Cherny command/agent files (Jan 2026) | howborisusesclaudecode.com; github.com/0xquinto/bcherny-claude |
+| Commit invariants: one logical unit, never mix structural+behavioral, tests-green-only; implementer-only system prompt | Kent Beck published CLAUDE.md (2025) | newsletter.kentbeck.com/p/augmented-coding-beyond-the-vibes |
+| Review rules state the risk AND the safe path; P0/P1 floor; rule-guided review 98% vs 58% finding recovery; iterate rules against real noise | OpenAI Codex custom review rules (2025-26) | developers.openai.com/blog/custom-code-review-rules-for-codex; alignment.openai.com/scaling-code-verification |
+| Reviewer checks in separate files, one subagent per check ("stronger guarantee each check is actually checked"); oracle = different frontier model | Amp .agents/checks/ (Feb 2026) | ampcode.com/news/liberating-code-review; ampcode.com/manual |
+| Scope hygiene: agent edits never mix with pre-existing human edits (dirty commits committed separately) | Aider git integration | aider.chat/docs/git.html |
+| Commit authority: only the orchestrator commits; report-only reviewers; risk-gated reviewer roster | Every Inc compound-engineering plugin (2026) | github.com/EveryInc/compound-engineering-plugin |
