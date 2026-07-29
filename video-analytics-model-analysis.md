@@ -116,6 +116,43 @@ These models also serve as Role 11 (Reasoning LLM) when used at query time. The 
 **Recommendation for ingest (Role 4):** Qwen2.5-VL-7B on consumer GPU, Qwen2.5-VL-72B (INT4) on DGX Spark. Gemini Flash if going cloud.
 **Recommendation for reasoning (Role 11):** Claude Sonnet for best quality. Qwen2.5-VL-72B as self-hosted fallback.
 
+### Decision (as built) — Role 11 reasoner: local Qwen3-VL MoE at parity — *Status: Accepted 2026-07-29*
+
+**Chosen:** a backend portfolio behind the `Reasoner` Protocol — `rule` (stub/fallback),
+`qwen2.5-vl-7b` (shares the Role-4 model, no extra VRAM), `claude-code` (headless CLI on the
+subscription login), and now **`qwen3-vl-30b-a3b`** (Qwen3-VL 30B MoE, ~3B active params;
+58 GB local weights at `/home/debug/qwen3vl` (loaded bf16; dtype honored from the profile), deliberately outside the HF cache) selected
+via **`VA_CONFIG_DIR=run-qwen3vl/config`**.
+
+**Validated (2026-07-28/29):** the golden ask set ran under `run-qwen3vl/config`; the single
+failure (`bird-ask-01`) was root-caused to a *pipeline* bug — the deep-scan `scan_target`
+omitted by the planner — not the model, and that fix merged to main separately (the planner
+backfill PR). Re-validation 2026-07-29: **PASSED** (447 s including the cold ~45 GB load) →
+**Qwen3-VL is at parity with `claude-code` on the golden set.**
+
+**Why:** a fully local reasoner removes the query-time subscription/API dependency; the MoE
+(30B total / ~3B active) fits the Spark's 128 GB unified memory at bf16 with no quantization;
+decode cost scales with active params, not total.
+
+**Known limitations:** ~45 GB resident when loaded (bf16) — run ONE real-model golden suite at a
+time on this box (a concurrent leftover run had to be killed to avoid a double-load OOM);
+interactive latency under the keep-resident profile is unmeasured (cold load dominates today).
+Role 4 captioning in this config still uses `qwen2.5-vl-7b` — qwen3-as-captioner is a
+separate, unrun experiment.
+
+**↻ Revisit triggers:**
+1. **Interactive chat needs <10 s answers** → decide the serving path: in-process (current)
+   vs Q4 GGUF via llama.cpp/Ollama behind an OpenAI-compatible endpoint (the chat-interface
+   plan's route; ~3× smaller, faster decode — but verify the server's **VLM** support for
+   Qwen3-VL first [assumed uncertain]).
+2. **A deep-scan accuracy regression vs `claude-code`** on the golden ask set → re-run the
+   side-by-side and revert the default.
+3. **Caption quality limits retrieval** → run the qwen3-as-Role-4-captioner experiment.
+   NOTE: this is NOT just a config swap — `get_vlm_captioner` routes all `qwen*` models
+   to the Qwen2.5-arch `QwenCaptioner`, which cannot load Qwen3 MoE weights. The
+   experiment needs a `qwen3-vl` captioner branch in the registry (mirroring the
+   reasoner's, ordered before the generic `qwen` prefix) before touching the config.
+
 ---
 
 ## Role 5: Object Detector

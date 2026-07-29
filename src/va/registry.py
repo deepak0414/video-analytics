@@ -302,6 +302,13 @@ def get_reasoner(cfg: Optional[Config] = None) -> Reasoner:
             from va.adapters.reasoner.rule_inproc import RuleReasoner
 
             return RuleReasoner()
+        if model and model.startswith("qwen3-vl"):
+            # Qwen3-VL MoE reasoner (distinct arch from Qwen2.5-VL; accepted at
+            # golden parity — see the Role 11 block in model-analysis). Ordered
+            # BEFORE the generic startswith("qwen") branch, which would swallow it.
+            from va.adapters.reasoner.qwen3vl_inproc import Qwen3VLReasoner
+
+            return Qwen3VLReasoner({**load, "model": model})
         if model and model.startswith("qwen"):
             from va.adapters.reasoner.qwen_inproc import QwenReasoner
 

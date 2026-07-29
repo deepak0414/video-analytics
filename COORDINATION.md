@@ -265,3 +265,11 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   in one file only. Final commit messages must read plainly for uninformed readers; shorthand
   IDs (WT.x/RI.x) only as trailing references. Disputes of review findings go in
   workflow-trust-plan.md, never in `reviews/`.
+- **2026-07-29 (roles):** Qwen3-VL reasoner experiment CLOSED at parity and landing on main:
+  new Role-11 adapter `src/va/adapters/reasoner/qwen3vl_inproc.py` (subclass of `QwenReasoner`),
+  an additive `qwen3-vl` routing branch in `src/va/registry.py`, and the `run-qwen3vl/config`
+  dir (reasoner: `qwen3-vl-30b-a3b`, 58 GB local weights at `~/qwen3vl`, loaded bf16, outside the HF
+  cache). Golden ask set at parity with `claude-code` (bird-ask-01 re-validated post
+  scan_target-backfill fix). No contract changes; web layer unaffected. Caveat for anyone
+  running real models: the loaded reasoner is ~45 GB resident — ONE real-model golden run at a
+  time on this box. Decision + revisit triggers in `video-analytics-model-analysis.md`.
