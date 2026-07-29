@@ -1,8 +1,25 @@
 # Workflow Trust Plan — deterministic gates, hooks, and due-diligence automation
 
-Status: **in rollout**, updated 2026-07-28. WT.0–WT.4 + WT.10 are SHIPPED (PR #13
-L1 git hooks, #14 review lifecycle, #15 session guards — all merged to main); WT.5–WT.7
-(CI gates) are in flight on `trust/l3-ci`; WT.8 (`/lesson`) and the WT.9 deferrals remain.
+Status: **DELIVERED**, updated 2026-07-29. WT.0–WT.8 and WT.10 are shipped and merged:
+PR #13 (L1 git hooks), #14 (review lifecycle), #15 (session guards), #16 (CI gates +
+branch protection), #17 (compounding ledger). What remains is the WT.9 deferral table,
+which is future work rather than unfinished work.
+
+**Built and deliberately dropped** — recorded so nobody rebuilds them assuming they were
+merely forgotten:
+- **The self-observing-loop guard** (PR 5): eight review rounds, ~26 findings. By rounds
+  6–8 the findings were bugs in the fixes for rounds 5–7, including three pieces of dead
+  code. The five rounds of REAL findings and the recommended small shape survive in WT.8's
+  as-built notes; rebuild it there, not from scratch.
+- **`/commit`, the `reviews/disputes/` carve-out, and the WT.12 checklist** (PR 6): six
+  rounds. A new WRITABLE surface inside a protected area turned out to be one change per
+  mechanism that reasons about that area — the two guards, the approval-hash pathspec
+  (git's `*` crosses `/`), the docs-only exemption, the linker rule, and the append-only
+  rule. Cost exceeded the problem it solved (one workaround, once), so it was dropped
+  whole. **Consequence to know: the reviewer prompt still invites a rebuttal in a
+  `reviews/` ledger that an agent cannot write — record disputes in this plan instead,
+  as was done for the one demonstrably false review (PR 4, round 4).**
+
 Task cards carry as-built notes where reality diverged from the draft — read those before
 implementing from a code block.
 Companion docs: `qa-and-traceability-plan.md` (the QA phase this extends), `CLAUDE.md`
@@ -2465,23 +2482,31 @@ WT.4 (everything else is static config + shell).
   rather than skipping it. Watch during rollout: untagged commits reaching push =
   tag discipline slipping; escalation path is inverting the default (review every
   commit, tag to skip) — stricter, never weaker.
-- **D2 — Reviewer effort/model.** Leaning: default model on the subscription login,
+- **D2 — Reviewer effort/model. SETTLED BY PRACTICE (2026-07-29):** default model,
+  `--max-turns 40`, timeout raised 480 -> 900 -> 1800 s as branches grew (review cost
+  scales with BRANCH size, not commit size). Original leaning: default model on the subscription login,
   `--max-turns 40`, 10-min timeout. Alternative: a cheaper/faster model for small
   diffs with escalation on large ones — tune after observing real latency in rollout
   step 3.
-- **D3 — Add ruff (format-only) + a PostToolUse format hook?** The repo currently has
+- **D3 — Add ruff (format-only) + a PostToolUse format hook? STILL OPEN — the only
+  unresolved decision in this plan.** The repo currently has
   no linter (CLAUDE.md states this) — adding one is a real convention change, so per
   the repo's own heuristics rule it is flagged here, not done silently. Leaning:
   **yes, `ruff format` only** (no lint rules initially; pure determinism win, removes
   diff noise). If adopted: PostToolUse `Edit|Write` hook runs `ruff format <file>`,
   and CI adds `ruff format --check`.
-- **D4 — Does the user's own hand-written code also go through WT.4 review?**
+- **D4 — Does the user's own hand-written code also go through WT.4 review? SETTLED
+  BY PRACTICE (2026-07-29): yes — the gate is on content, not authorship, and no
+  carve-out was ever needed.**
   Leaning: **yes** — the gate is about the code, not its author, and it's simpler
   with no carve-outs. (Solo-repo symmetry of Hashimoto's "anti-idiot, not anti-AI".)
-- **D5 — Commit the `reviews/` ledger vs gitignore it.** Leaning: **commit** —
+- **D5 — Commit the `reviews/` ledger vs gitignore it. SETTLED (2026-07-29): commit.**
+  46 ledgers ship inside the commits they reviewed; `git log -p -- reviews/` is now a
+  complete record of every objection raised and how it resolved. Leaning: **commit** —
   matches the repo's append-only-ledger culture and answers "what did the reviewer
   see" months later. Alternative: gitignore to keep history clean.
-- **D6 — Stop-hook scope.** Leaning: full offline suite with change-detection skip
+- **D6 — Stop-hook scope. SETTLED BY PRACTICE (2026-07-29):** full offline suite with
+  change-detection; ~47 s at turn-end has not been a burden. Original leaning: full offline suite with change-detection skip
   (31 s worst case per turn-end). Alternative if it feels heavy in practice: `-x
   --lf` (last-failed first, fail fast) for the in-turn gate, full suite only at
   pre-push.
