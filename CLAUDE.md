@@ -159,6 +159,40 @@ sessions after guard changes.
   changes" with perfect stability; truth was ~12-15 — it was reproducibly counting camera
   cuts). Report results alongside the ground-truth comparison.
 
+## Lessons (append via `/lesson`)
+
+Corrections that cost something to learn, kept so they are never re-learned. Add with
+`/lesson <what you got wrong and why>` — one dated line each, newest at the bottom.
+
+**Pruning rule:** when this list passes ~20 lines, fold the stable entries into the
+relevant prose section above or convert them to hooks, and delete them here. A bloated
+CLAUDE.md gets skimmed and then ignored, which silently disables this whole advisory
+layer. Instructions decay; hooks don't — if a lesson is a mechanical invariant
+("always/never do X"), the right home for it is `.claude/hooks/` or `.githooks/`.
+
+- 2026-07-28: Never `git add -A <dir>` in this worktree — other sessions leave
+  uncommitted files there, and sweeping one in shipped a test importing an uncommitted
+  module, which would have turned CI red. Stage explicit paths.
+- 2026-07-28: When a gate blocks a legitimate action, change the approach — don't reach
+  for the human-only override. The test-deletion guard was right that removing a file
+  from a commit looked like deleting tests; rebuilding the commit was the correct fix.
+- 2026-07-28: A regression test that cannot reproduce the original failure is decoration
+  — the SIGPIPE test wrote 14 KB against a 64 KB pipe buffer and would have passed
+  against the very bug it was named for. Make the test fail on the old code first.
+- 2026-07-28: When a rule must understand a command's grammar, parse it — don't iterate
+  on regexes. Three positional patterns for `git commit -n` each missed a spelling;
+  shell tokenization closed all of them at once.
+- 2026-07-28: An over-broad guard is a defect too. Blocking any command whose text
+  merely *mentioned* a review label broke `gh pr create --body "<template>"` — every
+  false block pushes toward a workaround, which is the behavior guards exist to prevent.
+- 2026-07-28: A polling loop must not observe itself — a `pgrep -f X` / `ps | grep X`
+  inside a loop matches the loop's OWN command line (the pattern is written right there),
+  so it never terminates. Use the bracket trick (`[X]`) or match by PID. *A hook to
+  enforce this is deferred to its own PR (see WT.8 as-built); advisory until then.*
+- 2026-07-28: Prose is not an action — three guards in a row false-blocked legitimate work
+  by matching command TEXT (a label name in a PR body, "until" inside a heredoc string).
+  Key rules on token position and flags, never on a word appearing somewhere.
+
 ## The two things most likely to trip you up
 
 1. **Default config uses a stub, not a real model.** `config/roles.yaml` sets

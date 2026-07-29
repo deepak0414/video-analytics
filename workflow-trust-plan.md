@@ -2059,22 +2059,192 @@ the diff.
 
 ```markdown
 ---
-description: Append a correction/lesson to CLAUDE.md so it is never repeated
+description: Record a correction in CLAUDE.md's Lessons section so it is never re-learned
 allowed-tools: ["Read", "Edit", "Bash"]
 ---
 
-Take the argument text as a lesson learned. Rewrite it as ONE imperative line
-(≤2 sentences, include the why), append it under the "## Lessons" section of
-CLAUDE.md as `- YYYY-MM-DD: <lesson>`, then show the diff. If a materially
-identical lesson exists, update that line instead of duplicating. If the lesson
-is really a *mechanical* invariant ("always/never do X"), say so and propose the
-hook that would enforce it (P1) — instructions decay, hooks don't.
+Take the argument text as a lesson learned — usually something the user just corrected,
+or a mistake a review caught.
+
+1. **Decide where it belongs first.** If the lesson is a *mechanical invariant*
+   ("always/never do X", "never run Y"), say so and propose the hook that would enforce
+   it (`.claude/hooks/` for session actions, `.githooks/` for git actions, a test for
+   code invariants). Instructions decay; hooks don't. Offer the prose line as the
+   fallback, not the default.
+2. Otherwise rewrite it as ONE imperative line, ≤2 sentences, that **includes the why** —
+   a rule without its reason gets discarded by the next reader who thinks it's arbitrary.
+   Prefer the concrete failure ("the SIGPIPE test wrote 14 KB against a 64 KB buffer")
+   over the abstraction ("test your tests").
+3. Append it under `## Lessons` in CLAUDE.md as `- YYYY-MM-DD: <lesson>` (get today's
+   date with `date +%F`; newest at the bottom). If a materially identical lesson already
+   exists, UPDATE that line instead of adding a near-duplicate.
+4. Show the diff.
+5. If the section now exceeds ~20 entries, say so and propose which stable entries to
+   fold into the relevant prose section above (or into a hook) and delete from the list —
+   `tests/test_lessons_section.py` enforces this, so an oversized list fails the suite.
+
+Never silently reword an existing lesson's meaning: correcting a lesson is itself a
+lesson, and the reason it changed is the part worth keeping.
 ```
 
 Pruning rule (goes into the Lessons section header): when the section exceeds ~20
 lines, fold stable lessons into the relevant CLAUDE.md prose section or convert them
 to hooks — Anthropic's docs warn bloated CLAUDE.md files get ignored, which would
 silently disable the whole advisory layer.
+
+**As-built (2026-07-28, PR 5).** WT.8 shipped as specified plus two additions the work
+itself demanded:
+- **The pruning rule is a test, not a comment** (`tests/test_lessons_section.py`): dated
+  one-liners, no duplicates, and a hard 20-entry budget whose failure message says to fold
+  rather than raise the limit. A prose rule about not letting prose rot is self-defeating.
+- **The first lesson recorded became a hook** (see the deferred-hook note in WT.8), which is what the command's
+  own step 1 demands: a polling loop whose `pgrep`/`ps|grep` pattern is written in the
+  matcher call matches its own command line and can never terminate. Two such watchers hung
+  in a single session, and the user spotted one before the author did.
+Writing that hook reproduced the project's most persistent error a third time: the first
+draft searched the command TEXT for "until", which false-blocked a python heredoc whose
+test strings mentioned loops. Keyed on the first token instead. **Prose is not an action**
+now has three independent occurrences — label rules, `--no-verify` matching, and this —
+which is the signal to treat it as a design rule for every future guard, not a lesson.
+The `/lesson` command's dedup rule fired on its first real use: the invocation matched an
+existing entry and updated it in place instead of appending a near-duplicate.
+
+**PR 5 review round 1 (4 findings, 2 major) — the new guard failed the file's own design
+rule.** The loop check keyed on the FIRST segment's first token, so `cd /tmp && until …`
+bypassed it entirely (see the deferred-hook note in WT.8); and it scraped the pattern with a regex, capturing `root`
+from `pgrep -u root X` — a dead-end block whose suggested fix could not even be applied
+(see the deferred-hook note in WT.8). The reviewer cited the module's own header back at it: *tokenize, don't regex*.
+Rewritten to walk tokens, skip value-taking flags, scope to the loop CONDITION (a matcher
+in the body is not the terminator), and require a full-cmdline matcher — plain `pgrep X`
+matches comm, which for a shell loop is "bash", so it cannot self-observe (see the deferred-hook note in WT.8). A
+dead comment describing a per-segment check that never existed was also removed from both
+the guard and this plan, where it would have advertised coverage the code did not have.
+
+**PR 5 review round 2 (5 findings, 1 major).** The loop guard examined only the FIRST
+`until`/`while`, so a self-observing loop placed after an earlier one was never checked
+(see the deferred-hook note in WT.8) — the same "first occurrence only" shape as PR 4's first-segment bug, one level
+up. Three spelling/semantics fixes: `pgrep --full`, and `grep -e X` where the flag's value
+IS the pattern (it was being skipped as a mere flag value, discarding the thing being
+matched); `$VAR` patterns are now allowed because the loop's own cmdline holds the literal
+text while pgrep searches the expanded value — blocking them also offered an unusable fix.
+And a test-quality finding worth more than the code ones: the Lessons length budget read
+only each entry's FIRST PHYSICAL LINE, but CLAUDE.md wraps at ~90 columns, so the 400-char
+assertion **could never fail** — the second unenforceable test caught in two PRs (after the
+14 KB SIGPIPE probe). Entries are now joined before measuring; the longest is 301/400, so
+the budget can actually bite.
+
+**PR 5 review round 3 (4 findings, 1 major) — the plan asserted a fix it did not have.**
+Round 2's note and its matrix row (since removed with the descope) claimed nested loops were covered; they were not. Openers were
+found only when a segment's FIRST token was `until`/`while`, and a nested opener sits after
+`do` inside the same segment — so `while true; do until ! pgrep -f X; …` sailed through,
+with no test covering it. This is the FOURTH time in this project that documentation
+asserted a guarantee the code did not provide (after the label proof, the gate's own
+machinery, and "un-bypassable CI"). The check now walks the RAW token stream, so nesting
+and pipeline structure are both visible; the claim was rewritten to say what was actually true.
+Three supporting fixes: clustered value flags (`pgrep -fu root X` — the round-1 defect
+returning in short-flag clusters), the `grep -v grep` self-exclusion idiom (a filter, not
+a matcher), and per-pipeline `ps` scoping. Ordering bug found by the harness while fixing:
+the clustered-flag skip ran before the `-e`-is-the-pattern case and swallowed the pattern.
+
+**PR 5 review round 4 — DISPUTED (the reviewer's first demonstrably false report).**
+Round 4 restated round 3's four findings VERBATIM — identical wording, identical stale
+line numbers — against a commit (6d5db3a) that had already fixed all four. Verified by
+running the COMMITTED guard against each claim:
+
+| Round-4 claim | Reviewer said | Actual behavior of the reviewed commit |
+|---|---|---|
+| nested opener `while true; do until ! pgrep -f X; …` | allowed, "no test covers it" | **blocked**, and the test is present in the reviewed commit |
+| `pgrep -fu root "[p]ortscan.py"` | falsely blocked | **allowed** |
+| file-grep `&&` ps-pipeline | falsely blocked | **allowed** |
+| `\| grep -v grep` self-exclusion idiom | falsely blocked | **allowed** |
+
+No code change is warranted for round 4; the findings are recorded here as disputed with
+their evidence, per the reviewer prompt's instruction to re-judge disputed findings on the
+merits. Two lessons, both about the review LAYER rather than the code:
+- **The reviewer is fallible in a specific way: it can regurgitate its own prior ledger
+  instead of re-verifying.** Roughly thirty rounds across five PRs produced almost entirely
+  real findings — and then four confident, specific, fabricated ones. Treat a repeated
+  finding as a prompt to re-test, not as confirmation; "the reviewer said so" is not
+  evidence, which is the same P4 rule the humans in this loop are held to.
+- **The prompt's dispute channel is unusable by the agent.** It invites a rebuttal in a
+  `reviews/` ledger, but `reviews/` is guard-protected against agent writes (rows 37/48),
+  so disputes have to land somewhere the agent may actually write — here, the plan. Either
+  the prompt should point at the plan, or agent-authored dispute files need a carve-out
+  (e.g. `reviews/disputes/`, append-only, still barred from editing verdicts).
+
+**PR 5 review round 5 — the dispute WORKED, and the re-review earned its keep.** Round 5
+dropped all four disputed findings (no repetition) and produced five genuinely new ones
+against the token-stream rewrite. The major: `SEPARATORS` listed `"\n"` but the stream was
+built WITHOUT newline tokens, so a loop opener on line 2+ never passed the previous-token
+test and **multi-line commands bypassed the guard entirely** — the same multi-line class as
+PR 3's round-15 critical, in new code, for the second time. Also fixed: condition tokens
+were re-joined and re-split on whitespace, discarding quoting (a quoted multi-word pattern
+was judged by its first word); clustered `-qe` and attached `-m1` flag values were
+mis-consumed; stage commands used `basename(token0)` instead of `command_name()`, so an
+`ENV=value` prefix disabled the rule — violating the file's OWN round-13 single-definition
+rule for the second time; and `else`/`elif` were missing from the separator set.
+Standing observation after five PRs: the recurring defects are not novel, they are the
+same four shapes (multi-line, quoting, position-not-prose, use-the-shared-helper) returning
+in each new rule. A checklist for new guard rules would be worth more than another fix.
+
+**PR 5 review round 6 (4 findings, 1 major) — a false block that would have hit daily.**
+Heredoc bodies were tokenized as commands, so writing a loop INTO a file (`cat > w.sh
+<<'EOF' … EOF`) was blocked — and heredocs are how most of this repo's tooling gets
+authored, so the guard would have obstructed the exact workflow it lives in. Bodies are now
+skipped as data (see the deferred-hook note in WT.8). Also: the check recurses into `bash -c '…'` payloads, which is
+how a backgrounded watcher is actually spelled — the realistic accident path, and the one
+gap that would have shipped had this stopped at round 6 (see the deferred-hook note in WT.8); subshell parens made
+`command_name()` return "(" so no branch fired; and the self-exclusion idiom was recognized
+only in its short `-v` spelling (see the deferred-hook note in WT.8). The loop check is now a depth-bounded recursive
+function rather than a straight-line block.
+
+**PR 5 review round 7 (4 findings, 1 major) — second-order bugs inside round 6's fixes.**
+The `bash -c` recursion rebuilt its own token stream WITHOUT the heredoc filter, so a
+heredoc body containing `bash -c '<loop>'` was false-blocked while the note claimed bodies
+are data — the filter existed in one scan and not the other. Heredoc bodies are now
+stripped ONCE, on raw lines, before any quote-aware pass: an apostrophe in a body used to
+desync quote tracking and swallow the terminator (so everything after a heredoc was skipped
+as data), and the opener regex matched herestrings (`<<<`) and `<<` inside quotes. The
+payload scan also ran past command separators, attributing a later command's `-c` to bash.
+Pattern worth noting: rounds 6 and 7 were both about **a fix's interaction with an earlier
+fix**, not about the original problem. Each new special case multiplies with the existing
+ones, which is the real cost of special-case-driven hardening — and the argument for
+keeping such rules small enough to reason about whole.
+
+**PR 5 SCOPE DECISION (2026-07-29, user's call): the self-observing-loop hook is REMOVED
+from this PR and deferred to its own.** WT.8's deliverable — `/lesson`, the Lessons
+section, and `tests/test_lessons_section.py` — has been clean since round 1. The hook was
+a bonus, added because `/lesson`'s own step 1 says "propose the hook"; it then consumed
+EIGHT review rounds and ~26 findings, while the deliverable sat finished behind it.
+The decisive signal came in rounds 6-8: findings stopped being coverage gaps and became
+**bugs in the fixes for the previous round** — a herestring guard whose comparison could
+never be true, a `break` on a token never emitted, parity counting where a state machine
+was needed. Code that looked right, passed the cases I imagined, and did nothing.
+Recorded for whoever picks the hook up (matrix rows 106-124 were removed with it):
+- Rounds 1-5 found REAL gaps and are worth keeping: multi-line commands, nesting, quoting,
+  `bash -c` payloads, env prefixes, clustered/attached flag values, `pgrep` without `-f`
+  (matches comm, cannot self-observe), `$VAR` patterns, `grep -v` self-exclusion, heredoc
+  bodies as data.
+- The recommended shape is SMALL: top-level `until`/`while` conditions containing
+  `pgrep -f X` or `ps … | grep X` with an unbracketed X — ~15 lines, no recursion, no
+  shell model, with heredocs/`bash -c`/nesting explicitly out of scope. It catches both
+  watchers that actually hung; the elaborate version's extra coverage cost three rounds
+  and produced only inert patches.
+- Standing lesson: **a rule small enough to reason about whole beats a complete one**,
+  especially for a speed bump whose failure mode is a wasted background process.
+
+**Confirming round after the descope — my cleanup broke the record it was cleaning.**
+The regex that retargeted dangling citations (`\(rows? \d{3}\)`) was over-broad and
+also rewrote FOUR STILL-VALID ones — rows 100, 102, 103, 104 in PR 4's label-guard
+narrative — pointing live history at an unrelated note. Restored by hand and verified
+against the rows, which still exist. The lesson is not "be careful with sed": it is that
+**a bulk edit over prose needs the same verification as a code change** — I ran it,
+saw a plausible count, and moved on without checking WHICH citations matched. Second
+finding: `entries()` in the Lessons test only recognized conforming bullets, so a
+malformed one was invisible to every check (budget, length, date, dedup all iterate over
+`entries()`), and nothing asserted the section contains nothing else. A conformance test
+now covers it — and, per the lesson this project has now learned twice, it was verified
+to FAIL against a planted malformed bullet before being trusted.
 
 ### WT.9 — Deferred / optional extensions
 
@@ -2087,6 +2257,7 @@ Not in scope now; recorded so the triggers are explicit (model-analysis.md style
 | TDD enforcement | tdd-guard-style PreToolUse hook (block implementation edits with no failing test) | if test-after creep appears in the ledger |
 | Golden gate in CI | self-hosted runner on the Spark executing `-m golden` nightly against `.va-shots` | matches qa-and-traceability-plan's deferred CI/CD; revisit when the Spark has idle headroom |
 | Observability-as-trust | Ronacher pattern: pidfile process manager + dual logging so agents self-verify against logs | when the web service becomes long-running/multi-process |
+| Self-observing-loop guard | block `until ! pgrep -f X` where the pattern is written in the matcher call (both of this session's hung watchers) | its own PR — see the WT.8 scope decision for the recommended small shape and the five rounds of real findings to keep |
 
 ### WT.10 — Trust-layer self-tests (the §8 matrix as code)
 
