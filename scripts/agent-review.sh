@@ -76,7 +76,11 @@ export VA_AGENT_REVIEW=1
 # stderr goes to .git/ (NOT reviews/ — a stray non-.md file there would trip the
 # pre-commit ledgers-only gate at the next `git add reviews/`).
 errlog=".git/agent-review.err"
-raw=$(timeout 900 claude -p "$prompt" \
+# 1800s: review cost scales with BRANCH size, not commit size — the backstop
+# re-reads the whole range every round, so a long-lived branch eventually times
+# out (480 -> 900 -> 1800 across PRs 3-4). The real fix is smaller PRs; this is
+# the ceiling that keeps fail-closed from becoming fail-stuck.
+raw=$(timeout 1800 claude -p "$prompt" \
   --allowedTools "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git blame *),Bash(git status *)" \
   --output-format json --max-turns 40 2>"$errlog") || {
     echo "agent-review: headless run failed/timed out — treating as BLOCK (fail-closed). See $errlog" >&2

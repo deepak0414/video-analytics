@@ -175,7 +175,11 @@ def is_machinery(path):
     if {".githooks", ".claude", ".github"} & set(ps):
         return True
     if ps[-2:-1] == ["scripts"] and ps[-1] in (
-            "agent-review.sh", "review_scope_hash.sh", "setup-hooks.sh"):
+            "agent-review.sh", "review_scope_hash.sh", "setup-hooks.sh",
+            # The WT.7 gate IS these two files, and CI runs the PR's own copy —
+            # unprotected, a PR could neuter the gate it must pass, and the same
+            # PR would then sail through it (PR 4 backstop major).
+            "check_critical_paths.sh", "critical_paths.txt"):
         return True
     return False
 
@@ -307,20 +311,122 @@ for seg in segments(cmd):
                     ".githooks" in ps or ".claude" in ps:
                 block("destructive delete of repo/system paths.")
 
-    # 4. gh self-approval / self-merge (env-prefix safe; attached and short
-    # flag spellings included — round-14 major).
+    # 4. gh self-approval / self-merge / self-labeling (env-prefix safe; attached
+    # and short flag spellings included — round-14 major).
+    # GitHub treats a PR as an issue, so `gh issue edit <PR#> --add-label` and the
+    # REST route both apply REVIEW labels to a PR: gating only `gh pr` left the
+    # WT.7 label gate self-servable (PR 4 backstop major).
     gname, gargs = command_name(seg)
-    if gname == "gh" and gargs[:1] == ["pr"]:
-        action = gargs[1] if len(gargs) > 1 else ""
-        if action == "merge":
+    REVIEW_LABELS = ("human-reviewed", "golden-verified")
+
+    # Any HTTP client can hit the same endpoints with the same token
+    # (`gh auth token` + curl was demonstrated by the PR 4 backstop). Blocking
+    # them is a SPEED BUMP against accident, not a guarantee: with a shared
+    # credential, anything the human can do the agent can do. See D9 in
+    # workflow-trust-plan.md — the real fix is a separate, label-incapable
+    # credential for agent sessions.
+    if gname in ("curl", "wget", "http", "https", "httpie", "xh"):
+        joined_http = " ".join(gargs)
+        if "api.github.com" in joined_http or "/repos/" in joined_http:
+            if any(lbl in joined_http for lbl in REVIEW_LABELS) or re.search(
+                    r"/(labels|reviews|merge)\b", joined_http) or any(
+                    m in joined_http for m in ("addLabelsToLabelable", "addLabels",
+                                               "mergePullRequest",
+                                               "addPullRequestReview")):
+                block("applying review labels / approvals / merges over HTTP is "
+                      "human-only (P5). NB: this is defense-in-depth, not a "
+                      "guarantee — see D9.")
+    # Every spelling that PRINTS the credential, not just `gh auth token`:
+    # `gh auth status --show-token` / `-t` emits the same secret.
+    if gname == "gh" and gargs[:1] == ["auth"]:
+        if gargs[1:2] == ["token"] or any(
+                t in ("--show-token", "-t") or t.startswith("--show-token=")
+                for t in gargs[1:]):
+            block("extracting the human's credential is forbidden — it is the key "
+                  "to every human-only action (labels, approvals, merges).")
+    # Persistent flags may sit between the noun and the action
+    # (`gh issue -R owner/repo edit …`), so positions are parsed, not assumed —
+    # the same leak class git_subcommand() exists to avoid (PR 4 backstop major).
+    GH_VALUE_FLAGS = {"-R", "--repo", "-H", "--hostname", "-F", "--field",
+                      "-f", "--raw-field", "-X", "--method", "-H", "--header",
+                      "-q", "--jq", "-t", "--template", "-i", "--input"}
+
+    def gh_words(args):
+        out, i = [], 0
+        while i < len(args):
+            t = args[i]
+            if t in GH_VALUE_FLAGS:
+                i += 2
+                continue
+            if t.startswith("-"):
+                i += 1
+                continue
+            out.append(t)
+            i += 1
+        return out
+
+    if gname == "gh":
+        words = gh_words(gargs)
+        # `gh alias set m 'pr merge'` then `gh m 14` renames the action past every
+        # noun/action rule. Aliases are opaque to a static guard, so block their
+        # CREATION rather than pretend to resolve them (finalize-round minor).
+        if words[:1] == ["alias"] and words[1:2] in (["set"], ["import"]):
+            block("installing gh aliases hides the real subcommand from the "
+                  "guards (`alias set`, and `alias import` from a file); ask "
+                  "the user instead.")
+        noun = words[0] if words else ""
+        action = words[1] if len(words) > 1 else ""
+        # Any mention of a review label anywhere in a gh command is decisive:
+        # -f 'labels[]=human-reviewed', a GraphQL mutation body, --add-label=…
+        if noun == "pr" and action == "merge":
             block("merging PRs is a human action in this repo.")
-        if action in ("edit", "review") and any(
-                t in ("--approve", "-a", "--add-label", "human-reviewed",
-                      "golden-verified")
-                or t.startswith("--add-label=") or t.startswith("--body=")
-                and ("human-reviewed" in t or "golden-verified" in t)
-                for t in gargs[2:]):
-            block("review labels/approvals are human-only (P3).")
+        # Reading label state is legitimate (checking whether the human has
+        # applied one); only APPLYING is human-only (PR 4 backstop minor).
+        # Applying a label is signalled by a FLAG (--add-label/--approve) or an
+        # API field — never by prose. Blocking any command whose text mentions a
+        # label name false-blocked `gh pr create/edit --body "<filled template>"`,
+        # because the repo's own template names both labels: the guard was
+        # breaking the lifecycle steps that open and fix a PR. Prose is not an
+        # action; the explicit-flag rule below is what actually gates this.
+        if noun in ("pr", "issue") and action in ("edit", "review") and any(
+                t in ("--approve", "-a", "--add-label")
+                or t.startswith(("--add-label=", "--approve="))
+                for t in gargs):
+            block("review labels/approvals are human-only (P3/P5).")
+        # REST/GraphQL: routes with an explicit verb, PATCH/POST on an issue or
+        # pull (PRs ARE issues), and label/review/merge GraphQL mutations.
+        if noun == "api":
+            joined = " ".join(gargs)
+            # A route alone is not an action: `gh api …/issues/N/labels` with no
+            # method is a GET, and reading label state is legitimate (row 89).
+            # Only an explicit mutating method — or a GraphQL mutation — counts.
+            explicit_method = re.search(
+                r"(^|\s)(-X\s*|--method[= ])([A-Z]+)", joined)
+            # gh api sends POST automatically when fields are supplied, so
+            # `gh api …/labels -f 'labels[]=x'` is a mutation with no -X at all.
+            has_fields = any(
+                t in ("-f", "-F", "--field", "--raw-field", "--input")
+                or t.startswith(("-f", "-F", "--field=", "--raw-field=", "--input="))
+                for t in gargs)
+            verb = (explicit_method.group(3) if explicit_method
+                    else ("POST" if has_fields else "GET"))
+            if verb != "GET" and any(
+                    s in joined for s in ("/labels", "/reviews", "/merge")) or any(
+                    s in joined for s in ("addLabelsToLabelable", "addLabels",
+                                          "mergePullRequest", "addPullRequestReview")):
+                block("applying labels / approving / merging via the API is "
+                      "human-only (P3/P5).")
+            # Attached spellings (-XPATCH, --method=PATCH) and body-from-file
+            # forms (--input f, -F q=@f) keep the method/label out of argv, so
+            # match the method textually and treat any file-fed body on an
+            # issue/pull route as mutating (PR 4 backstop major).
+            mutating = bool(re.search(r"(^|\s)(-X\s*|--method[= ])(PATCH|POST|PUT|DELETE)\b",
+                                      joined))
+            body_from_file = bool(re.search(r"(--input|[-][fF]\s*\S*@)", joined))
+            if (mutating or body_from_file) and (
+                    re.search(r"/(issues|pulls)/\d+", joined) or "graphql" in gargs):
+                block("mutating a PR/issue (or a GraphQL mutation) via the API is "
+                      "human-only (P3/P5) — labels and approvals come from the user.")
 
     # 5. git: hook-skipping flags, in any position/spelling.
     sub, sub_args = git_subcommand(seg)

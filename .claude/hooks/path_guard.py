@@ -40,6 +40,10 @@ MAINTENANCE_PROTECTED = (
     "scripts/agent-review.sh",
     "scripts/review_scope_hash.sh",
     "scripts/setup-hooks.sh",
+    # The WT.7 gate is made of these two, and CI executes the PR's own copy —
+    # unprotected, a PR could neuter the gate it must pass (PR 4 backstop major).
+    "scripts/check_critical_paths.sh",
+    "scripts/critical_paths.txt",
 )
 # Sentinel/state files are matched by BASENAME anywhere, not just at their usual
 # path: in a linked worktree the stop-gate cache lives at

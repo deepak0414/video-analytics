@@ -107,7 +107,37 @@ BLOCKED_COMMANDS = [
     # gh self-approval: env prefix, short and attached flag forms (round-14)
     "LC_ALL=C gh pr merge 14",
     "gh pr review 14 -a",
+    "gh pr review 14 --approve=true",
     "gh pr edit 14 --add-label=human-reviewed",
+    # PRs ARE issues, and flags may sit between noun and action; the label is
+    # the PROOF a human read the diff (PR 4 backstop majors — row 81)
+    "gh issue edit 14 --add-label human-reviewed",
+    "gh issue -R deepak0414/video-analytics edit 14 --add-label human-reviewed",
+    "gh pr -R deepak0414/video-analytics merge 14",
+    "gh api repos/o/r/issues/14/labels -f labels[]=human-reviewed",
+    "gh api -X PATCH repos/o/r/issues/14 -f 'labels[]=human-reviewed'",
+    "gh api -X POST repos/o/r/pulls/14/reviews -f event=APPROVE",
+    "gh api graphql -f query='mutation { addLabelsToLabelable(input: {}) { clientMutationId } }'",
+    "gh issue edit 14 --add-label golden-verified",
+    # attached method spellings and file-fed bodies (PR 4 backstop major)
+    "gh api -XPATCH repos/o/r/issues/14 --input /tmp/p.json",
+    "gh api --method=PATCH repos/o/r/issues/14 --input /tmp/p.json",
+    "gh api graphql -F query=@mutation.graphql",
+    # any HTTP client reaches the same endpoint with the same token (D9)
+    "curl -X POST https://api.github.com/repos/o/r/issues/14/labels -d '{\"labels\":[\"human-reviewed\"]}'",
+    "wget --post-data '{}' https://api.github.com/repos/o/r/issues/14/labels",
+    "curl https://api.github.com/graphql -d '{\"query\":\"mutation{addLabelsToLabelable(input:{})}\"}'",
+    "gh auth token",
+    "gh auth status --show-token",
+    "gh auth status -t",
+    "gh auth status --show-token=true",
+    "gh alias set m 'pr merge'",
+    "gh alias set lbl 'issue edit'",
+    "gh alias import aliases.yml",
+    "https POST api.github.com/repos/o/r/issues/14/labels labels:='[\"human-reviewed\"]'",
+    # the WT.7 gate machinery is protected like the other trust scripts
+    "sed -i 's/exit \"$missing\"/exit 0/' scripts/check_critical_paths.sh",
+    "echo x > scripts/critical_paths.txt",
     # NEWLINE-separated commands: every line is its own command (round-15
     # critical — a multi-line command hid everything after line 1)
     "echo hi\ntouch .commit-approved",
@@ -202,6 +232,13 @@ ALLOWED_COMMANDS = [
     "git commit -m 'fix: guard -n and --no-verify spellings'",
     "git commit -F /tmp/msg.txt",            # value flags consume their argument
     "git push -n origin feature/x",          # push -n is --dry-run, harmless
+    # reading label state is legitimate; only applying is human-only
+    "gh pr list --label human-reviewed",
+    "gh issue list --label golden-verified",
+    "gh pr view 14",
+    "gh api repos/o/r/issues/16/labels",          # GET: reading label state is fine
+    "gh pr create --title x --body 'checklist mentions human-reviewed'",
+    "gh pr edit 16 --body 'checklist mentions human-reviewed'",
     "git stash push -f",                     # not a remote push (round-13 minor)
     "git subtree push --prefix=x origin gh-pages",
     # a quoted multi-line MESSAGE is data, not extra commands
@@ -482,3 +519,150 @@ def test_stop_gate_noop_in_reviewer_session(stop_repo):
     (stop_repo / ".venv" / "bin" / ".pytest_result").write_text("fail")
     res = run_stop_gate(stop_repo, {"VA_AGENT_REVIEW": "1"})
     assert res.returncode == 0  # recursion guard wins even with a red suite
+
+
+# --- critical-path label gate (WT.7; matrix row 16's automatable half) ---
+
+
+@pytest.fixture
+def cp_repo(tmp_path):
+    """Repo with the real critical_paths table + checker, a base commit, and a
+    branch whose diff the checker inspects."""
+    work = tmp_path / "cp"
+    work.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+           "GIT_CONFIG_SYSTEM": "/dev/null"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=work, capture_output=True,
+                              text=True, env=env)
+
+    git("init", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "T")
+    (work / "scripts").mkdir()
+    for name in ("critical_paths.txt", "check_critical_paths.sh"):
+        shutil.copy(REPO_ROOT / "scripts" / name, work / "scripts" / name)
+    (work / "scripts" / "check_critical_paths.sh").chmod(0o755)
+    (work / "README.md").write_text("seed\n")
+    git("add", "-A")
+    git("commit", "-m", "seed")
+    base = git("rev-parse", "HEAD").stdout.strip()
+
+    def check(labels=""):
+        return subprocess.run(
+            ["bash", "scripts/check_critical_paths.sh", base, labels],
+            cwd=work, capture_output=True, text=True, env=env,
+        )
+
+    def change(rel, content="x = 1\n"):
+        p = work / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        git("add", "-A")
+        git("commit", "-m", f"wip: touch {rel}")
+
+    class CpRepo:
+        root = work
+        __truediv__ = staticmethod(lambda rel: work / rel)
+
+    def git_mv(src, dst):
+        git("mv", src, dst)
+        git("commit", "-m", f"wip: rename {src}")
+
+    def mark_base():
+        """Re-anchor the comparison base at the current HEAD — needed when a test
+        must have a file ALREADY on main before the branch touches it."""
+        nonlocal base
+        base = git("rev-parse", "HEAD").stdout.strip()
+
+    CpRepo.git_mv = staticmethod(git_mv)
+    CpRepo.mark_base = staticmethod(mark_base)
+    CpRepo.check = staticmethod(check)
+    CpRepo.change = staticmethod(change)
+    return CpRepo()
+
+
+def test_critical_path_requires_its_label(cp_repo):
+    cp_repo.change("src/va/storage/structured/schema.py")
+    res = cp_repo.check("")
+    assert res.returncode == 1
+    assert "lacks label 'human-reviewed'" in res.stdout
+    res = cp_repo.check("human-reviewed")
+    assert res.returncode == 0
+
+
+def test_golden_verified_label_for_adapters(cp_repo):
+    cp_repo.change("src/va/adapters/reasoner/x_inproc.py")
+    assert cp_repo.check("human-reviewed").returncode == 1  # wrong label
+    assert cp_repo.check("golden-verified").returncode == 0
+
+
+def test_non_critical_change_needs_no_label(cp_repo):
+    cp_repo.change("docs/notes.md", "# notes\n")
+    assert cp_repo.check("").returncode == 0
+
+
+def test_comments_and_blank_lines_are_ignored(cp_repo):
+    """A '#' line must never be read as a pattern (it would match nothing, but a
+    naive loop could also read its trailing words as a label)."""
+    cp_repo.change("README.md", "seed 2\n")
+    res = cp_repo.check("")
+    assert res.returncode == 0
+    assert "FAIL" not in res.stdout
+
+
+def test_multiple_labels_on_one_pr(cp_repo):
+    cp_repo.change("src/va/cli.py")
+    cp_repo.change("config/roles.yaml", "x: 1\n")
+    assert cp_repo.check("human-reviewed").returncode == 1
+    assert cp_repo.check("human-reviewed golden-verified").returncode == 0
+
+
+def test_missing_table_fails_closed(cp_repo):
+    (cp_repo / "scripts" / "critical_paths.txt").unlink()
+    res = cp_repo.check("human-reviewed golden-verified")
+    assert res.returncode == 1
+    assert "missing" in res.stdout
+
+
+def test_prefix_match_is_anchored_not_substring(cp_repo):
+    """`web/scripts/app.js` must NOT trigger the `scripts/` rule (round: PR 4
+    backstop minor — grep -F was unanchored substring matching)."""
+    cp_repo.change("web/scripts/app.js", "// x\n")
+    assert cp_repo.check("").returncode == 0
+
+
+def test_large_changeset_does_not_fail_open(cp_repo):
+    """SIGPIPE regression. The list must EXCEED the 64 KB pipe buffer: the first
+    version of this test wrote ~14 KB, which FITS, so the buggy piped
+    implementation it names would have passed it (PR 4 backstop minor)."""
+    long_seg = "d" * 90
+    for i in range(900):                  # ~900 x ~110 B = ~99 KB > 64 KB buffer
+        cp_repo.change(f"src/va/{long_seg}/mod_{i}.py", "x = 1\n")
+    cp_repo.change("src/va/cli.py")
+    res = cp_repo.check("")
+    assert res.returncode == 1
+    assert "src/va/cli.py" in res.stdout
+
+
+def test_non_ascii_and_spaced_paths_are_matched(cp_repo):
+    """core.quotepath C-quotes non-ASCII paths ("sch\\303\\251ma.py") and naive
+    whitespace splitting fragments paths with spaces — both fail OPEN on exactly
+    the files this gate exists to catch (PR 4 finalize-round minor)."""
+    cp_repo.change("src/va/contracts/sch\u00e9ma.py")
+    assert cp_repo.check("").returncode == 1
+    assert cp_repo.check("human-reviewed").returncode == 0
+    cp_repo.change("src/va/contracts/my model.py")
+    assert cp_repo.check("").returncode == 1
+
+
+def test_rename_of_a_critical_file_is_caught(cp_repo):
+    """`git diff --name-only` reports only a rename's DESTINATION, so renaming a
+    critical file escaped every exact-file pattern (PR 4 backstop minor)."""
+    cp_repo.change("src/va/cli.py")   # exists on main...
+    cp_repo.mark_base()               # ...before this branch starts
+    cp_repo.git_mv("src/va/cli.py", "src/va/cli_main.py")
+    res = cp_repo.check("")
+    assert res.returncode == 1
+    assert "src/va/cli.py" in res.stdout

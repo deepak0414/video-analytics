@@ -1,0 +1,41 @@
+# Bounded human review (workflow-trust-plan.md WT.7 / P5).
+#
+# PRs touching these paths require the named label before CI goes green. The
+# list is deliberately SHORT: a long list collapses back into "review
+# everything", which means nothing. Reviewed quarterly.
+#
+#   human-reviewed   = the user has read this diff themselves.
+#   golden-verified  = the golden gate was run on the Spark and its output is
+#                      pasted in the PR's Evidence section.
+#
+# The label is the human's ATTESTATION, not proof (D9): agent sessions share the
+# human's credential, so the guards that stop agents applying labels via gh/curl
+# are a speed bump against accident, not a guarantee. Apply them in the GitHub UI.
+#
+# pattern (path prefix)                       required-label
+
+# --- the one shared DB schema + the deletion path ---
+src/va/storage/structured/schema.py           human-reviewed
+src/va/storage/structured/migrations          human-reviewed
+src/va/cli.py                                 human-reviewed
+src/va/pipeline/ingest.py                     human-reviewed
+
+# --- evolution-tolerant runtime contracts (QueryPlan/Evidence/Answer) ---
+src/va/contracts/                             human-reviewed
+
+# --- the verification layer itself: a hallucinated fixture poisons everything
+#     downstream (see the cobra-kitchen audit in CLAUDE.md) ---
+tests/golden_queries/                         human-reviewed
+
+# --- the trust machinery: gates that can be weakened silently ---
+.githooks/                                    human-reviewed
+.claude/                                      human-reviewed
+.github/                                      human-reviewed
+scripts/                                      human-reviewed
+
+# --- model/backend behavior: needs the real-model gate, not just stubs ---
+src/va/adapters/                              golden-verified
+src/va/pipeline/                              golden-verified
+config/                                       golden-verified
+run-siglip/config/                            golden-verified
+run-claude/config/                            golden-verified

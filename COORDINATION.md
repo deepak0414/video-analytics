@@ -242,3 +242,16 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   Gate-machinery edits need the human's guard-override sentinel. Guards demonstrated live during
   their own development (blocked their author; resolved via the designed human override). NB: bash
   heredocs whose PROSE mentions override commands trip bash_guard — write docs via the Edit tool.
+- **2026-07-28 (trust):** CI gates landing (branch `trust/l3-ci`, plan WT.5–WT.7). **The PR contract
+  changes for BOTH agents once this merges:** (1) `offline-tests` runs the full offline suite on
+  every PR/push to main and is a required check — a red suite now blocks merge on GitHub, not just
+  locally; (2) every PR body must contain a filled `EVIDENCE: offline suite` block (the `evidence`
+  check fails on the unedited template — use the new `/verify` command to generate it); (3) PRs
+  touching the critical paths in `scripts/critical_paths.txt` (schema, contracts, ingest, cli,
+  golden fixtures, and all trust machinery → `human-reviewed`; adapters, pipeline, config dirs →
+  `golden-verified`) fail CI until the HUMAN applies the label — agents are guard-blocked from
+  applying it via `gh pr`, `gh issue`, the REST/GraphQL API, and common HTTP clients — but note
+  this is defense-in-depth, NOT a guarantee: agent sessions share the human's credential, so the
+  label marks intent rather than proving it (see D9 in workflow-trust-plan.md). Checks re-run on
+  `edited`/`labeled`, so fixing a body or adding a label needs no new commit. Golden gate stays
+  manual on the Spark.

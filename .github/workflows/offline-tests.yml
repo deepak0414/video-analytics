@@ -1,0 +1,54 @@
+# The strongest gate — but NOT an absolute one (workflow-trust-plan.md WT.5).
+#
+# Local gates (git hooks, session guards) are hardening: 17 review rounds on the
+# session guards showed a determined shell can usually find one more spelling,
+# and every local gate is deliberately human-overridable. This job runs on
+# GitHub's machine, where there is no session to snapshot, no shell to out-parse
+# and no sentinel to forge.
+#
+# The honest limit (found by review, do not restore the stronger claim): a
+# `pull_request` run executes the PR-HEAD copy of this file and of
+# scripts/check_critical_paths.sh, so a PR can weaken the very checks that gate
+# it. What still holds is branch protection: the required CONTEXT names are
+# fixed server-side, so deleting or renaming a check leaves it never-reported
+# and the merge stays blocked. Weakening a check's *contents* while keeping its
+# name is caught only by human review of .github/ and scripts/ — which is the
+# `human-reviewed` label, and per D9 that is attestation, not proof.
+name: offline-tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # cache-dependency-path is REQUIRED here: this repo is pyproject-only with
+      # no requirements.txt, and setup-python keys its pip cache off a hashed
+      # dependency file. Without it the step can error before installing
+      # anything, which would make the required check permanently red.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Stub backends only: no GPU, no model downloads, no network in-test.
+      # -e is LOAD-BEARING: configuration.py resolves config/ as
+      # parents[2]/"config", which sits outside src/ and is not package data.
+      # [web] is not optional either: tests/test_web.py imports
+      # fastapi.testclient unguarded, so a missing extra is a collection error.
+      - name: Install (stub backends only)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e '.[web,dev]'
+
+      # The golden modules already skip themselves without RUN_GOLDEN; -m keeps
+      # a future module that forgets that guard from pulling a GPU path into CI.
+      - name: Offline suite
+        run: .venv/bin/pytest -q -m "not golden"
