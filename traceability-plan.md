@@ -140,8 +140,9 @@ ingest↔query pointer, which degrades gracefully if ingest tracing isn't wired 
 
 **TR.4 implemented (2026-07-17):** `videos.last_ingest_run_id` (nullable) stores the ingest run
 that last processed each video — stamped in `set_status(done, ingest_run_id=current_run_id())`,
-so it is `NULL` for videos ingested with tracing off. Existing DBs get the column via an additive
-`ALTER` in `apply_schema` (`_ensure_videos_columns`). On the read path a shared helper
+so it is `NULL` for videos ingested with tracing off. Existing DBs get the column via the
+schema-migration runner (`schema.py` `MIGRATIONS` / `_m1_last_ingest_run_id` — an idempotent
+additive `ALTER` applied on open, versioned by `PRAGMA user_version`). On the read path a shared helper
 (`pipeline/trace_links.trace_ingest_links`) emits one `link/ingest_runs` event mapping each touched
 video (its 16-char `Workspace._key16`, matching the on-disk dir) → run_id. It is emitted at the
 **traced-run owners** — the `query` CLI command and `ask()` — NOT inside the reusable `query()`

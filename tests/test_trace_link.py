@@ -116,7 +116,8 @@ def test_schema_migration_backfills_column_on_old_db(tmp_path):
     raw.commit()
     raw.close()
 
-    conn = connect(p)   # apply_schema sees videos exists -> ALTERs in the new column
+    conn = connect(p)   # apply_schema runs the migration runner -> backfills the column
+    # (the migration runner itself is covered in depth by tests/test_migrations.py)
     try:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
     finally:
