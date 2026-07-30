@@ -26,6 +26,47 @@ def test_rule_planner_heuristics():
     assert "what" not in p.search_terms        # question words stripped
 
 
+def test_registry_routes_qwen3_before_generic_qwen_prefix(monkeypatch):
+    """The qwen3-vl branch in get_reasoner is correct ONLY because it is ordered
+    before the startswith("qwen") branch — 'qwen3-vl-…' also matches 'qwen'.
+    Classes are stubbed: the real adapter loads ~58 GB of weights in __init__."""
+    from va.configuration import Config
+    from va.registry import get_reasoner
+
+    class FakeQwen3:
+        def __init__(self, load):
+            self.load = load
+
+    class FakeQwen25:
+        def __init__(self, load):
+            self.load = load
+
+    monkeypatch.setattr(
+        "va.adapters.reasoner.qwen3vl_inproc.Qwen3VLReasoner", FakeQwen3
+    )
+    monkeypatch.setattr("va.adapters.reasoner.qwen_inproc.QwenReasoner", FakeQwen25)
+
+    def cfg(model):
+        return Config(
+            active_profile="t", profile={},
+            roles={"reasoner": {"backend": "inproc", "model": model}},
+        )
+
+    assert isinstance(get_reasoner(cfg("qwen3-vl-30b-a3b")), FakeQwen3)
+    assert isinstance(get_reasoner(cfg("qwen2.5-vl-7b")), FakeQwen25)
+
+
+def test_qwen3_dtype_typo_fails_loud_at_construction():
+    """A profile dtype typo must raise at __init__ (name check, no torch, no
+    58 GB load) — never silently fall back or defer to the real build path."""
+    import pytest as _pytest
+
+    from va.adapters.reasoner.qwen3vl_inproc import Qwen3VLReasoner
+
+    with _pytest.raises(ValueError, match="fp16"):
+        Qwen3VLReasoner({"dtype": "fp16"})
+
+
 def test_rule_reasoner_extracts_and_cites():
     vid = uuid4()
     ev = Evidence(query="q", items=[

@@ -39,3 +39,4 @@ src/va/pipeline/                              golden-verified
 config/                                       golden-verified
 run-siglip/config/                            golden-verified
 run-claude/config/                            golden-verified
+run-qwen3vl/config/                           golden-verified

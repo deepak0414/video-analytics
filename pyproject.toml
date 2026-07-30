@@ -38,7 +38,9 @@ whisper = ["openai-whisper"]
 # comment in adapters/speaker_diarizer/pyannote_inproc.py).
 diarize = ["pyannote.audio>=4", "threadpoolctl"]
 # Real Role-4 VLM captioner (Qwen2.5-VL). Default is the color stub.
-qwenvl = ["transformers", "accelerate", "qwen-vl-utils", "torchvision"]
+# transformers>=5: Qwen3VLMoeForConditionalGeneration (qwen3-vl reasoner backend)
+# is absent in older releases; floor verified against 5.10.2 on the Spark.
+qwenvl = ["transformers>=5", "accelerate", "qwen-vl-utils", "torchvision"]
 # Real Role-5 open-vocabulary object detector (YOLO-World). Default is the color stub.
 # `clip` is YOLO-World's text encoder for set_classes (ultralytics auto-installs it
 # at runtime otherwise — pinned here so installs are reproducible).

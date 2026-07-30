@@ -96,7 +96,10 @@ are defense-in-depth: LLM planner (primary) + closed regex floor (weak-planner/o
 paths) + **self-escalation** (insufficient sparse answer → one deep-scan re-run). When a
 deep scan ran, the rendered answer LEADS with the verbatim CODE-COUNTED line. Reasoner backends:
 `rule` (stub/fallback), `qwen2.5-vl-7b` (shares the Role-4 model — same ModelManager key,
-no extra VRAM), `claude-code` (headless `claude -p` on the local subscription login),
+no extra VRAM), `qwen3-vl-30b-a3b` (local MoE via `VA_CONFIG_DIR=run-qwen3vl/config`;
+58 GB weights at `~/qwen3vl`, loaded bf16, golden-set parity with claude-code — decision +
+revisit triggers in `video-analytics-model-analysis.md`),
+`claude-code` (headless `claude -p` on the local subscription login),
 `claude-api` (**placeholder** — pending the ANTHROPIC_API_KEY decision; raises with
 guidance). LLM JSON is parsed tolerantly (`parse_json_block`, `coerce_timestamp` — Qwen
 really does emit `"3.5s"`); unparseable output falls back to the rule reasoner.
