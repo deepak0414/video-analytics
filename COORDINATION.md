@@ -280,3 +280,10 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   a warning and proceeds. No contract or query-surface change — every store opens the DB the same
   way and the migration is transparent. To evolve the schema, follow the in-file recipe (base DDL
   + ordered idempotent migration + `SCHEMA_VERSION` bump); indexes are built after migrations.
+- **2026-07-30 (storage):** Vector shards now carry an identity tag. `NumpyFlatVectorStore` persists
+  a `meta` entry inside each `.npz` — `{embedder: <model id>, dim: <D>}` — stamped at write time
+  (`ingest.py` visual shard, `text_index.py` text shard). **Action for BOTH agents:** the `.npz` shard
+  format gained a second array (`meta`); old untagged shards still load (`store.meta is None`), and
+  search is unchanged (nothing reads the tag yet). The query-time guard that USES the tag to refuse
+  mixing vector spaces (`stub-64` vs `SigLIP-1152`) lands next (provenance-reprocess-plan.md, TAG-3).
+  No contract or query-surface change.

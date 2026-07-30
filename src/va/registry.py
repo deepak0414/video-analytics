@@ -342,3 +342,15 @@ def get_ingest_actions(cfg: Optional[Config] = None) -> list[str]:
     cfg = cfg or load_config()
     spec = cfg.roles.get("action_recognizer") or {}
     return list(spec.get("actions") or DEFAULT_INGEST_ACTIONS)
+
+
+def embedder_id(role: str) -> str:
+    """Model id backing an embedder role (`visual_embedder` / `text_embedder`) — the
+    identity stamped onto that role's vector shards for shard tagging
+    (provenance-reprocess-plan.md). Falls back to the `hash` stub id exactly as
+    get_text_embedder does when roles.yaml omits the role."""
+    try:
+        model = load_config().role(role).model
+    except KeyError:
+        model = None
+    return model or "hash"

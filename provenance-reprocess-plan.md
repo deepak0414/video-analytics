@@ -65,7 +65,9 @@ Order: **C first** (highest value, mostly independent, fixes the mixed-dim crash
 
 ### B — Batch reprocess *(depends on A; visual depends on C)*
 - **RPRC-1 · Per-role re-run entry points** (phased: visual, text, caption first — they have
-  standalone code; then leaf roles).
+  standalone code; then leaf roles). *Give each embedder a `model_id` property so a reprocess shard
+  is tagged with the embedder it actually used; until then an injected embedder without one tags
+  `unknown` (honest — TAG-3 skips it — rather than a config-derived tag that could misdescribe it).*
 - **RPRC-2 · Dependency-aware invalidation** (R1→R4/5/6/7; R5→R6; R8→R9).
 - **RPRC-3 · Selection + orchestration.** `va reprocess --role X [--dry-run] [--all-stale]
   [--video V]`; resumable + per-video atomic (write rows THEN provenance); whole-video fallback.
@@ -108,5 +110,7 @@ No Postgres/ANN; no per-role reprocess for roles without a pending model change 
 canonical workdir (`.va-shots`), no cross-workdir provenance.
 
 ## 7. Status
-- **2026-07-30:** plan landed. Implementing **C (shard tagging)** first: TAG-1+2 (shards record
-  `{embedder, dim}`), then TAG-3 (query guard), then TAG-4 (backfill).
+- **2026-07-30:** plan landed. **C (shard tagging)** in progress: **TAG-1+2 DONE** — shards record
+  `{embedder, dim}` via `NumpyFlatVectorStore.set_meta`/`.meta`, stamped at ingest (visual) +
+  text-index (text); `tests/test_shard_tagging.py`. Next: **TAG-3** (query-time guard that skips
+  mismatched shards), then **TAG-4** (legacy backfill).
