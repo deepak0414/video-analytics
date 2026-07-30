@@ -67,6 +67,32 @@ def test_remove_deletes_rows_dir_and_vectors(tmp_path):
     assert remove_video(wd, "nonexistent") is None
 
 
+def test_remove_purges_provenance(tmp_path):
+    # §6-b: `va remove` must delete role_provenance too, else `va stale`/reprocess ghost it
+    from va.storage.structured.provenance_store import ProvenanceStore
+
+    wd = str(tmp_path / ".va")
+    r1 = ingest(str(_clip(tmp_path, "red.mp4", (220, 30, 30))), workdir=wd, fps=1.0)
+    r2 = ingest(str(_clip(tmp_path, "blue.mp4", (30, 30, 220))), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+
+    pv = ProvenanceStore(ws.catalog_db)
+    try:
+        pv.record(r1.video.id, "ocr", "rapidocr", "fp-1")
+        pv.record(r2.video.id, "ocr", "rapidocr", "fp-1")
+    finally:
+        pv.close()
+
+    remove_video(wd, r1.video.source_key)
+
+    pv = ProvenanceStore(ws.catalog_db)
+    try:
+        assert pv.get(r1.video.id) == []          # purged with the video
+        assert len(pv.get(r2.video.id)) == 1      # the other video's provenance survives
+    finally:
+        pv.close()
+
+
 def test_reingest_local_source(tmp_path):
     wd = str(tmp_path / ".va")
     clip = _clip(tmp_path, "red.mp4", (220, 30, 30))

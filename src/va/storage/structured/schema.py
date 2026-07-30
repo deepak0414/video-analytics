@@ -132,6 +132,23 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 """
 
+# §6-b: per-(video, role) provenance — the model/config fingerprint that produced each
+# role's rows (see va.provenance.role_fingerprint), plus run args not in (role, cfg) like
+# `fps`. Read by `va stale` (PROV-4) and the selective reprocess (B).
+ROLE_PROVENANCE = """
+CREATE TABLE IF NOT EXISTS role_provenance (
+    video_id     TEXT NOT NULL REFERENCES videos(id),
+    role         TEXT NOT NULL,
+    model        TEXT,
+    fingerprint  TEXT NOT NULL,
+    fps          REAL,
+    run_id       TEXT,
+    row_count    INTEGER,
+    produced_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (video_id, role)
+);
+"""
+
 # Index video_id on the high-volume per-frame tables for correlation joins.
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_segments_video ON segments(video_id)",
@@ -140,11 +157,12 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_transcripts_video ON transcripts(video_id)",
     "CREATE INDEX IF NOT EXISTS idx_ocr_video ON ocr_results(video_id)",
     "CREATE INDEX IF NOT EXISTS idx_observations_key ON observations(video_id, prompt_key, timestamp)",
+    "CREATE INDEX IF NOT EXISTS idx_provenance_role ON role_provenance(role)",
 ]
 
 ALL_TABLES = [
     VIDEOS, SEGMENTS, OBJECT_TRACKS, OBJECT_DETECTIONS,
-    ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS,
+    ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS, ROLE_PROVENANCE,
 ]
 
 # --- schema versioning + migrations -------------------------------------------
@@ -163,7 +181,7 @@ ALL_TABLES = [
 # a migrated-in column is safe: apply_schema() builds INDEXES *after* running the
 # migrations, so the column already exists by the time its index is created.
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -184,9 +202,16 @@ def _m1_last_ingest_run_id(conn: sqlite3.Connection) -> None:
     add_column(conn, "videos", "last_ingest_run_id", "TEXT")
 
 
+def _m2_role_provenance(conn: sqlite3.Connection) -> None:
+    """→ v2: the per-(video, role) provenance table (WS-1 §6-b). CREATE IF NOT EXISTS is
+    idempotent and a no-op on a fresh DB (ALL_TABLES already made it)."""
+    conn.execute(ROLE_PROVENANCE)
+
+
 # Ordered; MIGRATIONS[i] takes the DB from version i to version i+1.
 MIGRATIONS = [
     _m1_last_ingest_run_id,          # -> 1
+    _m2_role_provenance,             # -> 2
 ]
 assert len(MIGRATIONS) == SCHEMA_VERSION, "SCHEMA_VERSION must equal the migration count"
 

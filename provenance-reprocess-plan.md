@@ -60,8 +60,10 @@ Order: **C first** (highest value, mostly independent, fixes the mixed-dim crash
 ### A — Provenance (per video × role)
 - **PROV-1 · Identity/fingerprint helper** *(the general form; the shard tag uses the simpler
   `{model, dim}`).* `provenance.fingerprint(role, RoleConfig)` → `{model, hash(salient params)}`.
-- **PROV-2 · Table + migration + store.** `role_provenance(video_id, role, model, fingerprint, dim,
-  run_id, produced_at, rows)` via a `SCHEMA_VERSION` bump; a `ProvenanceStore`.
+- **PROV-2 · Table + migration + store.** `role_provenance(video_id, role, model, fingerprint, fps,
+  run_id, row_count, produced_at)` via a `SCHEMA_VERSION` bump; a `ProvenanceStore`. (No `dim` column —
+  the vector-space dim lives on the TAG-2 shard tag; `fps` records the run-arg the fingerprint can't.
+  `va remove` purges the table via `_ROLE_TABLES`.)
 - **PROV-3 · Stamp during ingest.** Upsert a `(video, role)` row after each best-effort role step.
   Also record run-time args that change output but are **not** in `(role, cfg)` — notably the ingest
   sampling **`fps`** (which frames Roles 2/5/6/7 see) — as a column on the row, so PROV-4 can tell a
@@ -125,5 +127,8 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
 - **2026-07-30:** **A (provenance) started — PROV-1 DONE.** `va.provenance.role_fingerprint(role, cfg)`
   computes a stable output-only identity `{model, fingerprint}` per role (model + `weights` override
   + object-detector/action-recognizer vocab; `device`/`dtype`/batch excluded); `tests/test_provenance.py`.
-  Next: **PROV-2** (`role_provenance` table + migration + store) → PROV-3 (stamp at ingest) → PROV-4
+- **2026-07-30:** **PROV-2 DONE** — `role_provenance` table (`(video_id, role)` PK: model, fingerprint,
+  fps, run_id, row_count, produced_at) via a schema **v2** migration on the §6-a runner +
+  `ProvenanceStore.record()/.get()`; `tests/test_provenance_store.py`. The `fps` column captures the
+  run-arg the fingerprint can't (review note). Next: **PROV-3** (stamp at ingest) → **PROV-4**
   (`va stale` report).

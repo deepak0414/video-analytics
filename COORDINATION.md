@@ -295,3 +295,9 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   shards (stale-embedder videos drop out, with a warning) instead of silently-wrong hits; reprocess /
   reingest re-tags + rejoins them. Legacy untagged shards are admitted when their dim matches
   (best-effort — the honest gap until TAG-4 backfill).
+- **2026-07-30 (storage):** `catalog.db` is now schema **v2** — a new `role_provenance` table
+  (`(video_id, role)` PK; model, fingerprint, fps, run_id, row_count, produced_at) recording which
+  model/config produced each role's rows (WS-1 §6-b provenance). **Action for BOTH agents:** opening a
+  workdir DB auto-migrates it to v2 (adds the table; existing rows untouched). Nothing writes it yet —
+  ingest stamping lands in PROV-3; read/write via `storage.structured.provenance_store.ProvenanceStore`.
+  No contract or query-surface change.

@@ -120,6 +120,8 @@ def test_failed_migration_rolls_back_atomically(tmp_path, monkeypatch):
     """A migration that changes the schema then fails must leave NOTHING behind —
     version un-advanced, partial DDL rolled back — thanks to the per-migration
     BEGIN IMMEDIATE transaction."""
+    last_good = len(S.MIGRATIONS)   # every real migration succeeds; the injected one fails
+
     def _bad(conn):
         add_column(conn, "videos", "half_done", "TEXT")   # partial change...
         raise RuntimeError("boom")                        # ...then fail
@@ -129,14 +131,14 @@ def test_failed_migration_rolls_back_atomically(tmp_path, monkeypatch):
 
     p = tmp_path / "x.db"
     with pytest.raises(RuntimeError, match="boom"):
-        connect(p)                          # migrates 0->1 (ok), then the bad 1->2 fails
+        connect(p)                          # all real migrations ok, then the bad one fails
 
     raw = sqlite3.connect(p)
     try:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 1   # v1 committed
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == last_good  # last good stuck
         cols = {r[1] for r in raw.execute("PRAGMA table_info(videos)")}
-        assert "last_ingest_run_id" in cols     # v1 landed and stuck
-        assert "half_done" not in cols          # the failed v2 rolled back
+        assert "last_ingest_run_id" in cols     # a real migration landed and stuck
+        assert "half_done" not in cols          # the failed migration rolled back
     finally:
         raw.close()
 
