@@ -273,3 +273,10 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   scan_target-backfill fix). No contract changes; web layer unaffected. Caveat for anyone
   running real models: the loaded reasoner is ~45 GB resident — ONE real-model golden run at a
   time on this box. Decision + revisit triggers in `video-analytics-model-analysis.md`.
+- **2026-07-29 (storage):** `catalog.db` is now schema-versioned via SQLite `PRAGMA user_version`
+  (`storage/structured/schema.py`). **Action for BOTH agents:** opening a workdir DB through
+  `connect()`/`apply_schema()` now auto-migrates it forward (additive, idempotent `ALTER`s in a
+  `BEGIN IMMEDIATE` txn) and stamps its version; a DB written by a newer build than the code logs
+  a warning and proceeds. No contract or query-surface change — every store opens the DB the same
+  way and the migration is transparent. To evolve the schema, follow the in-file recipe (base DDL
+  + ordered idempotent migration + `SCHEMA_VERSION` bump); indexes are built after migrations.

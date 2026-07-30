@@ -15,8 +15,11 @@ Today only `videos` (Role 0/catalog) and `segments` (Role 1) are written to.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # --- Role 0: video catalog (the registry; universal join key videos.id) -------
 VIDEOS = """
@@ -144,58 +147,127 @@ ALL_TABLES = [
     ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS,
 ]
 
-# Columns added to `videos` after the initial schema. A DB created before the
-# column existed still has the old table, and the fast path below skips the
-# CREATE (which is `IF NOT EXISTS` anyway), so these must be ensured via ALTER
-# (SQLite has no `ADD COLUMN IF NOT EXISTS`). Additive + nullable only.
-_VIDEOS_ADDED_COLUMNS = {
-    "last_ingest_run_id": "TEXT",
-}
+# --- schema versioning + migrations -------------------------------------------
+# The DB records its schema version in SQLite's `PRAGMA user_version`. A fresh DB
+# is created at the current schema (ALL_TABLES); an older DB is brought forward by
+# running the ordered MIGRATIONS whose target exceeds its current version, each
+# advancing user_version. This generalizes the earlier one-off column-ensure into a
+# real migration path, so we can add columns, add tables, and backfill data as the
+# product evolves WITHOUT breaking already-ingested corpora — every workdir's DB
+# migrates itself the next time a store opens it.
+#
+# To make a schema change: (1) reflect it in the base DDL above so fresh DBs get it
+# directly, (2) append an *idempotent* migration function below, (3) bump
+# SCHEMA_VERSION. Migrations also run on fresh DBs (as cheap no-ops), so keeping
+# them idempotent lets one code path serve both fresh and upgrading DBs. An index on
+# a migrated-in column is safe: apply_schema() builds INDEXES *after* running the
+# migrations, so the column already exists by the time its index is created.
+
+SCHEMA_VERSION = 1
 
 
-def _ensure_videos_columns(conn: sqlite3.Connection) -> None:
-    """Backfill additive columns onto a pre-existing `videos` table. Cheap: one
-    PRAGMA read, and the ALTER runs only the first time a given DB is opened."""
-    have = {row[1] for row in conn.execute("PRAGMA table_info(videos)")}
-    added = False
-    for col, decl in _VIDEOS_ADDED_COLUMNS.items():
-        if col not in have:
-            conn.execute(f"ALTER TABLE videos ADD COLUMN {col} {decl}")
-            added = True
-    if added:
-        conn.commit()
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Idempotent `ALTER TABLE … ADD COLUMN` (SQLite has no IF NOT EXISTS for it).
+    Additive, nullable columns only — safe to re-run and safe on a DB an earlier
+    path already touched. The building block for column-add migrations."""
+    if not _has_column(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _m1_last_ingest_run_id(conn: sqlite3.Connection) -> None:
+    """→ v1: the ingest<->query trace-link column (formerly `_ensure_videos_columns`).
+    Idempotent so pre-versioning DBs that already got it via that path convert cleanly."""
+    add_column(conn, "videos", "last_ingest_run_id", "TEXT")
+
+
+# Ordered; MIGRATIONS[i] takes the DB from version i to version i+1.
+MIGRATIONS = [
+    _m1_last_ingest_run_id,          # -> 1
+]
+assert len(MIGRATIONS) == SCHEMA_VERSION, "SCHEMA_VERSION must equal the migration count"
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """Apply each pending migration in its OWN transaction. `BEGIN IMMEDIATE` takes
+    the write lock before the migration runs, which buys two things: (a) the
+    migration and its version stamp commit **atomically** — a crash mid-migration
+    rolls back instead of leaving half-applied DDL with the version un-advanced;
+    (b) two processes opening the same not-yet-migrated DB **serialize** on the lock;
+    the loser re-reads user_version inside its transaction and skips any migration the
+    winner already applied, so it never re-runs a migration or stamps the version
+    backward (`add_column`'s idempotence covers the rest).
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    for target in range(current + 1, SCHEMA_VERSION + 1):
+        conn.commit()                       # ensure no implicit txn is open before BEGIN
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-read under the write lock: a process that raced us here may have
+            # already advanced past `target`. Skip rather than re-run and risk
+            # stamping the version backward.
+            if conn.execute("PRAGMA user_version").fetchone()[0] >= target:
+                conn.rollback()
+                continue
+            MIGRATIONS[target - 1](conn)
+            conn.execute(f"PRAGMA user_version = {target}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def apply_schema(conn: sqlite3.Connection) -> None:
-    """Create every table + index (idempotent). Run by any store that opens the DB.
-
-    Fast path: all tables are created together, so if `videos` already exists the
-    schema is present — skip the 14 DDL + commit (but still ensure additive column
-    migrations). This runs on EVERY store open (and a store opens the DB ~7× per
-    ingest), so the check pays for itself.
+    """Ensure the DB exists at the current schema version. Idempotent; called by
+    every store that opens the DB (~7× per ingest), so it fast-paths the common
+    already-current case to a single `sqlite_master` check + a `PRAGMA` read.
     """
-    if conn.execute(
+    has_videos = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='videos'"
-    ).fetchone() is not None:
-        _ensure_videos_columns(conn)
+    ).fetchone() is not None
+    db_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if has_videos and db_version >= SCHEMA_VERSION:
+        if db_version > SCHEMA_VERSION:
+            logger.warning(
+                "catalog DB is at schema v%d but this build only knows v%d — it was "
+                "written by a newer version; proceeding (safe for additive schemas only).",
+                db_version, SCHEMA_VERSION,
+            )
         return
+    # Fresh DB -> create the current schema. Older/partial DB -> CREATE IF NOT EXISTS
+    # is a no-op for tables it already has (and picks up any wholly-new table).
     for ddl in ALL_TABLES:
         conn.execute(ddl)
+    conn.commit()                           # persist base tables before the migration txns
+    _run_migrations(conn)                   # ALTER in any columns an older DB lacks
+    # Indexes LAST: an index on a migrated-in column would raise `no such column` if
+    # built before its migration ran, so it must follow _run_migrations.
     for idx in INDEXES:
         conn.execute(idx)
     conn.commit()
+
+
+# Busy timeout for every catalog connection. Openers of a not-yet-migrated DB
+# serialize on the migration's `BEGIN IMMEDIATE` write lock; a data-backfill
+# migration (invited by the recipe above) can outlast sqlite's 5s default, and the
+# waiting opener must BLOCK for it rather than raise `database is locked`.
+_BUSY_TIMEOUT_S = 60.0
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
     """Open the central correlation DB with the standard setup every store needs:
     row access by name, **WAL + synchronous=NORMAL** (a reader and the ingest
     writer no longer block each other, and the write path does far fewer fsyncs),
-    and the schema ensured once. Replaces the per-store `sqlite3.connect` + manual
-    `apply_schema` boilerplate.
+    a generous busy timeout (so a slow migration doesn't make a concurrent opener
+    error out), and the schema ensured once. Replaces the per-store
+    `sqlite3.connect` + manual `apply_schema` boilerplate.
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p)
+    conn = sqlite3.connect(p, timeout=_BUSY_TIMEOUT_S)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
