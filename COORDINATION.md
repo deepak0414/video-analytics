@@ -287,3 +287,11 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   search is unchanged (nothing reads the tag yet). The query-time guard that USES the tag to refuse
   mixing vector spaces (`stub-64` vs `SigLIP-1152`) lands next (provenance-reprocess-plan.md, TAG-3).
   No contract or query-surface change.
+- **2026-07-30 (retrieval):** The shard tag above is now ENFORCED at query time.
+  `ShardedVectorStore.search(expect_embedder=...)` skips shards whose embedder tag != the current
+  query embedder (and skips a dim mismatch that would otherwise crash `vecs @ q`), exposing the count
+  on `store.skipped` + a logged warning; `query()` and `search_text()` pass the current embedder.
+  **Effect for the web agent:** a workdir mixing embedders now returns results only from the matching
+  shards (stale-embedder videos drop out, with a warning) instead of silently-wrong hits; reprocess /
+  reingest re-tags + rejoins them. Legacy untagged shards are admitted when their dim matches
+  (best-effort — the honest gap until TAG-4 backfill).

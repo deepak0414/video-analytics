@@ -184,6 +184,18 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
     from va.pipeline.query import query as visual_query
 
     vhits = visual_query(terms, workdir=workdir, k=k)
+    if not vhits:  # distinguish a STALE visual index from a true no-match
+        from va.pipeline.paths import Workspace
+        from va.registry import embedder_id, get_visual_embedder
+        from va.storage.vector.sharded import ShardedVectorStore
+
+        vstore = ShardedVectorStore(Workspace(workdir).videos_root)
+        vtotal = vstore.count()
+        if vtotal and not vstore.count(
+                expect_embedder=embedder_id("visual_embedder"),
+                expect_dim=len(get_visual_embedder().embed_text(["_"])[0])):
+            ev.notes.append(f"visual index unusable ({vtotal} vector(s) on a different "
+                            "embedder) — no visual matches; run `va reingest` to re-embed")
     raw_visual = len(vhits)
     # SR.6: when the planner flags a query an embedding mis-handles (attribute /
     # negation / composition), VLM-verify the candidates before they become
@@ -211,25 +223,37 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
     if wanted:
         from va.pipeline.text_search import search_text
         from va.pipeline.paths import Workspace
+        from va.registry import embedder_id, get_text_embedder
         from va.storage.vector.sharded import ShardedVectorStore
 
-        index_populated = (
-            ShardedVectorStore(Workspace(workdir).videos_root,
-                               shard_name="text_vectors.npz").count() > 0
-        )
+        text_index = ShardedVectorStore(Workspace(workdir).videos_root,
+                                        shard_name="text_vectors.npz")
+        total = text_index.count()
+        # Only shards matching the CURRENT text embedder AND dim are usable: an index
+        # left on a stale/mismatched embedder is non-empty but unsearchable, so
+        # count() > 0 alone would wrongly pick the semantic branch and silently drop the
+        # text tier. Score usability with the SAME (embedder, dim) the search-time guard
+        # uses, so both agree even on untagged legacy shards.
+        usable = 0
+        if total:
+            cur_dim = len(get_text_embedder().embed(["_"])[0])
+            usable = text_index.count(expect_embedder=embedder_id("text_embedder"),
+                                      expect_dim=cur_dim)
         nt = len(ev.items)
-        if index_populated:
+        if usable > 0:
             hits = search_text(terms, workdir=workdir, k=k, modalities=wanted)
             for h in hits:
                 ev.items.append(from_text_hit(h))
             trace("retriever", "gather:text", f"{len(hits)} semantic-text hits",
                   modalities=wanted, count=len(hits), items=_preview(ev.items[nt:]))
         else:
-            ev.notes.append("semantic text index empty — lexical fallback "
-                            "(run `va reingest`/backfill to enable semantic text retrieval)")
+            reason = (f"unusable ({total} vector(s) on a different embedder)"
+                      if total else "empty")
+            ev.notes.append(f"semantic text index {reason}; lexical fallback "
+                            "(run `va reingest`/backfill to (re)build it)")
             _gather_lexical(ev, wanted, terms, workdir, k)
             trace("retriever", "gather:text",
-                  f"{len(ev.items) - nt} lexical-fallback hits (semantic index empty)",
+                  f"{len(ev.items) - nt} lexical-fallback hits (semantic index {reason})",
                   level="warn", modalities=wanted, items=_preview(ev.items[nt:]))
 
     # Structured object facts (Roles 5/6) — descriptive language, so rerankable.

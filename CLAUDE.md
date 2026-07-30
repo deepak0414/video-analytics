@@ -204,8 +204,11 @@ layer. Instructions decay; hooks don't — if a lesson is a mechanical invariant
    real semantic search you must select SigLIP via **`VA_CONFIG_DIR=run-siglip/config`** (a
    separate config dir kept apart so tests still use the stub).
 2. **Ingest and query must use the same embedder config.** The stub is 64-dim, SigLIP is
-   1152-dim — different vector spaces. Switching models = `va reingest <video>` (per
-   video, same workdir). Workdir layout v2: `catalog.db` (ONE shared DB for all videos) +
+   1152-dim — different vector spaces. Shards are now **embedder-tagged** and the query-time
+   guard SKIPS shards whose embedder ≠ the current one (logging a count on `store.skipped`), so
+   a mixed workdir degrades to fewer results + a warning, never silently-wrong ones. Switching
+   models = `va reingest <video>` (per video, same workdir) to re-tag + rejoin them. Workdir
+   layout v2: `catalog.db` (ONE shared DB for all videos) +
    `videos/<key16>-<slug>/` per-video dirs (media + `vectors.npz` shard + `keyframes/`) +
    transient `cache/`. The shards form one logical index — search spans all videos.
    `va remove <video>` deletes everywhere; pre-v2 workdirs: `va migrate-layout`.

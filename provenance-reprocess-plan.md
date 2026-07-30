@@ -52,8 +52,10 @@ Order: **C first** (highest value, mostly independent, fixes the mixed-dim crash
 - **TAG-3 · Query-time guard.** `ShardedVectorStore` receives the current embedder identity, **skips**
   shards whose tag ≠ current (dim OR model), returns a skipped count. Replaces the mixed-dim crash /
   silent-mix with graceful degradation + a surfaced note.
-- **TAG-4 · Legacy backfill.** Stamp existing untagged shards with **dim** (certain) + **model =
-  unspecified** (honest); dim alone still catches 64-vs-1152. `va reprocess --retag` or auto-on-load.
+- **TAG-4 · Legacy backfill — DISSOLVED (not needed).** TAG-3 already dim-guards untagged legacy
+  shards (`_compatible` admits an untagged shard only on a dim match), so stamping them
+  `{unspecified, dim}` changes nothing and can't recover the true embedder anyway. The real re-tag of
+  a legacy shard is **`va reingest`** (re-embeds + tags via TAG-2). No backfill command.
 
 ### A — Provenance (per video × role)
 - **PROV-1 · Identity/fingerprint helper** *(the general form; the shard tag uses the simpler
@@ -82,12 +84,12 @@ Order: **C first** (highest value, mostly independent, fixes the mixed-dim crash
 
 ## 4. Dependency graph & sequence
 ```
-TAG-1+2 ─► TAG-3 ─► TAG-4
+TAG-1+2 ─► TAG-3            (TAG-4 dissolved — untagged shards already dim-guarded)
 PROV-1 ─► PROV-2 ─► PROV-3 ─► PROV-4 ─► RPRC-2 ─► RPRC-3
                     RPRC-1 ─────────────────────┘
 ```
-Ship order: **TAG-1+2 → TAG-3 → TAG-4** (corruption guard) → **PROV-1 → PROV-2 → PROV-3 → PROV-4**
-(stale report) → **RPRC-1/2/3** (selective reprocess).
+Ship order: **TAG-1+2 → TAG-3** (corruption guard; TAG-4 dissolved) → **PROV-1 → PROV-2 → PROV-3 →
+PROV-4** (stale report) → **RPRC-1/2/3** (selective reprocess).
 
 ## 5. Decisions (LOCKED to the recommended default; revisit trigger noted)
 
@@ -98,8 +100,10 @@ Ship order: **TAG-1+2 → TAG-3 → TAG-4** (corruption guard) → **PROV-1 → 
   if we move off numpy shards (Milvus).* 
 - **D3 — Query mismatch policy:** **skip mismatched shards + warn + surface a count** (also fixes the
   crash). *Revisit if silent partial results ever mislead — could escalate to hard-fail via a flag.*
-- **D4 — Legacy backfill honesty:** **dim-only, model=unspecified** (can't know a legacy shard's
-  model; guessing risks a false "matches current"). *Revisit never — honesty is the point.*
+- **D4 — Legacy backfill: DISSOLVED.** TAG-3's untagged dim-guard already covers legacy shards
+  (dim-match, best-effort), so a `{unspecified, dim}` backfill is a no-op. A legacy shard gets a real
+  tag only via **`va reingest`** (re-embed + tag). Residual honest gap: a same-dim different-model
+  *legacy* shard can't be caught — inherent, documented.
 - **D5 — Reprocess granularity:** **role-scoped for the 3 roles with standalone code (visual, text,
   caption) + whole-video `reingest` fallback for the rest.** *This is a SCOPE CAP: full per-role
   reprocess for all 10 roles is deferred until a real model change demands each.*
@@ -110,7 +114,9 @@ No Postgres/ANN; no per-role reprocess for roles without a pending model change 
 canonical workdir (`.va-shots`), no cross-workdir provenance.
 
 ## 7. Status
-- **2026-07-30:** plan landed. **C (shard tagging)** in progress: **TAG-1+2 DONE** — shards record
-  `{embedder, dim}` via `NumpyFlatVectorStore.set_meta`/`.meta`, stamped at ingest (visual) +
-  text-index (text); `tests/test_shard_tagging.py`. Next: **TAG-3** (query-time guard that skips
-  mismatched shards), then **TAG-4** (legacy backfill).
+- **2026-07-30:** plan landed. **C (shard tagging) COMPLETE** — TAG-1+2 (shards record
+  `{embedder, dim}`; `tests/test_shard_tagging.py`) + TAG-3 (query-time guard skips mismatched
+  shards, retrieval falls back to lexical with a surfaced note; `tests/test_shard_guard.py`).
+  **TAG-4 dissolved** — TAG-3's untagged dim-guard made the backfill redundant; `va reingest` is the
+  real re-tag. Next: **A (provenance)** — PROV-1 (identity helper) → PROV-2 (table + migration) →
+  PROV-3 (stamp at ingest) → PROV-4 (`va stale` report).

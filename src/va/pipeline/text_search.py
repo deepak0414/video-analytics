@@ -14,7 +14,7 @@ from typing import List, Optional, Sequence
 from uuid import UUID
 
 from va.pipeline.paths import Workspace
-from va.registry import get_text_embedder
+from va.registry import embedder_id, get_text_embedder
 from va.storage.vector.sharded import ShardedVectorStore
 
 
@@ -40,7 +40,7 @@ def search_text(
     qv = get_text_embedder().embed([query])
     fetch = k * 5 if modalities else k  # over-fetch when filtering by modality
     out: List[TextHit] = []
-    for h in store.search(qv, k=fetch):
+    for h in store.search(qv, k=fetch, expect_embedder=embedder_id("text_embedder")):
         p = h.payload
         if modalities and p.get("modality") not in modalities:
             continue
