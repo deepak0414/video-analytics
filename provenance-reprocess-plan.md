@@ -63,6 +63,9 @@ Order: **C first** (highest value, mostly independent, fixes the mixed-dim crash
 - **PROV-2 · Table + migration + store.** `role_provenance(video_id, role, model, fingerprint, dim,
   run_id, produced_at, rows)` via a `SCHEMA_VERSION` bump; a `ProvenanceStore`.
 - **PROV-3 · Stamp during ingest.** Upsert a `(video, role)` row after each best-effort role step.
+  Also record run-time args that change output but are **not** in `(role, cfg)` — notably the ingest
+  sampling **`fps`** (which frames Roles 2/5/6/7 see) — as a column on the row, so PROV-4 can tell a
+  corpus extended at a different fps apart. (Decide these `role_provenance` columns in PROV-2.)
 - **PROV-4 · Report.** `va provenance <video>` / `va stale` — recorded vs current model per role.
 
 ### B — Batch reprocess *(depends on A; visual depends on C)*
@@ -118,5 +121,9 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   `{embedder, dim}`; `tests/test_shard_tagging.py`) + TAG-3 (query-time guard skips mismatched
   shards, retrieval falls back to lexical with a surfaced note; `tests/test_shard_guard.py`).
   **TAG-4 dissolved** — TAG-3's untagged dim-guard made the backfill redundant; `va reingest` is the
-  real re-tag. Next: **A (provenance)** — PROV-1 (identity helper) → PROV-2 (table + migration) →
-  PROV-3 (stamp at ingest) → PROV-4 (`va stale` report).
+  real re-tag.
+- **2026-07-30:** **A (provenance) started — PROV-1 DONE.** `va.provenance.role_fingerprint(role, cfg)`
+  computes a stable output-only identity `{model, fingerprint}` per role (model + `weights` override
+  + object-detector/action-recognizer vocab; `device`/`dtype`/batch excluded); `tests/test_provenance.py`.
+  Next: **PROV-2** (`role_provenance` table + migration + store) → PROV-3 (stamp at ingest) → PROV-4
+  (`va stale` report).
