@@ -9,7 +9,7 @@ from uuid import UUID
 
 from va.contracts.embedding import SearchHit
 from va.pipeline.paths import Workspace
-from va.registry import get_visual_embedder
+from va.registry import embedder_id, get_visual_embedder
 from va.storage.structured.catalog_sqlite import Catalog
 from va.storage.vector.sharded import ShardedVectorStore
 
@@ -23,7 +23,8 @@ def query(text: str, workdir: str = ".va", k: int = 10) -> list[SearchHit]:
 
     embedder = get_visual_embedder()
     qvec = embedder.embed_text([text])[0]
-    raw_hits = store.search(qvec, k=k)
+    # skip shards produced by a different embedder (never mix vector spaces)
+    raw_hits = store.search(qvec, k=k, expect_embedder=embedder_id("visual_embedder"))
 
     catalog = Catalog(ws.catalog_db)
     try:

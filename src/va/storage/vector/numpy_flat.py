@@ -20,6 +20,7 @@ class NumpyFlatVectorStore:
         self.path = Path(path)
         self._vecs: np.ndarray | None = None  # [N, D], L2-normalized
         self._payloads: list[dict[str, Any]] = []
+        self._meta: dict[str, Any] | None = None  # shard-identity tag (embedder+dim)
         self._load()
 
     # --- persistence -------------------------------------------------------
@@ -33,13 +34,20 @@ class NumpyFlatVectorStore:
 
     def _load(self) -> None:
         if self._vec_file.exists() and self._payload_file.exists():
-            self._vecs = np.load(self._vec_file)["vectors"].astype(np.float32)
+            npz = np.load(self._vec_file)
+            self._vecs = npz["vectors"].astype(np.float32)
+            if "meta" in npz.files:  # identity tag; absent on pre-tagging shards
+                self._meta = json.loads(npz["meta"].item())
             self._payloads = json.loads(self._payload_file.read_text())
 
     def persist(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         vecs = self._vecs if self._vecs is not None else np.zeros((0, 0), np.float32)
-        np.savez(self._vec_file, vectors=vecs)
+        arrays: dict[str, np.ndarray] = {"vectors": vecs}
+        if self._meta is not None:
+            # the vectors are the source of truth for `dim`; stamp it at write time
+            arrays["meta"] = np.array(json.dumps({**self._meta, "dim": self.dim}))
+        np.savez(self._vec_file, **arrays)
         self._payload_file.write_text(json.dumps(self._payloads))
 
     # --- ops ---------------------------------------------------------------
@@ -75,3 +83,23 @@ class NumpyFlatVectorStore:
 
     def count(self) -> int:
         return len(self._payloads)
+
+    # --- shard identity tag (embedder + dim) -------------------------------
+    @property
+    def dim(self) -> int | None:
+        """Embedding dimension of the stored vectors (None if the shard is empty)."""
+        if self._vecs is not None and self._vecs.shape[0] > 0:
+            return int(self._vecs.shape[1])
+        return None
+
+    @property
+    def meta(self) -> dict[str, Any] | None:
+        """Identity tag persisted with the shard (embedder + dim), or None for a
+        shard written before tagging existed."""
+        return self._meta
+
+    def set_meta(self, meta: dict[str, Any]) -> None:
+        """Tag this shard with identity metadata (e.g. the embedder that produced
+        it). `dim` is added from the vectors at persist() time — the array is the
+        source of truth. Stored inside the .npz so it moves/deletes with the shard."""
+        self._meta = dict(meta)

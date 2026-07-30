@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from va.registry import get_text_embedder
+from va.registry import embedder_id, get_text_embedder
 from va.storage.vector.numpy_flat import NumpyFlatVectorStore
 
 # (modality string, source_role, SQL) per text modality.
@@ -65,7 +65,16 @@ def _collect(catalog_db, video_id) -> list[tuple[str, dict]]:
 
 def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
     """(Re)build the `text_vectors` shard for one video. Returns rows indexed."""
-    embedder = embedder or get_text_embedder()
+    # Tag the shard with the embedder that ACTUALLY produced the vectors: from
+    # config on the normal path; an INJECTED embedder must declare its own
+    # `model_id`, else the shard is tagged "unknown" rather than risk a tag that
+    # misdescribes the vectors (which would defeat the TAG-3 guard). Giving every
+    # embedder a `model_id` so reprocess tags are always exact is a follow-up (RPRC-1).
+    if embedder is None:
+        embedder = get_text_embedder()
+        tag = embedder_id("text_embedder")
+    else:
+        tag = getattr(embedder, "model_id", None) or "unknown"
     rows = _collect(catalog_db, video_id)
     store_path = Path(video_dir) / "text_vectors"
     for suf in (".npz", ".json"):  # idempotent: start fresh
@@ -76,6 +85,7 @@ def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
     if rows:
         vecs = embedder.embed([t for t, _ in rows])
         store.add(vecs, [p for _, p in rows])
+    store.set_meta({"embedder": tag})
     store.persist()
     return len(rows)
 

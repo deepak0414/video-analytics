@@ -21,6 +21,7 @@ from va.media.frames import keyframes_for_spans, sample_frames
 from va.pipeline.paths import Workspace
 from va.runtime.trace import current_run_id, trace, traced_run
 from va.registry import (
+    embedder_id,
     get_action_recognizer,
     get_ingest_actions,
     get_ingest_classes,
@@ -258,6 +259,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                         det_ok = False
                         frames_dets = []
                         _trace_fail("detect", e)
+            store.set_meta({"embedder": embedder_id("visual_embedder")})
             store.persist()
             trace("ingest", "decode",
                   f"{n} frames @ {fps}fps -> embedding + detection (single pass)",
