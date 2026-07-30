@@ -113,6 +113,12 @@ PROV-4** (stale report) → **RPRC-1/2/3** (selective reprocess).
   caption) + whole-video `reingest` fallback for the rest.** *This is a SCOPE CAP: full per-role
   reprocess for all 10 roles is deferred until a real model change demands each.*
 - **D6 — Provenance role scope:** roles 1,2,4,5,6,7,8,9,10 + text_embedder; reasoner excluded.
+  *Correction: the reasoner (Role 11) is NOT row-free — deep-scan persists VLM micro-captions in the
+  `observations` cache. It stays out of the provenance table, but its cache would otherwise go stale
+  on a model upgrade (a missed stale), so `deep_scan.py` folds the **captioner + reasoner
+  fingerprints** into its `prompt_key`/`map_key` — an upgrade re-runs the sweep instead of serving old
+  code-counted answers. B's selective reprocess must therefore also purge `observations`, not just the
+  role tables.*
 
 ## 6. Not building yet
 No Postgres/ANN; no per-role reprocess for roles without a pending model change (YAGNI); one
@@ -130,5 +136,13 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
 - **2026-07-30:** **PROV-2 DONE** — `role_provenance` table (`(video_id, role)` PK: model, fingerprint,
   fps, run_id, row_count, produced_at) via a schema **v2** migration on the §6-a runner +
   `ProvenanceStore.record()/.get()`; `tests/test_provenance_store.py`. The `fps` column captures the
-  run-arg the fingerprint can't (review note). Next: **PROV-3** (stamp at ingest) → **PROV-4**
-  (`va stale` report).
+  run-arg the fingerprint can't (review note).
+- **2026-07-30:** **PROV-3 DONE** — ingest stamps `role_provenance` per role at the end of a
+  successful run (`ingest._record_provenance`, driven by `provenance.PROVENANCE_ROLES` so write/read
+  can't drift; best-effort). **Roles whose step FAILED are not stamped** — absent = stale, so a
+  transient failure is reprocessed rather than masked as current. The fingerprint is computed from a
+  **config pinned at role-launch time** (not a fresh `load_config()` at ingest end), so a mid-ingest
+  `roles.yaml` edit degrades to a safe false-stale instead of stamping old-model rows with the new
+  fingerprint (a missed stale). Deep-scan's `observations` cache keys also fold in the captioner +
+  reasoner fingerprints, so a model upgrade re-runs the sweep. `tests/test_provenance_ingest.py`,
+  `tests/test_deep_scan.py`. Next: **PROV-4** (`va stale` report).

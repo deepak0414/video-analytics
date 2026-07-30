@@ -42,6 +42,17 @@ _NON_OUTPUT_KEYS = frozenset({
     "token", "hf_token", "auth_token", "api_key", "endpoint",
 })
 
+# The roles §6-b stamps provenance for (PROV-3 writes them at ingest, PROV-4 `va stale`
+# reads them). The reasoner (Role 11) is on-demand and not stamped here; its one persisted
+# output — deep-scan's `observations` cache — is instead kept fresh by folding the
+# captioner + reasoner fingerprints into deep_scan's cache keys (so an upgrade re-runs it,
+# not a provenance row). ingest._record_provenance stamps exactly this set (a test guards drift).
+PROVENANCE_ROLES = (
+    "scene_detector", "visual_embedder", "vlm_captioner", "object_detector",
+    "object_tracker", "action_recognizer", "speech_to_text", "speaker_diarizer",
+    "ocr", "text_embedder",
+)
+
 
 def role_fingerprint(role: str, cfg: Optional[Config] = None) -> dict[str, str]:
     """Provenance identity for `role` under the active (or given) config:

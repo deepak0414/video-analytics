@@ -78,8 +78,7 @@ def test_remove_purges_provenance(tmp_path):
 
     pv = ProvenanceStore(ws.catalog_db)
     try:
-        pv.record(r1.video.id, "ocr", "rapidocr", "fp-1")
-        pv.record(r2.video.id, "ocr", "rapidocr", "fp-1")
+        assert pv.get(r1.video.id) and pv.get(r2.video.id)   # ingest stamped both (PROV-3)
     finally:
         pv.close()
 
@@ -88,7 +87,7 @@ def test_remove_purges_provenance(tmp_path):
     pv = ProvenanceStore(ws.catalog_db)
     try:
         assert pv.get(r1.video.id) == []          # purged with the video
-        assert len(pv.get(r2.video.id)) == 1      # the other video's provenance survives
+        assert pv.get(r2.video.id)                 # the other video's provenance survives
     finally:
         pv.close()
 

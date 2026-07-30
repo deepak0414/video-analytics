@@ -288,6 +288,57 @@ def test_deep_scan_video_with_cache(tmp_path, monkeypatch):
     assert (second.changes_low, second.changes_high) == (3, 3)
 
 
+def test_deep_scan_cache_busts_on_captioner_upgrade(tmp_path, monkeypatch):
+    """A vlm_captioner upgrade must RE-RUN the sweep, not serve old-model captions.
+
+    Guards the PROV-3 missed-stale fix: deep-scan folds the captioner fingerprint into
+    its `observations` cache key, so a model bump busts the cache. Without it, `va ask`
+    would keep serving CODE-COUNTED answers from stale captions forever — a missed stale
+    invisible to `va stale`. The stable-key cache-HIT is covered above; this asserts the
+    complementary invalidation, so a refactor that drops the fingerprint fails loudly.
+    """
+    video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
+    wd = str(tmp_path / ".va")
+    res = ingest(str(video), workdir=wd, fps=1.0)
+
+    import va.registry as registry
+    real_get = registry.get_vlm_captioner
+    calls = {"n": 0}
+
+    def counting_get(cfg=None):
+        captioner = real_get(cfg)
+        orig = captioner.caption
+
+        def counted(images, prompt=None):
+            calls["n"] += 1
+            return orig(images, prompt)
+        captioner.caption = counted
+        return captioner
+    monkeypatch.setattr(registry, "get_vlm_captioner", counting_get)
+
+    # first sweep: fresh, one VLM call per Role-1 segment; second: cache hit, zero calls
+    first = deep_scan_video(res.video.id, str(video), "the dominant color", workdir=wd)
+    assert first.cached is False and calls["n"] == 4
+    calls["n"] = 0
+    second = deep_scan_video(res.video.id, str(video), "the dominant color", workdir=wd)
+    assert second.cached is True and calls["n"] == 0
+
+    # simulate a captioner upgrade: its fingerprint changes -> the cache key must change,
+    # forcing a full re-sweep (else old-model captions would silently survive).
+    import va.provenance as provenance
+    real_fp = provenance.role_fingerprint
+
+    def upgraded_fp(role, cfg=None):
+        if role == "vlm_captioner":
+            return {"model": "qwen3-vl-30b", "fingerprint": "upgraded00000000"}
+        return real_fp(role, cfg)
+    monkeypatch.setattr(provenance, "role_fingerprint", upgraded_fp)
+
+    calls["n"] = 0
+    third = deep_scan_video(res.video.id, str(video), "the dominant color", workdir=wd)
+    assert third.cached is False and calls["n"] == 4
+
+
 def test_ask_uses_deep_scan_end_to_end(tmp_path, monkeypatch):
     video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
     wd = str(tmp_path / ".va")
