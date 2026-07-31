@@ -185,3 +185,20 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   + re-embed + re-tag the `vectors` shard), **RPRC-1c** (caption: re-caption segments, then rebuild the
   text index AND purge the deep-scan `observations` cache — the D6 note), then **RPRC-2**
   (dependency-aware invalidation: R1→R4/5/6/7, R5→R6, R8→R9).
+- **2026-07-31:** **RPRC-1b: `visual_embedder` wired.** `reprocess.reindex_visual(video, video_dir, fps)`
+  re-samples frames at the video's RECORDED fps and re-embeds the `vectors` shard. Because visual
+  embedding DEPENDS on the sampling density, the reprocessor reads the fps from provenance and REFUSES
+  when it's unknown (→ `va reingest --fps <N>`) — never silently re-embeds at a different density. It
+  embeds ONLY (no Role-5 detection), so it's a standalone re-embed, not an extraction of ingest's
+  single decode+embed+detect pass. Durability: builds to a temp `vectors_rebuild` shard and
+  `os.replace`-swaps it in only on full success, so a failed re-embed leaves the prior shard (visual
+  search survives). `tests/test_reprocess.py`. Next: **RPRC-1c** (caption + `observations` purge) then
+  **RPRC-2**.
+- **2026-07-31:** **execute now requires `--yes`.** `va reprocess` OVERWRITES real data in place, so
+  unlike read-only `va stale` its config header alone is too weak a guard: a forgotten `VA_CONFIG_DIR`
+  would re-embed a whole real corpus with the stub (hours of GPU to recover). Execution now requires an
+  explicit `--yes`; without it the command prints the plan (the review step) and refuses (rc=1). Also
+  shard writes now put the `.npz` LAST (`NumpyFlatVectorStore.persist`; `reindex_visual` swaps `.json`
+  first), so a `va serve` reader racing a rebuild can't cache an empty/torn shard under the final mtime.
+  *Possible future hardening (deferred): refuse a stub-over-real-tagged shard overwrite from the shard
+  tag, as defense-in-depth beyond `--yes` — deferred to avoid hardcoding which embedder ids are "stub".*

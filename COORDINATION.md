@@ -332,3 +332,24 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   fails (e.g. GPU OOM) leaves the prior shard intact; the replace window is just the local `.npz` write,
   and the shard is idempotent. Only `text_embedder` mutates today; every other stale role is SKIPPED
   with a `va reingest` pointer (visual/caption reprocessors + the `observations` purge are RPRC-1b/c).
+- **2026-07-31 (WRITE PATH — pillar B RPRC-1b):** `va reprocess` now also re-runs **`visual_embedder`**
+  in place (`reprocess.reindex_visual`): it re-samples frames at the video's RECORDED fps (from
+  provenance — an unknown fps is refused, pointing to `va reingest --fps`) and re-embeds the `vectors`
+  shard, building to a temp `vectors_rebuild.{npz,json}` and `os.replace`-swapping it in only on success
+  (a failed re-embed leaves the old shard, so visual search keeps working). **For the web agent:** the
+  visual `vectors` shard can now be rebuilt+re-tagged under a running `va serve`, same as `text_vectors`.
+  Still SKIPPED → `va reingest`: caption and the leaf roles (RPRC-1c + beyond).
+- **2026-07-31 (shard-write ordering — concurrency):** all shard writers now write/swap the `.npz`
+  LAST (`NumpyFlatVectorStore.persist` writes `.json` then `.npz`; `reindex_visual` swaps `.json` then
+  `.npz`). This supersedes the RPRC-1a entry's "the replace window is just the local `.npz` write"
+  framing: because the sharded shard-cache keys on the `.npz` mtime and `_load` requires both files, a
+  reader racing a rebuild now sees either the old pair or the fully-new pair — never an empty/torn shard
+  cached under the final mtime (which would have dropped a video from search until restart). **For the
+  web agent (`va serve`):** queries concurrent with `va reprocess`/`reingest` are now safe against that
+  persistent-empty-shard race; a torn read during the visual two-file swap is at worst a transient error
+  that self-heals on the next query (the `.npz` mtime bump invalidates the cache). No API change.
+- **2026-07-31 (durability — text shard):** `index_text` now builds to a temp shard and swaps via the
+  shared `numpy_flat.swap_shard` (same as `reindex_visual`), replacing the earlier embed-before-unlink
+  approach. So a failure ANYWHERE in a text rebuild — embed, a disk-full in `np.savez`, a process kill —
+  now leaves the prior `text_vectors` shard intact (the RPRC-1a "leaves the prior shard" claim held only
+  for pre-unlink failures before this). Affects ingest's text index too, not just reprocess. No API change.

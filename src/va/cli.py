@@ -277,6 +277,19 @@ def _cmd_reprocess(args: argparse.Namespace) -> int:
         print("\n(dry run — no changes made)")
         return 0
 
+    if not args.yes:
+        # Executing OVERWRITES real data in place. Unlike read-only `va stale`, a wrong
+        # VA_CONFIG_DIR here isn't just a misleading report — it re-embeds the whole corpus
+        # with the other config's model (e.g. stub 64-dim hashes over real SigLIP vectors),
+        # hours of GPU to recover. Require an explicit --yes so nothing mutates on one
+        # keystroke; the plan above is the review step.
+        sys.stdout.flush()
+        print("\nNOT executed — this OVERWRITES the shown shards/rows in place under the config "
+              "above. Re-run with --yes to execute, or --dry-run to only plan. Make sure that "
+              "config is the one you intend: reprocessing under the wrong VA_CONFIG_DIR would "
+              "overwrite real-model data with the other config's output.", file=sys.stderr)
+        return 1
+
     from va.pipeline.reprocess import execute_reprocess
 
     # fps to preserve on a reingest fallback (reingest defaults to 1.0 — see va stale remedy)
@@ -445,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     prp = sub.add_parser(
         "reprocess",
-        help="re-run stale roles in place (§6-b pillar B; text_embedder wired, others → reingest)")
+        help="re-run stale roles in place (§6-b pillar B; text+visual embedders wired, others → reingest)")
     prp.add_argument("--role", default=None, choices=list(PROVENANCE_ROLES), metavar="ROLE",
                      help=f"restrict to one role (one of: {', '.join(PROVENANCE_ROLES)})")
     # Exactly one video scope — an explicit choice, so a reprocess can never fan out across
@@ -455,7 +468,9 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--video", default=None, metavar="IDENT",
                        help="one video by UUID, source_key, URL, or path")
     prp.add_argument("--dry-run", action="store_true",
-                     help="plan only — make no changes (otherwise the plan is executed)")
+                     help="plan only — make no changes")
+    prp.add_argument("--yes", action="store_true",
+                     help="actually execute (overwrite shards in place); required to mutate")
     prp.set_defaults(func=_cmd_reprocess)
 
     pn = sub.add_parser("count", help="distinct object instances (Role 6 tracks)")

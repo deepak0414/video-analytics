@@ -7,12 +7,25 @@ Persisted as a .npz (vectors) + .json (payloads) under the workdir.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .base import VectorHit
+
+
+def swap_shard(tmp_path: str | Path, final_path: str | Path) -> None:
+    """Swap a freshly-built temp shard (`<tmp>.npz`/`.json`) into `<final>`. Replace `.json`
+    BEFORE `.npz`: the sharded cache keys on the `.npz` mtime and `_load` needs both files, so
+    making `.npz` the LAST file to change means a reader racing the swap sees the old pair or
+    the fully-new pair — never a torn pair cached under the final mtime (the same invariant as
+    `persist`, which writes `.json` then `.npz`). Building to a temp then swapping means a
+    failure anywhere before the swap leaves the prior shard — and its search — intact."""
+    tmp, final = Path(tmp_path), Path(final_path)
+    os.replace(tmp.with_suffix(".json"), final.with_suffix(".json"))
+    os.replace(tmp.with_suffix(".npz"), final.with_suffix(".npz"))
 
 
 class NumpyFlatVectorStore:
@@ -47,8 +60,14 @@ class NumpyFlatVectorStore:
         if self._meta is not None:
             # the vectors are the source of truth for `dim`; stamp it at write time
             arrays["meta"] = np.array(json.dumps({**self._meta, "dim": self.dim}))
-        np.savez(self._vec_file, **arrays)
+        # Write the payloads (.json) BEFORE the vectors (.npz). `_load` gates on BOTH files
+        # existing, and the sharded shard-cache keys on the .npz mtime — so making .npz the
+        # LAST file to appear means a concurrent reader mid-write either sees no .npz (skips
+        # the shard) or a .npz whose .json is already present (a consistent pair). Writing
+        # .npz first can cache an empty/torn shard under the final mtime, silently dropping
+        # the video from search until the next rebuild or restart.
         self._payload_file.write_text(json.dumps(self._payloads))
+        np.savez(self._vec_file, **arrays)
 
     # --- ops ---------------------------------------------------------------
     @staticmethod

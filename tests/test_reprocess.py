@@ -3,8 +3,8 @@
 `plan_reprocess` resolves the stale (video, role) set scoped by role/video/all-stale,
 read-only; `execute_reprocess` re-runs each wired role and restamps its provenance. Offline:
 stub ingest, then poke provenance to simulate a model change. `va reprocess` executes for
-`text_embedder` (rebuilt in place); every other stale role is skipped with a `va reingest`
-pointer, and `--dry-run` mutates nothing.
+`text_embedder` and `visual_embedder` (rebuilt in place); every other stale role is skipped
+with a `va reingest` pointer, and `--dry-run` mutates nothing.
 """
 from pathlib import Path
 
@@ -219,9 +219,8 @@ def test_restamp_uses_one_batch_pinned_config(tmp_path, monkeypatch):
 
 
 def test_failed_text_rebuild_preserves_the_old_shard(tmp_path):
-    # index_text embeds BEFORE unlinking, so a rebuild that fails at embed() (e.g. GPU OOM on
-    # a model switch) leaves the prior text_vectors shard intact — text search keeps working
-    # until a retry succeeds, rather than going silently empty.
+    # index_text builds to a temp shard and swaps on success, so a rebuild that fails at embed()
+    # (e.g. GPU OOM on a model switch) leaves the prior text_vectors shard intact.
     from va.pipeline.paths import Workspace
     from va.pipeline.text_index import index_text
 
@@ -244,6 +243,143 @@ def test_failed_text_rebuild_preserves_the_old_shard(tmp_path):
     assert shard.exists() and shard.read_bytes() == before   # old shard untouched
 
 
+def test_text_rebuild_persist_failure_preserves_old_shard(tmp_path, monkeypatch):
+    # temp+swap must survive a failure DURING persist (disk-full in np.savez / process kill),
+    # not just during embed — the swap only happens after a fully-written temp shard, so the
+    # prior shard stays intact. (embed-before-unlink alone left an unlink->persist window.)
+    import numpy as np
+
+    from va.pipeline.manage import lookup_video
+    from va.pipeline.paths import Workspace
+    from va.pipeline.text_index import index_text
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, str(res.video.id))
+    finally:
+        cat.close()
+    vdir = ws.video_dir(video.source_key, video.title)
+    shard = Path(vdir) / "text_vectors.npz"
+    before = shard.read_bytes()
+
+    monkeypatch.setattr(np, "savez", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        index_text(video.id, vdir, ws.catalog_db)
+    assert shard.read_bytes() == before                        # old shard intact (never swapped)
+    # a temp .json may linger (persist writes it before the failing .npz); the next rebuild's
+    # temp-clear removes it, and no reader globs `*_rebuild.npz` (which was never written)
+
+
+def test_execute_reprocesses_visual_embedder_and_clears_stale(tmp_path):
+    # the visual reprocessor re-samples at the recorded fps, rebuilds + re-tags the vectors
+    # shard, and its provenance is restamped -> no longer stale.
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import execute_reprocess
+    from va.registry import embedder_id
+    from va.storage.vector.numpy_flat import NumpyFlatVectorStore
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:  # stale, but KNOWN fps (== ingest fps) so re-embed can preserve the density
+        pv.record(res.video.id, "visual_embedder", "old", "STALE-FP", fps=1.0)
+    finally:
+        pv.close()
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert [x[:2] for x in result["reprocessed"]] == [(str(res.video.id), "visual_embedder")]
+    assert not result["failed"]
+    assert plan_reprocess(wd, all_stale=True, role="visual_embedder") == []   # now current
+    vdir = Workspace(wd).video_dir(res.video.source_key, res.video.title)
+    shard = NumpyFlatVectorStore(Path(vdir) / "vectors")
+    assert shard.meta and shard.meta["embedder"] == embedder_id("visual_embedder")  # re-tagged
+
+
+def test_visual_reprocess_refuses_unknown_fps(tmp_path):
+    # re-embedding at the wrong density would corrupt search; if the recorded fps is unknown,
+    # refuse (-> failed, NOT restamped) rather than guess a density.
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        pv.record(res.video.id, "visual_embedder", "old", "STALE-FP", fps=None)   # fps unknown
+    finally:
+        pv.close()
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert any(r == "visual_embedder" for _, r, _ in result["failed"])
+    assert not result["reprocessed"]
+    assert plan_reprocess(wd, all_stale=True, role="visual_embedder")   # still stale
+
+
+def test_failed_visual_reembed_preserves_old_shard(tmp_path):
+    # reindex_visual builds to a temp shard and swaps only on success, so a failed embed
+    # leaves the prior vectors shard intact (visual search keeps working until a retry).
+    from va.pipeline.manage import lookup_video
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import reindex_visual
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, str(res.video.id))
+    finally:
+        cat.close()
+    vdir = ws.video_dir(video.source_key, video.title)
+    shard = Path(vdir) / "vectors.npz"
+    assert shard.exists()
+    before = shard.read_bytes()
+
+    class _BoomEmbedder:
+        model_id = "boom"
+
+        def embed_image(self, images):
+            raise RuntimeError("OOM")
+
+    with pytest.raises(RuntimeError):
+        reindex_visual(video, vdir, fps=1.0, embedder=_BoomEmbedder())
+    assert shard.exists() and shard.read_bytes() == before          # old shard untouched
+    assert not (Path(vdir) / "vectors_rebuild.npz").exists()        # temp not left behind
+
+
+def test_visual_reembed_zero_frames_raises_and_preserves_shard(tmp_path, monkeypatch):
+    # a decode that yields ZERO frames (corrupt media that opens but iterates nothing) must NOT
+    # swap in an empty shard — the video would vanish from visual search while `va stale` reads
+    # clean. Raise so the old shard survives and the role stays stale for retry.
+    import va.media.frames as frames_mod
+    from va.pipeline.manage import lookup_video
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import reindex_visual
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, str(res.video.id))
+    finally:
+        cat.close()
+    vdir = ws.video_dir(video.source_key, video.title)
+    shard = Path(vdir) / "vectors.npz"
+    before = shard.read_bytes()
+
+    monkeypatch.setattr(frames_mod, "sample_frames", lambda path, fps=1.0: iter(()))
+    with pytest.raises(ValueError, match="0 frames"):
+        reindex_visual(video, vdir, fps=1.0)
+    assert shard.read_bytes() == before                             # old shard intact
+
+
 def test_skip_pointer_carries_recorded_fps(tmp_path, capsys):
     from va.cli import build_parser
 
@@ -252,11 +388,30 @@ def test_skip_pointer_carries_recorded_fps(tmp_path, capsys):
     _make_stale(wd, res.video.id, role="ocr")                # poke keeps fps=2.0 -> known
     parser = build_parser()
 
-    args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale"])
+    args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale", "--yes"])
     args.func(args)
     cap = capsys.readouterr()
     # the reingest pointer must preserve density (reingest defaults to 1.0)
     assert "va reingest" in cap.out and "--fps 2.0" in cap.out
+
+
+def test_cli_execute_requires_yes(tmp_path, capsys):
+    # executing OVERWRITES shards in place; without --yes the command must NOT mutate (the
+    # wrong-VA_CONFIG_DIR foot-gun would re-embed a real corpus with the stub otherwise).
+    from va.cli import build_parser
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+    parser = build_parser()
+
+    args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale"])   # no --yes
+    rc = args.func(args)
+    cap = capsys.readouterr()
+    assert rc == 1
+    assert "NOT executed" in cap.err and "--yes" in cap.err
+    assert "text_embedder" in cap.out                        # plan still shown as the review step
+    assert plan_reprocess(wd, all_stale=True, role="text_embedder")   # unchanged -> still stale
 
 
 def test_cli_executes_supported_and_skips_unsupported(tmp_path, capsys):
@@ -268,7 +423,7 @@ def test_cli_executes_supported_and_skips_unsupported(tmp_path, capsys):
     _make_stale(wd, res.video.id, role="ocr")                # one wired, one not
     parser = build_parser()
 
-    args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale"])   # execute
+    args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale", "--yes"])   # execute
     rc = args.func(args)
     cap = capsys.readouterr()
     assert rc == 0

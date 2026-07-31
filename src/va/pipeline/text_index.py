@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from va.registry import embedder_id, get_text_embedder
-from va.storage.vector.numpy_flat import NumpyFlatVectorStore
+from va.storage.vector.numpy_flat import NumpyFlatVectorStore, swap_shard
 
 # (modality string, source_role, SQL) per text modality.
 _SOURCES = [
@@ -76,21 +76,23 @@ def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
     else:
         tag = getattr(embedder, "model_id", None) or "unknown"
     rows = _collect(catalog_db, video_id)
-    # Embed BEFORE touching the existing shard. Embedding is the slow, failure-prone step
-    # (a GPU OOM on a model switch, mid-reprocess), so a failure here must leave the prior
-    # shard INTACT — otherwise a failed rebuild deletes the video's text search until a
-    # retry succeeds. Only replace the files once the new vectors are in hand.
     vecs = embedder.embed([t for t, _ in rows]) if rows else None
-    store_path = Path(video_dir) / "text_vectors"
-    for suf in (".npz", ".json"):
-        p = store_path.with_suffix(suf)
+    # Build to a TEMP shard and swap it in only on full success, so a failure ANYWHERE — embed,
+    # a disk-full in np.savez, a process kill — leaves the prior shard, and thus text search,
+    # intact (the same durability the visual reindex has). `_rebuild` has no dot so with_suffix
+    # can't rewrite it.
+    base = Path(video_dir) / "text_vectors"
+    tmp = Path(video_dir) / "text_vectors_rebuild"
+    for suf in (".npz", ".json"):           # clear any temp left by a prior crash
+        p = tmp.with_suffix(suf)
         if p.exists():
             p.unlink()
-    store = NumpyFlatVectorStore(store_path)
+    store = NumpyFlatVectorStore(tmp)
     if rows:
         store.add(vecs, [p for _, p in rows])
     store.set_meta({"embedder": tag})
     store.persist()
+    swap_shard(tmp, base)
     return len(rows)
 
 

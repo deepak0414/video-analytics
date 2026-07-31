@@ -30,6 +30,30 @@ def test_empty_search_returns_nothing(tmp_path):
     assert store.search(np.array([1.0, 0.0]), k=5) == []
 
 
+def test_persist_writes_payloads_before_vectors(tmp_path, monkeypatch):
+    # concurrency invariant: the .npz (the shard-cache key + _load existence gate) is written
+    # LAST, so a reader racing a rebuild never caches an empty/torn shard under the final mtime.
+    import pathlib
+
+    order = []
+    store = NumpyFlatVectorStore(tmp_path / "shard")
+    store.add(np.ones((1, 4), dtype=np.float32), [{"id": "a"}])
+
+    real_savez = np.savez
+    monkeypatch.setattr(
+        np, "savez", lambda *a, **k: (order.append("npz"), real_savez(*a, **k))[-1])
+    real_write = pathlib.Path.write_text
+
+    def spy_write(self, *a, **k):
+        if self.suffix == ".json":
+            order.append("json")
+        return real_write(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "write_text", spy_write)
+
+    store.persist()
+    assert order == ["json", "npz"]         # payloads first, vectors (cache key) last
+
+
 def test_shard_cache_reuses_and_invalidates(tmp_path):
     import os
 

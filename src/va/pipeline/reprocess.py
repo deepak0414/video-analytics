@@ -3,9 +3,9 @@
 `plan_reprocess` resolves WHICH (video, role) pairs a reprocess would touch — the stale
 set from PROV-4 (`stale_report`), scoped by role/video/all-stale — WITHOUT mutating.
 `execute_reprocess` then re-runs each stale role that has an in-place reprocessor and
-restamps its provenance. Only `text_embedder` is wired so far (`reprocessable_roles()`);
-every other stale role is left for whole-video `va reingest` (D5 scope cap). The CLI runs
-the plan on `--dry-run` and executes otherwise.
+restamps its provenance. `text_embedder` and `visual_embedder` are wired so far
+(`reprocessable_roles()`); every other stale role is left for whole-video `va reingest`
+(D5 scope cap). The CLI runs the plan on `--dry-run` and executes otherwise.
 """
 from __future__ import annotations
 
@@ -72,6 +72,20 @@ def plan_reprocess(
 # wired (D5 scope cap); every other stale role falls back to whole-video `va reingest`.
 
 
+_VISUAL_BATCH = 32  # frames per embed call (matches ingest's batch)
+
+
+def _batched(it, n):
+    batch = []
+    for x in it:
+        batch.append(x)
+        if len(batch) == n:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def _reprocess_text_embedder(workdir: str, video_id: str) -> int:
     from va.pipeline.text_index import backfill_text_index
 
@@ -84,8 +98,92 @@ def _reprocess_text_embedder(workdir: str, video_id: str) -> int:
     return n
 
 
+def reindex_visual(video, video_dir, fps: float, embedder=None) -> int:
+    """(Re)build the visual `vectors` shard: re-sample frames at `fps` and re-embed.
+
+    Builds to a TEMP shard and swaps it in only on full success, so a failed re-embed (e.g.
+    a GPU OOM on a model switch) leaves the prior shard — and visual search — intact. Unlike
+    ingest's single decode pass, this embeds ONLY (no Role-5 detection), so it is a standalone
+    re-embed rather than an extraction of that combined loop. `fps` MUST match the density the
+    video was ingested at (the caller preserves the recorded fps), else the re-embedded frame
+    set drifts. Returns frames embedded."""
+    from pathlib import Path
+
+    from va.media.frames import sample_frames
+    from va.registry import embedder_id, get_visual_embedder
+    from va.storage.vector.numpy_flat import NumpyFlatVectorStore, swap_shard
+
+    if embedder is None:
+        embedder = get_visual_embedder()
+        tag = embedder_id("visual_embedder")
+    else:  # injected embedder must declare its own id, else tag "unknown" (TAG-3 skips it)
+        tag = getattr(embedder, "model_id", None) or "unknown"
+
+    vdir = Path(video_dir)
+    tmp = vdir / "vectors_rebuild"          # NB: no dot — with_suffix() would rewrite it
+    for suf in (".npz", ".json"):           # clear any temp left by a prior crash
+        p = tmp.with_suffix(suf)
+        if p.exists():
+            p.unlink()
+    store = NumpyFlatVectorStore(tmp)
+    n = 0
+    for batch in _batched(sample_frames(video.local_path, fps=fps), _VISUAL_BATCH):
+        images = [img for _, img in batch]
+        vecs = embedder.embed_image(images)
+        store.add(vecs, [{"video_id": str(video.id), "timestamp": ts,
+                          "source_uri": video.source_uri} for ts, _ in batch])
+        n += len(batch)
+    if n == 0:
+        # Zero frames from a video that previously had them means the decode broke silently
+        # (truncated/corrupt media that opens but iterates nothing). Swapping in an empty shard
+        # would vanish the video from visual search while `va stale` reads clean — fail instead,
+        # leaving the existing shard so the role stays stale for retry.
+        raise ValueError(
+            f"video {video.id} re-embed produced 0 frames — media may be corrupt; "
+            f"not replacing the existing shard")
+    store.set_meta({"embedder": tag})
+    store.persist()
+    swap_shard(tmp, vdir / "vectors")  # swap in only now that the rebuild fully succeeded
+    return n
+
+
+def _reprocess_visual_embedder(workdir: str, video_id: str) -> int:
+    from pathlib import Path
+
+    from va.pipeline.paths import Workspace
+    from va.storage.structured.provenance_store import ProvenanceStore
+
+    ws = Workspace(workdir)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, video_id)
+    finally:
+        cat.close()
+    if video is None:
+        raise ValueError(f"video {video_id} not found — cannot reprocess visual_embedder")
+    if not video.local_path or not Path(video.local_path).exists():
+        raise ValueError(
+            f"video {video_id} media is not available locally ({video.local_path!r}) — "
+            f"cannot re-embed; use `va reingest` (re-downloads / re-reads the source)")
+    # Visual embedding DEPENDS on the sampling fps (which frames are seen). Re-embed at the
+    # SAME density it was ingested at, from the recorded provenance; an unknown fps can't be
+    # preserved, so refuse rather than silently change the density (Roles 2/5/6/7 rely on it).
+    pv = ProvenanceStore(ws.catalog_db)
+    try:
+        prev = pv.get(video_id, "visual_embedder")
+    finally:
+        pv.close()
+    fps = prev[0]["fps"] if prev else None
+    if fps is None:
+        raise ValueError(
+            f"video {video_id} recorded visual fps is unknown — density can't be preserved; "
+            f"use `va reingest {video_id} --fps <N>`")
+    return reindex_visual(video, ws.video_dir(video.source_key, video.title), fps)
+
+
 _REPROCESSORS = {
     "text_embedder": _reprocess_text_embedder,
+    "visual_embedder": _reprocess_visual_embedder,
 }
 
 
