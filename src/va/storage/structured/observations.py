@@ -28,6 +28,15 @@ class ObservationStore:
         ).fetchall()
         return [(r["timestamp"], r["text"]) for r in rows]
 
+    def purge(self, video_id: UUID) -> int:
+        """Delete ALL cached deep-scan sweeps for a video (every prompt_key). Used when a
+        reprocess re-runs the captioner/reasoner, so the next `va ask` sweeps afresh rather
+        than leaving old-model micro-captions behind. Returns rows deleted."""
+        cur = self._conn.execute(
+            "DELETE FROM observations WHERE video_id = ?", (str(video_id),))
+        self._conn.commit()
+        return cur.rowcount
+
     def replace(self, video_id: UUID, prompt_key: str,
                 observations: List[Tuple[float, str]]) -> None:
         self._conn.execute(

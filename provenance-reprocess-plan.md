@@ -162,3 +162,76 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   stale`"; only the corpus-wide `va stale` was built. The per-video `va provenance <video>` inspector
   is DEFERRED (YAGNI until pillar B needs a single-video drill-down) — the data is already reachable
   via `ProvenanceStore.get(video_id)`; build the command when B does. Pillar B must NOT assume it exists.
+- **2026-07-31:** **B (batch reprocess) STARTED — RPRC-3a: the dry-run selection front-end.**
+  `va reprocess [--role R] (--all-stale | --video IDENT) [--dry-run]`
+  (`pipeline/reprocess.py::plan_reprocess`) resolves the stale (video, role) work set a reprocess
+  WOULD run — `stale_report` scoped by role/video, read-only. An explicit video scope is REQUIRED
+  (`--all-stale` XOR `--video`, enforced at both argparse and the library) so a reprocess can never
+  fan out across the whole corpus by omission; `--video` resolves idents via `lookup_video` (UUID /
+  source_key / URL / path). **Execution is gated OFF:** without `--dry-run` the command prints the
+  plan then refuses ("EXECUTION not implemented yet (RPRC-1) — NO changes made", rc=1) — never a
+  silent no-op. The config-header foot-gun guard is shared with `va stale` (`cli._active_config_line`).
+  `tests/test_reprocess.py`. Next: **RPRC-1** (per-role re-run entry points: visual/text/caption
+  first) then **RPRC-2** (dependency-aware invalidation) to make the plan executable.
+- **2026-07-31:** **RPRC-1a: the executor framework, wired for `text_embedder`.**
+  `reprocess.py::execute_reprocess(workdir, plan)` runs each stale role that has a reprocessor and
+  restamps its provenance — **rows/shard FIRST, provenance SECOND**, so a crash between them leaves the
+  role stale (safe to retry), never falsely current. Resumable: a reprocessor that raises is recorded
+  as failed (no restamp) and does not abort the batch; the restamp preserves the recorded ingest fps.
+  `va reprocess` (no `--dry-run`) now executes: `text_embedder` re-runs in place
+  (`text_index.backfill_text_index` rebuilds + re-tags the `text_vectors` shard); every other stale
+  role is SKIPPED with a `va reingest` pointer (`reprocessable_roles()` is the wired set — D5 scope
+  cap: only roles with standalone code). `tests/test_reprocess.py`. Next: **RPRC-1b** (visual: re-sample
+  + re-embed + re-tag the `vectors` shard), **RPRC-1c** (caption: re-caption segments, then rebuild the
+  text index AND purge the deep-scan `observations` cache — the D6 note), then **RPRC-2**
+  (dependency-aware invalidation: R1→R4/5/6/7, R5→R6, R8→R9).
+- **2026-07-31:** **RPRC-1b: `visual_embedder` wired.** `reprocess.reindex_visual(video, video_dir, fps)`
+  re-samples frames at the video's RECORDED fps and re-embeds the `vectors` shard. Because visual
+  embedding DEPENDS on the sampling density, the reprocessor reads the fps from provenance and REFUSES
+  when it's unknown (→ `va reingest --fps <N>`) — never silently re-embeds at a different density. It
+  embeds ONLY (no Role-5 detection), so it's a standalone re-embed, not an extraction of ingest's
+  single decode+embed+detect pass. Durability: builds to a temp `vectors_rebuild` shard and
+  `os.replace`-swaps it in only on full success, so a failed re-embed leaves the prior shard (visual
+  search survives). `tests/test_reprocess.py`. Next: **RPRC-1c** (caption + `observations` purge) then
+  **RPRC-2**.
+- **2026-07-31:** **execute now requires `--yes`.** `va reprocess` OVERWRITES real data in place, so
+  unlike read-only `va stale` its config header alone is too weak a guard: a forgotten `VA_CONFIG_DIR`
+  would re-embed a whole real corpus with the stub (hours of GPU to recover). Execution now requires an
+  explicit `--yes`; without it the command prints the plan (the review step) and refuses (rc=1). Also
+  shard writes now put the `.npz` LAST (`NumpyFlatVectorStore.persist`; `reindex_visual` swaps `.json`
+  first), so a `va serve` reader racing a rebuild can't cache an empty/torn shard under the final mtime.
+  *Possible future hardening (deferred): refuse a stub-over-real-tagged shard overwrite from the shard
+  tag, as defense-in-depth beyond `--yes` — deferred to avoid hardcoding which embedder ids are "stub".*
+- **2026-07-31:** **RPRC-1c: `vlm_captioner` wired — RPRC-1 role reprocessors COMPLETE (text, visual,
+  caption).** *(Sub-item DEFERRED: RPRC-1's "give each embedder a `model_id` property" is not done —
+  config-driven reprocess tags shards correctly via `embedder_id`, but an INJECTED embedder without a
+  `model_id` still tags `unknown` (honest — TAG-3 skips it — per `text_index.py`). Add the property when
+  an injected-embedder reprocess path actually needs exact tags.)*
+  `_reprocess_vlm_captioner` re-captions each segment's keyframe into `segments.caption`
+  (caption-all-first, so a captioner failure overwrites nothing), then propagates to the two caption
+  dependents so the new captions actually surface: **rebuilds the text index** (captions are a text
+  modality — skipping it would leave text search on the OLD captions) and **purges the deep-scan
+  `observations` cache** (`ObservationStore.purge`; its sweep uses the captioner — the D6 note). This is
+  the first wired role WITH dependents, so it does the R4→text_embedder / R4→deep-scan propagation
+  inline; RPRC-2 will formalize dependency-aware invalidation for the rest (R1→R4/5/6/7, R5→R6, R8→R9)
+  and can dedupe the text-index rebuild when both caption and text_embedder are stale (today they'd each
+  rebuild it — redundant but correct). `tests/test_reprocess.py`. Next: **RPRC-2**, then the pillar-B PR.
+- **2026-07-31:** **RPRC-2: dependency-aware invalidation — pillar B COMPLETE.** `_SATISFIES` +
+  `_dependency_ordered` in `execute_reprocess`: a provider whose reprocess also rebuilds a dependent's
+  artifact restamps that dependent WITHOUT a redundant rebuild. Only one edge is active for in-place
+  reprocess — `vlm_captioner`→`text_embedder` (re-captioning rebuilds the text index) — so when both are
+  stale, caption runs (providers ordered first) and text_embedder is restamped current, not rebuilt a
+  second time (`tests/test_reprocess.py`; CLI shows "restamped (rebuilt via a dependency)"). **The rest
+  of the role graph (R1→R4/5/6/7, R5→R6, R8→R9) needs no handling here:** those roles aren't in-place
+  reprocessable (D5), so they go through whole-video `va reingest`, which re-runs the pipeline and
+  satisfies those dependencies wholesale. Pillar B (find-stale → reprocess) is done for the three
+  standalone-code roles; leaf roles remain `va reingest`. Next: the pillar-B PR.
+- **VALIDATION GAP (must close before production reprocessing):** the in-place reprocess WRITE path
+  (`reindex_visual`, `index_text` rebuild, re-caption) is validated only on the STUB combination. Its
+  first real use — reprocessing a SigLIP/Qwen `.va-shots` workdir after a model switch — exercises real
+  ModelManager loading, real embed batching, and golden-query relevance for the FIRST time, where a
+  silent breakage costs hours of GPU. The offline golden gate tests QUERIES, not reprocess execution, so
+  it does not cover this. **Before relying on `va reprocess` in production, run a real-model smoke:**
+  `VA_CONFIG_DIR=run-siglip/config va --workdir .va-shots reprocess --video <id> --role visual_embedder
+  --yes` on a stale video, then re-run the golden queries and confirm relevance survived. The pillar-B
+  PR's `golden-verified` evidence should include this reprocess smoke, not just the query golden run.

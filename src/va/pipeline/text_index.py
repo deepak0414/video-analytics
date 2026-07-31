@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from va.registry import embedder_id, get_text_embedder
-from va.storage.vector.numpy_flat import NumpyFlatVectorStore
+from va.storage.vector.numpy_flat import NumpyFlatVectorStore, swap_shard
 
 # (modality string, source_role, SQL) per text modality.
 _SOURCES = [
@@ -63,7 +63,7 @@ def _collect(catalog_db, video_id) -> list[tuple[str, dict]]:
     return rows
 
 
-def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
+def index_text(video_id, video_dir, catalog_db, embedder=None, verify_exists=False) -> int:
     """(Re)build the `text_vectors` shard for one video. Returns rows indexed."""
     # Tag the shard with the embedder that ACTUALLY produced the vectors: from
     # config on the normal path; an INJECTED embedder must declare its own
@@ -76,17 +76,43 @@ def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
     else:
         tag = getattr(embedder, "model_id", None) or "unknown"
     rows = _collect(catalog_db, video_id)
-    store_path = Path(video_dir) / "text_vectors"
-    for suf in (".npz", ".json"):  # idempotent: start fresh
-        p = store_path.with_suffix(suf)
+    vecs = embedder.embed([t for t, _ in rows]) if rows else None
+    # Build to a TEMP shard and swap it in only on full success, so a failure ANYWHERE — embed,
+    # a disk-full in np.savez, a process kill — leaves the prior shard, and thus text search,
+    # intact (the same durability the visual reindex has). `_rebuild` has no dot so with_suffix
+    # can't rewrite it.
+    base = Path(video_dir) / "text_vectors"
+    tmp = Path(video_dir) / "text_vectors_rebuild"
+    for suf in (".npz", ".json"):           # clear any temp left by a prior crash
+        p = tmp.with_suffix(suf)
         if p.exists():
             p.unlink()
-    store = NumpyFlatVectorStore(store_path)
+    store = NumpyFlatVectorStore(tmp)
     if rows:
-        vecs = embedder.embed([t for t, _ in rows])
         store.add(vecs, [p for _, p in rows])
     store.set_meta({"embedder": tag})
     store.persist()
+    # On the REPROCESS path (verify_exists — set by backfill_text_index), a concurrent `va remove`
+    # during the embed deletes the catalog row + dir; persist() just recreated the dir. Re-check
+    # right before the swap (as reindex_visual does) — swapping now would resurrect the removed
+    # video in text search. Off by default: ingest's video always exists, and callers that index a
+    # synthetic/uncataloged id (tagging tests) must not be rejected.
+    if verify_exists:
+        from va.storage.structured.catalog_sqlite import Catalog
+
+        cat = Catalog(catalog_db)
+        try:
+            removed = cat.get(video_id) is None
+        finally:
+            cat.close()
+        if removed:
+            for suf in (".npz", ".json"):
+                p = tmp.with_suffix(suf)
+                if p.exists():
+                    p.unlink()
+            raise ValueError(
+                f"video {video_id} was removed during reprocess — aborting text rebuild")
+    swap_shard(tmp, base)
     return len(rows)
 
 
@@ -105,4 +131,6 @@ def backfill_text_index(workdir: str, ident: str, embedder=None) -> Optional[int
     if v is None:
         return None
     vdir = ws.video_dir(v.source_key, v.title, create=True)
-    return index_text(v.id, vdir, ws.catalog_db, embedder)
+    # verify_exists: this is the reprocess/backfill path, so guard against a concurrent
+    # `va remove` landing during the (possibly long) rebuild.
+    return index_text(v.id, vdir, ws.catalog_db, embedder, verify_exists=True)

@@ -317,3 +317,55 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   contract or schema change (it only READS `role_provenance`). **Available if useful to the web agent:**
   `stale_report(workdir)` returns `[{video_id, source_uri, title, stale_roles}]` — handy for a "videos
   needing reprocessing" view once pillar B (selective reprocess) lands.
+- **2026-07-31 (read helper):** new read-only `va reprocess [--role R] (--all-stale | --video IDENT)
+  [--dry-run]` (`pipeline/reprocess.py::plan_reprocess`) — the pillar-B selection front-end. Returns
+  the same stale rows as `va stale`, scoped to a chosen video or role. **No mutation yet:** execution
+  (RPRC-1) is not built, so the command can only PLAN (refuses without `--dry-run`). No shared contract
+  or schema change. When execution lands it will re-run role rows AND purge the deep-scan `observations`
+  cache — a heads-up will follow here before any write path ships.
+- **2026-07-31 (WRITE PATH — pillar B RPRC-1a):** `va reprocess` (without `--dry-run`) now EXECUTES for
+  the first wired role, **`text_embedder`** (`reprocess.py::execute_reprocess`): it rebuilds that
+  video's `text_vectors` shard in place (via `text_index.backfill_text_index`) THEN restamps
+  `role_provenance` — rows first, provenance second, so a crash stays stale (safe to retry). **For the
+  web agent:** on the shared `catalog.db`/workdir, a `text_vectors` shard can now be rebuilt out from
+  under a running `va serve`. `index_text` now embeds BEFORE unlinking the old shard, so a rebuild that
+  fails (e.g. GPU OOM) leaves the prior shard intact; the replace window is just the local `.npz` write,
+  and the shard is idempotent. Only `text_embedder` mutates today; every other stale role is SKIPPED
+  with a `va reingest` pointer (visual/caption reprocessors + the `observations` purge are RPRC-1b/c).
+- **2026-07-31 (WRITE PATH — pillar B RPRC-1b):** `va reprocess` now also re-runs **`visual_embedder`**
+  in place (`reprocess.reindex_visual`): it re-samples frames at the video's RECORDED fps (from
+  provenance — an unknown fps is refused, pointing to `va reingest --fps`) and re-embeds the `vectors`
+  shard, building to a temp `vectors_rebuild.{npz,json}` and `os.replace`-swapping it in only on success
+  (a failed re-embed leaves the old shard, so visual search keeps working). **For the web agent:** the
+  visual `vectors` shard can now be rebuilt+re-tagged under a running `va serve`, same as `text_vectors`.
+  Still SKIPPED → `va reingest`: caption and the leaf roles (RPRC-1c + beyond).
+- **2026-07-31 (shard-write ordering — concurrency):** all shard writers now write/swap the `.npz`
+  LAST (`NumpyFlatVectorStore.persist` writes `.json` then `.npz`; `reindex_visual` swaps `.json` then
+  `.npz`). This supersedes the RPRC-1a entry's "the replace window is just the local `.npz` write"
+  framing: because the sharded shard-cache keys on the `.npz` mtime and `_load` requires both files, a
+  reader racing a rebuild now sees either the old pair or the fully-new pair — never an empty/torn shard
+  cached under the final mtime (which would have dropped a video from search until restart). **For the
+  web agent (`va serve`):** queries concurrent with `va reprocess`/`reingest` are now safe against that
+  persistent-empty-shard race. A torn read during the two-file swap (new `.json` + old `.npz`) is now
+  caught by a vector/payload length check in `_load` — a mismatched pair reads as EMPTY (not misaligned
+  hits) and self-heals on the next query (the `.npz` mtime bump invalidates it). The only residual is a
+  same-COUNT content mismatch in that microsecond window, which the length check can't see. No API change.
+- **2026-07-31 (durability — text shard):** `index_text` now builds to a temp shard and swaps via the
+  shared `numpy_flat.swap_shard` (same as `reindex_visual`), replacing the earlier embed-before-unlink
+  approach. So a failure ANYWHERE in a text rebuild — embed, a disk-full in `np.savez`, a process kill —
+  now leaves the prior `text_vectors` shard intact (the RPRC-1a "leaves the prior shard" claim held only
+  for pre-unlink failures before this). Affects ingest's text index too, not just reprocess. No API change.
+- **2026-07-31 (pillar B COMPLETE — RPRC-2):** `va reprocess` is now dependency-aware: when a role's
+  reprocess also rebuilds a dependent's artifact, the dependent is restamped without a redundant rebuild
+  (one active edge: re-captioning rebuilds the text index, so a stale `text_embedder` is restamped, not
+  rebuilt again — shown as "restamped (rebuilt via a dependency)"). Internal optimization; no contract
+  change. Pillar B (§6-b: find-stale via `va stale` → re-run in place via `va reprocess`) is complete
+  for the three standalone-code roles (text/visual embedders, captioner); leaf roles remain `va reingest`.
+- **2026-07-31 (WRITE PATH — pillar B RPRC-1c):** `va reprocess` now also re-runs **`vlm_captioner`**
+  (`reprocess._reprocess_vlm_captioner`): re-captions each segment's keyframe and updates
+  `segments.caption` (caption-all-first, so a mid-run failure overwrites nothing), then propagates to
+  the two caption dependents — **rebuilds the `text_vectors` shard** (captions are a text modality) and
+  **purges the deep-scan `observations` cache** for the video (new `ObservationStore.purge`), so the
+  next `va ask` re-sweeps. **For the web agent:** after a caption reprocess a video's `segments.caption`,
+  `text_vectors` shard, AND cached `va ask` sweeps all change together. This completes RPRC-1 (all three
+  standalone-code roles — text, visual, caption — wired); the remaining stale roles still → `va reingest`.

@@ -7,12 +7,28 @@ Persisted as a .npz (vectors) + .json (payloads) under the workdir.
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .base import VectorHit
+
+logger = logging.getLogger(__name__)
+
+
+def swap_shard(tmp_path: str | Path, final_path: str | Path) -> None:
+    """Swap a freshly-built temp shard (`<tmp>.npz`/`.json`) into `<final>`. Replace `.json`
+    BEFORE `.npz`: the sharded cache keys on the `.npz` mtime and `_load` needs both files, so
+    making `.npz` the LAST file to change means a reader racing the swap sees the old pair or
+    the fully-new pair — never a torn pair cached under the final mtime (the same invariant as
+    `persist`, which writes `.json` then `.npz`). Building to a temp then swapping means a
+    failure anywhere before the swap leaves the prior shard — and its search — intact."""
+    tmp, final = Path(tmp_path), Path(final_path)
+    os.replace(tmp.with_suffix(".json"), final.with_suffix(".json"))
+    os.replace(tmp.with_suffix(".npz"), final.with_suffix(".npz"))
 
 
 class NumpyFlatVectorStore:
@@ -39,6 +55,19 @@ class NumpyFlatVectorStore:
             if "meta" in npz.files:  # identity tag; absent on pre-tagging shards
                 self._meta = json.loads(npz["meta"].item())
             self._payloads = json.loads(self._payload_file.read_text())
+            if self._vecs.shape[0] != len(self._payloads):
+                # The two files don't correspond — a torn read racing the two-file shard swap
+                # (new .json paired with the not-yet-swapped old .npz) or a corrupt shard.
+                # Serving it would return hits whose payload belongs to a DIFFERENT vector, so
+                # read as EMPTY instead; the matching pair lands on the next load (npz swap
+                # last -> its mtime bump invalidates any cache of this empty read). WARN so a
+                # PERSISTENT mismatch (real corruption, not a transient swap race) is visible
+                # rather than silently dropping the video from search.
+                logger.warning(
+                    "shard %s: %d vectors but %d payloads — reading as empty (torn swap or "
+                    "corrupt shard); if this persists, rebuild via `va reprocess`/`va reingest`",
+                    self.path, self._vecs.shape[0], len(self._payloads))
+                self._vecs, self._payloads, self._meta = None, [], None
 
     def persist(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -47,8 +76,14 @@ class NumpyFlatVectorStore:
         if self._meta is not None:
             # the vectors are the source of truth for `dim`; stamp it at write time
             arrays["meta"] = np.array(json.dumps({**self._meta, "dim": self.dim}))
-        np.savez(self._vec_file, **arrays)
+        # Write the payloads (.json) BEFORE the vectors (.npz). `_load` gates on BOTH files
+        # existing, and the sharded shard-cache keys on the .npz mtime — so making .npz the
+        # LAST file to appear means a concurrent reader mid-write either sees no .npz (skips
+        # the shard) or a .npz whose .json is already present (a consistent pair). Writing
+        # .npz first can cache an empty/torn shard under the final mtime, silently dropping
+        # the video from search until the next rebuild or restart.
         self._payload_file.write_text(json.dumps(self._payloads))
+        np.savez(self._vec_file, **arrays)
 
     # --- ops ---------------------------------------------------------------
     @staticmethod
