@@ -162,3 +162,14 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   stale`"; only the corpus-wide `va stale` was built. The per-video `va provenance <video>` inspector
   is DEFERRED (YAGNI until pillar B needs a single-video drill-down) — the data is already reachable
   via `ProvenanceStore.get(video_id)`; build the command when B does. Pillar B must NOT assume it exists.
+- **2026-07-31:** **B (batch reprocess) STARTED — RPRC-3a: the dry-run selection front-end.**
+  `va reprocess [--role R] (--all-stale | --video IDENT) [--dry-run]`
+  (`pipeline/reprocess.py::plan_reprocess`) resolves the stale (video, role) work set a reprocess
+  WOULD run — `stale_report` scoped by role/video, read-only. An explicit video scope is REQUIRED
+  (`--all-stale` XOR `--video`, enforced at both argparse and the library) so a reprocess can never
+  fan out across the whole corpus by omission; `--video` resolves idents via `lookup_video` (UUID /
+  source_key / URL / path). **Execution is gated OFF:** without `--dry-run` the command prints the
+  plan then refuses ("EXECUTION not implemented yet (RPRC-1) — NO changes made", rc=1) — never a
+  silent no-op. The config-header foot-gun guard is shared with `va stale` (`cli._active_config_line`).
+  `tests/test_reprocess.py`. Next: **RPRC-1** (per-role re-run entry points: visual/text/caption
+  first) then **RPRC-2** (dependency-aware invalidation) to make the plan executable.

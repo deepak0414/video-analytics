@@ -317,3 +317,9 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   contract or schema change (it only READS `role_provenance`). **Available if useful to the web agent:**
   `stale_report(workdir)` returns `[{video_id, source_uri, title, stale_roles}]` — handy for a "videos
   needing reprocessing" view once pillar B (selective reprocess) lands.
+- **2026-07-31 (read helper):** new read-only `va reprocess [--role R] (--all-stale | --video IDENT)
+  [--dry-run]` (`pipeline/reprocess.py::plan_reprocess`) — the pillar-B selection front-end. Returns
+  the same stale rows as `va stale`, scoped to a chosen video or role. **No mutation yet:** execution
+  (RPRC-1) is not built, so the command can only PLAN (refuses without `--dry-run`). No shared contract
+  or schema change. When execution lands it will re-run role rows AND purge the deep-scan `observations`
+  cache — a heads-up will follow here before any write path ships.

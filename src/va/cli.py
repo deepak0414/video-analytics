@@ -204,22 +204,27 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_stale(args: argparse.Namespace) -> int:
+def _active_config_line() -> str:
+    """One-line summary of the config that staleness is measured against — surfaced by
+    `va stale`/`va reprocess`. Both are the tools reached for during model switches, exactly
+    when a forgotten VA_CONFIG_DIR would compare real-model rows against the stub config,
+    flag EVERYTHING stale, and lead a `va reingest`/reprocess to overwrite real data with
+    stub output (CLAUDE.md gotcha #2). Showing the basis makes that mismatch self-evident."""
     import os
 
     from va.configuration import load_config
-    from va.pipeline.stale import stale_report
 
-    # Staleness is measured against WHATEVER config is active now, so make that basis
-    # explicit: `va stale` is the tool reached for during model switches, exactly when a
-    # forgotten VA_CONFIG_DIR would compare real-model rows against the stub config, flag
-    # EVERYTHING stale, and its `va reingest` remedy would overwrite real data with stub
-    # output (CLAUDE.md gotcha #2). The header makes that mismatch self-evident.
     cfg = load_config()
     cfg_dir = os.environ.get("VA_CONFIG_DIR") or "config (default — stub backends)"
     embedder = (cfg.roles.get("visual_embedder") or {}).get("model", "?")
-    print(f"comparing against: {cfg_dir} (profile={cfg.active_profile}, "
-          f"visual_embedder={embedder})")
+    return (f"comparing against: {cfg_dir} "
+            f"(profile={cfg.active_profile}, visual_embedder={embedder})")
+
+
+def _cmd_stale(args: argparse.Namespace) -> int:
+    from va.pipeline.stale import stale_report
+
+    print(_active_config_line())
 
     report = stale_report(args.workdir, role=args.role)
     scope = f" for role {args.role}" if args.role else ""
@@ -242,6 +247,41 @@ def _cmd_stale(args: argparse.Namespace) -> int:
           f"UNDER THIS SAME CONFIG. ({fps_help}. And if the config line above isn't the one "
           f"you intend, everything looks stale under the wrong models — fix that first.)")
     return 0
+
+
+def _cmd_reprocess(args: argparse.Namespace) -> int:
+    from va.pipeline.reprocess import plan_reprocess
+
+    print(_active_config_line())
+    try:
+        plan = plan_reprocess(args.workdir, role=args.role,
+                              all_stale=args.all_stale, video=args.video)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    scope = f" for role {args.role}" if args.role else ""
+    if not plan:
+        which = f"video {args.video}" if args.video else "selection"
+        print(f"nothing to reprocess{scope} — {which} is already current")
+        return 0
+
+    print(f"reprocess plan{scope} — {len(plan)} video(s):")
+    for e in plan:
+        label = e["title"] or e["source_uri"] or e["video_id"]
+        fps = e.get("recorded_fps")
+        fps_note = f"fps={fps}" if fps is not None else "fps=unknown"
+        print(f"  {label} [{fps_note}]: {', '.join(e['stale_roles'])}")
+
+    if args.dry_run:
+        print("\n(dry run — no changes made)")
+        return 0
+    # Execution (RPRC-1) is not built yet; NEVER silently do nothing or pretend success.
+    sys.stdout.flush()  # keep the plan above the refusal even when output is piped
+    print("\nreprocess EXECUTION is not implemented yet (RPRC-1) — NO changes made. Re-run "
+          "with --dry-run to plan, or `va reingest <video> --fps <N>` for a whole-video redo.",
+          file=sys.stderr)
+    return 1
 
 
 def _cmd_fixtures(args: argparse.Namespace) -> int:
@@ -389,6 +429,21 @@ def build_parser() -> argparse.ArgumentParser:
                      help="only check one role, e.g. speech_to_text "
                           f"(one of: {', '.join(PROVENANCE_ROLES)})")
     psl.set_defaults(func=_cmd_stale)
+
+    prp = sub.add_parser(
+        "reprocess",
+        help="plan re-running stale roles on selected videos (§6-b pillar B; dry-run only)")
+    prp.add_argument("--role", default=None, choices=list(PROVENANCE_ROLES), metavar="ROLE",
+                     help=f"restrict to one role (one of: {', '.join(PROVENANCE_ROLES)})")
+    # Exactly one video scope — an explicit choice, so a reprocess can never fan out across
+    # the whole corpus by omission.
+    scope = prp.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--all-stale", action="store_true", help="every stale video")
+    scope.add_argument("--video", default=None, metavar="IDENT",
+                       help="one video by UUID, source_key, URL, or path")
+    prp.add_argument("--dry-run", action="store_true",
+                     help="show the plan only (execution is not implemented yet)")
+    prp.set_defaults(func=_cmd_reprocess)
 
     pn = sub.add_parser("count", help="distinct object instances (Role 6 tracks)")
     pn.add_argument("text", help="class name(s), e.g. 'car' or 'person dog'")
