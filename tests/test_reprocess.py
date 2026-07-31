@@ -3,8 +3,8 @@
 `plan_reprocess` resolves the stale (video, role) set scoped by role/video/all-stale,
 read-only; `execute_reprocess` re-runs each wired role and restamps its provenance. Offline:
 stub ingest, then poke provenance to simulate a model change. `va reprocess` executes for
-`text_embedder` and `visual_embedder` (rebuilt in place); every other stale role is skipped
-with a `va reingest` pointer, and `--dry-run` mutates nothing.
+`text_embedder`, `visual_embedder`, and `vlm_captioner` (rebuilt in place); every other stale
+role is skipped with a `va reingest` pointer, and `--dry-run` mutates nothing.
 """
 from pathlib import Path
 
@@ -176,6 +176,26 @@ def test_execute_failure_leaves_role_stale(tmp_path, monkeypatch):
     assert plan_reprocess(wd, all_stale=True, role="text_embedder")   # still stale (not restamped)
 
 
+def test_reprocess_records_run_id_when_tracing_on(tmp_path, monkeypatch):
+    # a reprocess should stamp provenance with its trace run id (like ingest) so an operator
+    # can correlate the restamp to a run — not leave run_id NULL.
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+
+    monkeypatch.setenv("VA_TRACE", "1")            # enable tracing for the reprocess
+    execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        assert pv.get(res.video.id, "text_embedder")[0]["run_id"]   # a real run id, not None
+    finally:
+        pv.close()
+
+
 def test_execute_on_removed_video_fails_without_resurrecting_provenance(tmp_path):
     # video removed between plan and execute: backfill can't resolve it -> the role must FAIL,
     # and NO provenance is restamped (a 0-row "success" would resurrect a purged row current).
@@ -195,6 +215,46 @@ def test_execute_on_removed_video_fails_without_resurrecting_provenance(tmp_path
         assert pv.get(res.video.id) == []             # NOT resurrected
     finally:
         pv.close()
+
+
+def test_visual_reembed_aborts_swap_if_video_removed_midway(tmp_path):
+    # a `va remove` landing DURING a re-embed (after the initial lookup, before the swap) must
+    # abort the swap — swapping would resurrect the removed video in visual search — and leave
+    # no vectors.npz behind.
+    from va.pipeline.manage import lookup_video, remove_video
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import reindex_visual
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, str(res.video.id))    # hold the video object...
+    finally:
+        cat.close()
+    vdir = ws.video_dir(video.source_key, video.title)
+    remove_video(wd, str(res.video.id))                 # ...then it's removed mid-"reprocess"
+
+    with pytest.raises(ValueError, match="removed during reprocess"):
+        reindex_visual(video, vdir, fps=1.0, catalog_db=ws.catalog_db)
+    assert not (Path(vdir) / "vectors.npz").exists()    # shard NOT resurrected
+
+
+def test_caption_reprocess_fails_when_backfill_reports_removed(tmp_path, monkeypatch):
+    # backfill returning None (video removed mid-run) must fail the captioner role, not restamp.
+    import va.pipeline.text_index as txt
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="vlm_captioner")
+    monkeypatch.setattr(txt, "backfill_text_index", lambda *a, **k: None)
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert any(r == "vlm_captioner" for _, r, _ in result["failed"])
+    assert plan_reprocess(wd, all_stale=True, role="vlm_captioner")   # still stale (not restamped)
 
 
 def test_restamp_uses_one_batch_pinned_config(tmp_path, monkeypatch):
@@ -378,6 +438,90 @@ def test_visual_reembed_zero_frames_raises_and_preserves_shard(tmp_path, monkeyp
     with pytest.raises(ValueError, match="0 frames"):
         reindex_visual(video, vdir, fps=1.0)
     assert shard.read_bytes() == before                             # old shard intact
+
+
+def test_execute_reprocesses_vlm_captioner_clears_stale_and_purges_observations(tmp_path):
+    # re-caption clears the stale captioner AND purges the deep-scan observations cache (its
+    # sweep uses the captioner), so the next `va ask` re-sweeps instead of serving old captions.
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import execute_reprocess
+    from va.storage.structured.observations import ObservationStore
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        pv.record(res.video.id, "vlm_captioner", "old", "STALE-FP", fps=1.0)
+    finally:
+        pv.close()
+    obs = ObservationStore(Workspace(wd).catalog_db)
+    try:
+        obs.replace(res.video.id, "somekey", [(0.0, "old micro-caption")])   # seed the cache
+        assert obs.load(res.video.id, "somekey")
+    finally:
+        obs.close()
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert (str(res.video.id), "vlm_captioner") in [x[:2] for x in result["reprocessed"]]
+    assert not result["failed"]
+    assert plan_reprocess(wd, all_stale=True, role="vlm_captioner") == []   # now current
+    obs = ObservationStore(Workspace(wd).catalog_db)
+    try:
+        assert obs.load(res.video.id, "somekey") == []                      # deep-scan cache purged
+    finally:
+        obs.close()
+
+
+def test_failed_caption_reprocess_leaves_old_captions(tmp_path, monkeypatch):
+    # caption-all-first: a captioner failure mid-run overwrites NO captions, so the old ones
+    # survive and the role stays stale (not restamped) for retry.
+    import va.pipeline.reprocess as rp
+    import va.registry as registry
+    from va.pipeline.paths import Workspace
+    from va.storage.structured.segments import SegmentStore
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    seg_store = SegmentStore(Workspace(wd).catalog_db)
+    try:
+        before = {s.id: s.caption for s in seg_store.get_segments(res.video.id)}
+    finally:
+        seg_store.close()
+    _make_stale(wd, res.video.id, role="vlm_captioner")
+
+    class _BoomCaptioner:
+        def caption(self, images, **kw):
+            raise RuntimeError("OOM")
+    monkeypatch.setattr(registry, "get_vlm_captioner", lambda *a, **k: _BoomCaptioner())
+
+    result = rp.execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert any(r == "vlm_captioner" for _, r, _ in result["failed"])
+    seg_store = SegmentStore(Workspace(wd).catalog_db)
+    try:
+        after = {s.id: s.caption for s in seg_store.get_segments(res.video.id)}
+    finally:
+        seg_store.close()
+    assert after == before                                       # captions untouched
+    assert plan_reprocess(wd, all_stale=True, role="vlm_captioner")   # still stale
+
+
+def test_observation_purge_is_video_scoped(tmp_path):
+    # purge clears only the target video's sweeps, and returns the row count.
+    from va.pipeline.paths import Workspace
+    from va.storage.structured.observations import ObservationStore
+
+    wd = str(tmp_path / ".va")
+    a = ingest(str(_clip(tmp_path, "a.mp4", _COLORS_A)), workdir=wd, fps=1.0)
+    b = ingest(str(_clip(tmp_path, "b.mp4", _COLORS_B)), workdir=wd, fps=1.0)
+    obs = ObservationStore(Workspace(wd).catalog_db)
+    try:
+        obs.replace(a.video.id, "k", [(0.0, "a1"), (1.0, "a2")])
+        obs.replace(b.video.id, "k", [(0.0, "b1")])
+        assert obs.purge(a.video.id) == 2          # a's two rows deleted
+        assert obs.load(a.video.id, "k") == []      # a gone
+        assert obs.load(b.video.id, "k") == [(0.0, "b1")]   # b untouched
+    finally:
+        obs.close()
 
 
 def test_skip_pointer_carries_recorded_fps(tmp_path, capsys):

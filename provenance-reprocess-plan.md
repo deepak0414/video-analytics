@@ -202,3 +202,17 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   first), so a `va serve` reader racing a rebuild can't cache an empty/torn shard under the final mtime.
   *Possible future hardening (deferred): refuse a stub-over-real-tagged shard overwrite from the shard
   tag, as defense-in-depth beyond `--yes` — deferred to avoid hardcoding which embedder ids are "stub".*
+- **2026-07-31:** **RPRC-1c: `vlm_captioner` wired — RPRC-1 role reprocessors COMPLETE (text, visual,
+  caption).** *(Sub-item DEFERRED: RPRC-1's "give each embedder a `model_id` property" is not done —
+  config-driven reprocess tags shards correctly via `embedder_id`, but an INJECTED embedder without a
+  `model_id` still tags `unknown` (honest — TAG-3 skips it — per `text_index.py`). Add the property when
+  an injected-embedder reprocess path actually needs exact tags.)*
+  `_reprocess_vlm_captioner` re-captions each segment's keyframe into `segments.caption`
+  (caption-all-first, so a captioner failure overwrites nothing), then propagates to the two caption
+  dependents so the new captions actually surface: **rebuilds the text index** (captions are a text
+  modality — skipping it would leave text search on the OLD captions) and **purges the deep-scan
+  `observations` cache** (`ObservationStore.purge`; its sweep uses the captioner — the D6 note). This is
+  the first wired role WITH dependents, so it does the R4→text_embedder / R4→deep-scan propagation
+  inline; RPRC-2 will formalize dependency-aware invalidation for the rest (R1→R4/5/6/7, R5→R6, R8→R9)
+  and can dedupe the text-index rebuild when both caption and text_embedder are stale (today they'd each
+  rebuild it — redundant but correct). `tests/test_reprocess.py`. Next: **RPRC-2**, then the pillar-B PR.

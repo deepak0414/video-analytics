@@ -7,6 +7,7 @@ Persisted as a .npz (vectors) + .json (payloads) under the workdir.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ from typing import Any
 import numpy as np
 
 from .base import VectorHit
+
+logger = logging.getLogger(__name__)
 
 
 def swap_shard(tmp_path: str | Path, final_path: str | Path) -> None:
@@ -52,6 +55,19 @@ class NumpyFlatVectorStore:
             if "meta" in npz.files:  # identity tag; absent on pre-tagging shards
                 self._meta = json.loads(npz["meta"].item())
             self._payloads = json.loads(self._payload_file.read_text())
+            if self._vecs.shape[0] != len(self._payloads):
+                # The two files don't correspond — a torn read racing the two-file shard swap
+                # (new .json paired with the not-yet-swapped old .npz) or a corrupt shard.
+                # Serving it would return hits whose payload belongs to a DIFFERENT vector, so
+                # read as EMPTY instead; the matching pair lands on the next load (npz swap
+                # last -> its mtime bump invalidates any cache of this empty read). WARN so a
+                # PERSISTENT mismatch (real corruption, not a transient swap race) is visible
+                # rather than silently dropping the video from search.
+                logger.warning(
+                    "shard %s: %d vectors but %d payloads — reading as empty (torn swap or "
+                    "corrupt shard); if this persists, rebuild via `va reprocess`/`va reingest`",
+                    self.path, self._vecs.shape[0], len(self._payloads))
+                self._vecs, self._payloads, self._meta = None, [], None
 
     def persist(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

@@ -54,6 +54,21 @@ def test_persist_writes_payloads_before_vectors(tmp_path, monkeypatch):
     assert order == ["json", "npz"]         # payloads first, vectors (cache key) last
 
 
+def test_load_rejects_mismatched_vector_payload_counts(tmp_path):
+    # a torn read (new .json + not-yet-swapped old .npz) or a corrupt shard must read as EMPTY,
+    # not serve hits whose payload belongs to a DIFFERENT vector.
+    import json
+
+    store = NumpyFlatVectorStore(tmp_path / "s")
+    store.add(np.eye(3, dtype=np.float32), [{"id": "a"}, {"id": "b"}, {"id": "c"}])
+    store.persist()
+    (tmp_path / "s.json").write_text(json.dumps([{"id": "a"}]))   # 1 payload vs 3 vectors
+
+    reloaded = NumpyFlatVectorStore(tmp_path / "s")
+    assert reloaded.count() == 0
+    assert reloaded.search(np.ones(3, dtype=np.float32), k=5) == []
+
+
 def test_shard_cache_reuses_and_invalidates(tmp_path):
     import os
 

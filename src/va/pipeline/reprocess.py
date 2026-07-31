@@ -3,8 +3,8 @@
 `plan_reprocess` resolves WHICH (video, role) pairs a reprocess would touch — the stale
 set from PROV-4 (`stale_report`), scoped by role/video/all-stale — WITHOUT mutating.
 `execute_reprocess` then re-runs each stale role that has an in-place reprocessor and
-restamps its provenance. `text_embedder` and `visual_embedder` are wired so far
-(`reprocessable_roles()`); every other stale role is left for whole-video `va reingest`
+restamps its provenance. `text_embedder`, `visual_embedder`, and `vlm_captioner` are wired
+so far (`reprocessable_roles()`); every other stale role is left for whole-video `va reingest`
 (D5 scope cap). The CLI runs the plan on `--dry-run` and executes otherwise.
 """
 from __future__ import annotations
@@ -98,7 +98,7 @@ def _reprocess_text_embedder(workdir: str, video_id: str) -> int:
     return n
 
 
-def reindex_visual(video, video_dir, fps: float, embedder=None) -> int:
+def reindex_visual(video, video_dir, fps: float, catalog_db=None, embedder=None) -> int:
     """(Re)build the visual `vectors` shard: re-sample frames at `fps` and re-embed.
 
     Builds to a TEMP shard and swaps it in only on full success, so a failed re-embed (e.g.
@@ -143,6 +143,22 @@ def reindex_visual(video, video_dir, fps: float, embedder=None) -> int:
             f"not replacing the existing shard")
     store.set_meta({"embedder": tag})
     store.persist()
+    if catalog_db is not None:
+        # A concurrent `va remove` during the (long) re-embed deletes the catalog row + dir;
+        # persist() just mkdir'd the dir back. Re-check RIGHT BEFORE the swap — swapping now
+        # would resurrect the removed video in visual search. If it's gone, drop the temp and
+        # fail (role stays stale, no restamp), leaving no `vectors.npz` behind.
+        cat = Catalog(catalog_db)
+        try:
+            still_present = cat.get(video.id) is not None
+        finally:
+            cat.close()
+        if not still_present:
+            for suf in (".npz", ".json"):
+                p = tmp.with_suffix(suf)
+                if p.exists():
+                    p.unlink()
+            raise ValueError(f"video {video.id} was removed during reprocess — aborting re-embed")
     swap_shard(tmp, vdir / "vectors")  # swap in only now that the rebuild fully succeeded
     return n
 
@@ -178,12 +194,70 @@ def _reprocess_visual_embedder(workdir: str, video_id: str) -> int:
         raise ValueError(
             f"video {video_id} recorded visual fps is unknown — density can't be preserved; "
             f"use `va reingest {video_id} --fps <N>`")
-    return reindex_visual(video, ws.video_dir(video.source_key, video.title), fps)
+    return reindex_visual(video, ws.video_dir(video.source_key, video.title), fps,
+                          catalog_db=ws.catalog_db)
+
+
+def _reprocess_vlm_captioner(workdir: str, video_id: str) -> int:
+    from pathlib import Path
+
+    from va.media.frames import keyframes_for_spans
+    from va.pipeline.paths import Workspace
+    from va.pipeline.text_index import backfill_text_index
+    from va.registry import get_vlm_captioner
+    from va.storage.structured.observations import ObservationStore
+    from va.storage.structured.segments import SegmentStore
+
+    ws = Workspace(workdir)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, video_id)
+    finally:
+        cat.close()
+    if video is None:
+        raise ValueError(f"video {video_id} not found — cannot reprocess vlm_captioner")
+    if not video.local_path or not Path(video.local_path).exists():
+        raise ValueError(
+            f"video {video_id} media is not available locally ({video.local_path!r}) — "
+            f"cannot re-caption; use `va reingest`")
+
+    seg_store = SegmentStore(ws.catalog_db)
+    try:
+        segments = seg_store.get_segments(video.id)
+        spans = [(s.start_time, s.end_time) for s in segments]
+        keyframes = keyframes_for_spans(video.local_path, spans, per_segment=1)
+        captioner = get_vlm_captioner()
+        # Caption ALL segments first, THEN write — so a captioner failure mid-run leaves the
+        # existing captions intact (nothing half-written), the same durability as the shard
+        # rebuilds. On failure the role stays stale (not restamped) and retries cleanly.
+        new_caps = [(s.id, captioner.caption(kf)) for s, kf in zip(segments, keyframes)]
+        for seg_id, cap in new_caps:
+            seg_store.set_caption(seg_id, cap)
+    finally:
+        seg_store.close()
+
+    # Captions feed two dependents — propagate to both so the new captions actually surface
+    # (skipping this would leave text search + `va ask` on the OLD captions after a re-caption):
+    #  - the text index (captions are one of its modalities) -> rebuild it in place
+    #  - the deep-scan `observations` cache (its sweep uses the captioner) -> purge it so the
+    #    next `va ask` re-sweeps instead of serving old-model micro-captions (D6).
+    if backfill_text_index(workdir, video_id) is None:
+        # the video was removed mid-run (a concurrent `va remove`): its segments/shard are gone
+        # and backfill's lookup returned None. Do NOT restamp a purged video — raise so the role
+        # routes to `failed` and stays stale (matches _reprocess_text_embedder's None-check).
+        raise ValueError(f"video {video_id} not found — removed during reprocess")
+    obs = ObservationStore(ws.catalog_db)
+    try:
+        obs.purge(video.id)
+    finally:
+        obs.close()
+    return len(new_caps)
 
 
 _REPROCESSORS = {
     "text_embedder": _reprocess_text_embedder,
     "visual_embedder": _reprocess_visual_embedder,
+    "vlm_captioner": _reprocess_vlm_captioner,
 }
 
 
@@ -207,7 +281,7 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
              "failed": [(video_id, role, error)]}.
     """
     from va.provenance import role_fingerprint
-    from va.runtime.trace import current_run_id
+    from va.runtime.trace import current_run_id, traced_run
     from va.storage.structured.provenance_store import ProvenanceStore
 
     ws = Workspace(workdir)
@@ -219,27 +293,30 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
     reprocessed: list = []
     skipped: list = []
     failed: list = []
-    pv = ProvenanceStore(ws.catalog_db)  # one connection for the whole batch; restamps only
-    try:
-        for item in plan:
-            vid = item["video_id"]
-            for r in item["stale_roles"]:
-                fn = _REPROCESSORS.get(r)
-                if fn is None:
-                    skipped.append((vid, r))  # no in-place reprocess -> `va reingest`
-                    continue
-                try:
-                    n = fn(workdir, vid)
-                except Exception as e:  # noqa: BLE001 — one role's failure must not abort the batch
-                    failed.append((vid, r, str(e)))
-                    continue  # NO restamp -> stays stale -> retried next run
-                # Restamp AFTER the rows are written (atomic at the provenance level).
-                ident = role_fingerprint(r, cfg)
-                prev = pv.get(vid, r)
-                fps = prev[0]["fps"] if prev else None  # preserve the recorded ingest fps
-                pv.record(vid, r, ident["model"], ident["fingerprint"],
-                          fps=fps, run_id=current_run_id(), row_count=n)
-                reprocessed.append((vid, r, n))
-    finally:
-        pv.close()
+    # traced_run gives the batch a run id, recorded on each restamp so a reprocess can be
+    # correlated to its trace like an ingest (a no-op when tracing is off — run_id stays None).
+    with traced_run("reprocess", workdir):
+        pv = ProvenanceStore(ws.catalog_db)  # one connection for the whole batch; restamps only
+        try:
+            for item in plan:
+                vid = item["video_id"]
+                for r in item["stale_roles"]:
+                    fn = _REPROCESSORS.get(r)
+                    if fn is None:
+                        skipped.append((vid, r))  # no in-place reprocess -> `va reingest`
+                        continue
+                    try:
+                        n = fn(workdir, vid)
+                    except Exception as e:  # noqa: BLE001 — one role's failure must not abort the batch
+                        failed.append((vid, r, str(e)))
+                        continue  # NO restamp -> stays stale -> retried next run
+                    # Restamp AFTER the rows are written (atomic at the provenance level).
+                    ident = role_fingerprint(r, cfg)
+                    prev = pv.get(vid, r)
+                    fps = prev[0]["fps"] if prev else None  # preserve the recorded ingest fps
+                    pv.record(vid, r, ident["model"], ident["fingerprint"],
+                              fps=fps, run_id=current_run_id(), row_count=n)
+                    reprocessed.append((vid, r, n))
+        finally:
+            pv.close()
     return {"reprocessed": reprocessed, "skipped": skipped, "failed": failed}

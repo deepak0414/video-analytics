@@ -346,10 +346,20 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   reader racing a rebuild now sees either the old pair or the fully-new pair — never an empty/torn shard
   cached under the final mtime (which would have dropped a video from search until restart). **For the
   web agent (`va serve`):** queries concurrent with `va reprocess`/`reingest` are now safe against that
-  persistent-empty-shard race; a torn read during the visual two-file swap is at worst a transient error
-  that self-heals on the next query (the `.npz` mtime bump invalidates the cache). No API change.
+  persistent-empty-shard race. A torn read during the two-file swap (new `.json` + old `.npz`) is now
+  caught by a vector/payload length check in `_load` — a mismatched pair reads as EMPTY (not misaligned
+  hits) and self-heals on the next query (the `.npz` mtime bump invalidates it). The only residual is a
+  same-COUNT content mismatch in that microsecond window, which the length check can't see. No API change.
 - **2026-07-31 (durability — text shard):** `index_text` now builds to a temp shard and swaps via the
   shared `numpy_flat.swap_shard` (same as `reindex_visual`), replacing the earlier embed-before-unlink
   approach. So a failure ANYWHERE in a text rebuild — embed, a disk-full in `np.savez`, a process kill —
   now leaves the prior `text_vectors` shard intact (the RPRC-1a "leaves the prior shard" claim held only
   for pre-unlink failures before this). Affects ingest's text index too, not just reprocess. No API change.
+- **2026-07-31 (WRITE PATH — pillar B RPRC-1c):** `va reprocess` now also re-runs **`vlm_captioner`**
+  (`reprocess._reprocess_vlm_captioner`): re-captions each segment's keyframe and updates
+  `segments.caption` (caption-all-first, so a mid-run failure overwrites nothing), then propagates to
+  the two caption dependents — **rebuilds the `text_vectors` shard** (captions are a text modality) and
+  **purges the deep-scan `observations` cache** for the video (new `ObservationStore.purge`), so the
+  next `va ask` re-sweeps. **For the web agent:** after a caption reprocess a video's `segments.caption`,
+  `text_vectors` shard, AND cached `va ask` sweeps all change together. This completes RPRC-1 (all three
+  standalone-code roles — text, visual, caption — wired); the remaining stale roles still → `va reingest`.

@@ -458,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     prp = sub.add_parser(
         "reprocess",
-        help="re-run stale roles in place (§6-b pillar B; text+visual embedders wired, others → reingest)")
+        help="re-run stale roles in place (§6-b pillar B; text/visual embedders + captioner wired, others → reingest)")
     prp.add_argument("--role", default=None, choices=list(PROVENANCE_ROLES), metavar="ROLE",
                      help=f"restrict to one role (one of: {', '.join(PROVENANCE_ROLES)})")
     # Exactly one video scope — an explicit choice, so a reprocess can never fan out across
