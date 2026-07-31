@@ -312,3 +312,8 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   FIRST `va ask` per previously-cached question on a shared workdir (`.va-shots`, incl. via `va serve`)
   re-runs a multi-minute VLM sweep because the old cache keys no longer match — this is an intentional
   one-time invalidation, not a hang or perf regression. Subsequent asks are cached as before.
+- **2026-07-30 (read helper):** new read-only `va stale [--role R]` (`pipeline/stale.py::stale_report`)
+  lists DONE videos whose recorded provenance fingerprint != the current config's, per role. No shared
+  contract or schema change (it only READS `role_provenance`). **Available if useful to the web agent:**
+  `stale_report(workdir)` returns `[{video_id, source_uri, title, stale_roles}]` — handy for a "videos
+  needing reprocessing" view once pillar B (selective reprocess) lands.

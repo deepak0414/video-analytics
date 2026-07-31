@@ -339,6 +339,56 @@ def test_deep_scan_cache_busts_on_captioner_upgrade(tmp_path, monkeypatch):
     assert third.cached is False and calls["n"] == 4
 
 
+def test_deep_scan_map_cache_busts_on_reasoner_upgrade(tmp_path, monkeypatch):
+    """A reasoner upgrade must RE-RUN normalization, not reuse the OLD reasoner's cached
+    label mapping. Sibling of the captioner-fold test above: that guards prompt_key (the
+    caption sweep); this guards map_key (the normalization mapping). Without the reasoner
+    fingerprint in map_key, switching reasoners on a shared workdir would keep serving
+    code-counted answers normalized by the old model — the missed-stale class §6-b forbids.
+    """
+    video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
+    wd = str(tmp_path / ".va")
+    res = ingest(str(video), workdir=wd, fps=1.0)
+
+    calls = {"n": 0}
+
+    class CountingReasoner:
+        def _chat(self, prompt):
+            calls["n"] += 1
+            # a non-empty mapping so the normalization result is CACHED under map_key
+            return '{"mapping": {"a red scene": "a red scene"}}'
+
+    reasoner = CountingReasoner()
+
+    # run 1: fresh sweep + normalization -> mapping cached under map_key
+    first = deep_scan_video(res.video.id, str(video), "the dominant color",
+                            workdir=wd, reasoner=reasoner)
+    assert first.cached is False and calls["n"] >= 1        # normalization ran
+
+    # run 2: same config -> observations AND map cache hit -> normalization skipped
+    calls["n"] = 0
+    deep_scan_video(res.video.id, str(video), "the dominant color",
+                    workdir=wd, reasoner=reasoner)
+    assert calls["n"] == 0                                  # map_key hit -> no re-normalize
+
+    # run 3: reasoner fingerprint changes (a model switch), captioner UNCHANGED -> the
+    # observations cache still hits (prompt_key stable) but map_key must bust.
+    import va.provenance as provenance
+    real_fp = provenance.role_fingerprint
+
+    def upgraded_fp(role, cfg=None):
+        if role == "reasoner":
+            return {"model": "claude-code", "fingerprint": "reasoner-upgraded0"}
+        return real_fp(role, cfg)
+    monkeypatch.setattr(provenance, "role_fingerprint", upgraded_fp)
+
+    calls["n"] = 0
+    third = deep_scan_video(res.video.id, str(video), "the dominant color",
+                            workdir=wd, reasoner=reasoner)
+    assert third.cached is True                             # captioner fp unchanged -> sweep cached
+    assert calls["n"] >= 1                                  # but map_key changed -> re-normalized
+
+
 def test_ask_uses_deep_scan_end_to_end(tmp_path, monkeypatch):
     video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
     wd = str(tmp_path / ".va")

@@ -146,3 +146,19 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   fingerprint (a missed stale). Deep-scan's `observations` cache keys also fold in the captioner +
   reasoner fingerprints, so a model upgrade re-runs the sweep. `tests/test_provenance_ingest.py`,
   `tests/test_deep_scan.py`. Next: **PROV-4** (`va stale` report).
+- **2026-07-30:** **PROV-4 DONE — pillar A (provenance) COMPLETE.** `va stale [--role R]`
+  (`pipeline/stale.py::stale_report`) lists DONE videos whose recorded fingerprint != the current
+  config's per role (missing/unstamped = stale; non-done videos skipped — they need re-ingest, not a
+  role reprocess). The report prints the active config dir/profile/embedder it compared against, so a
+  forgotten `VA_CONFIG_DIR` (stub vs real) is self-evident before anyone acts on the `va reingest`
+  remedy. Each stale row also surfaces its **recorded ingest fps** (`recorded_fps`): fps is a run arg
+  with no config baseline, so it is REPORTED not compared (staleness stays fingerprint-only), but
+  showing it lets a reprocess preserve the frame density Roles 2/5/6/7 saw — `va reingest` defaults to
+  fps=1.0, so the remedy tells the user to pass `--fps <recorded>`. (Auto-preserving fps across a
+  reprocess is pillar B's job.) `--role` is validated against `PROVENANCE_ROLES` at both the CLI (`choices`) and the library
+  (`ValueError`) so an unstamped role (e.g. the reasoner) or a typo can't silently report every video
+  stale. `tests/test_stale.py`. Read-only; drives pillar B's selective reprocess next.
+  **SCOPE CUT (recorded, not silent):** the PROV-4 spec line names "`va provenance <video>` / `va
+  stale`"; only the corpus-wide `va stale` was built. The per-video `va provenance <video>` inspector
+  is DEFERRED (YAGNI until pillar B needs a single-video drill-down) — the data is already reachable
+  via `ProvenanceStore.get(video_id)`; build the command when B does. Pillar B must NOT assume it exists.
