@@ -76,14 +76,18 @@ def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
     else:
         tag = getattr(embedder, "model_id", None) or "unknown"
     rows = _collect(catalog_db, video_id)
+    # Embed BEFORE touching the existing shard. Embedding is the slow, failure-prone step
+    # (a GPU OOM on a model switch, mid-reprocess), so a failure here must leave the prior
+    # shard INTACT — otherwise a failed rebuild deletes the video's text search until a
+    # retry succeeds. Only replace the files once the new vectors are in hand.
+    vecs = embedder.embed([t for t, _ in rows]) if rows else None
     store_path = Path(video_dir) / "text_vectors"
-    for suf in (".npz", ".json"):  # idempotent: start fresh
+    for suf in (".npz", ".json"):
         p = store_path.with_suffix(suf)
         if p.exists():
             p.unlink()
     store = NumpyFlatVectorStore(store_path)
     if rows:
-        vecs = embedder.embed([t for t, _ in rows])
         store.add(vecs, [p for _, p in rows])
     store.set_meta({"embedder": tag})
     store.persist()

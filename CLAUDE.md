@@ -54,7 +54,7 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
 .venv/bin/va --workdir .va remove "<uuid|source_key|url>"   # delete a video everywhere
 .venv/bin/va --workdir .va reingest "<...>"                 # re-process (model changes)
 .venv/bin/va --workdir .va stale                            # videos on an outdated model/config (§6-b)
-.venv/bin/va --workdir .va reprocess --all-stale --dry-run  # plan re-running stale roles (§6-b pillar B; dry-run only so far)
+.venv/bin/va --workdir .va reprocess --all-stale [--dry-run] # re-run stale roles in place (§6-b pillar B; text_embedder wired, other roles → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use
 VA_CONFIG_DIR=run-siglip/config .venv/bin/va --workdir .va ingest "<url>"

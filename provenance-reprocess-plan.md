@@ -173,3 +173,15 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   silent no-op. The config-header foot-gun guard is shared with `va stale` (`cli._active_config_line`).
   `tests/test_reprocess.py`. Next: **RPRC-1** (per-role re-run entry points: visual/text/caption
   first) then **RPRC-2** (dependency-aware invalidation) to make the plan executable.
+- **2026-07-31:** **RPRC-1a: the executor framework, wired for `text_embedder`.**
+  `reprocess.py::execute_reprocess(workdir, plan)` runs each stale role that has a reprocessor and
+  restamps its provenance — **rows/shard FIRST, provenance SECOND**, so a crash between them leaves the
+  role stale (safe to retry), never falsely current. Resumable: a reprocessor that raises is recorded
+  as failed (no restamp) and does not abort the batch; the restamp preserves the recorded ingest fps.
+  `va reprocess` (no `--dry-run`) now executes: `text_embedder` re-runs in place
+  (`text_index.backfill_text_index` rebuilds + re-tags the `text_vectors` shard); every other stale
+  role is SKIPPED with a `va reingest` pointer (`reprocessable_roles()` is the wired set — D5 scope
+  cap: only roles with standalone code). `tests/test_reprocess.py`. Next: **RPRC-1b** (visual: re-sample
+  + re-embed + re-tag the `vectors` shard), **RPRC-1c** (caption: re-caption segments, then rebuild the
+  text index AND purge the deep-scan `observations` cache — the D6 note), then **RPRC-2**
+  (dependency-aware invalidation: R1→R4/5/6/7, R5→R6, R8→R9).

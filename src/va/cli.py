@@ -276,12 +276,25 @@ def _cmd_reprocess(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("\n(dry run — no changes made)")
         return 0
-    # Execution (RPRC-1) is not built yet; NEVER silently do nothing or pretend success.
-    sys.stdout.flush()  # keep the plan above the refusal even when output is piped
-    print("\nreprocess EXECUTION is not implemented yet (RPRC-1) — NO changes made. Re-run "
-          "with --dry-run to plan, or `va reingest <video> --fps <N>` for a whole-video redo.",
-          file=sys.stderr)
-    return 1
+
+    from va.pipeline.reprocess import execute_reprocess
+
+    # fps to preserve on a reingest fallback (reingest defaults to 1.0 — see va stale remedy)
+    fps_by_vid = {e["video_id"]: e.get("recorded_fps") for e in plan}
+    result = execute_reprocess(args.workdir, plan)
+    print("\nexecuting (rows re-run, then provenance restamped):")
+    for vid, r, n in result["reprocessed"]:
+        print(f"  {vid} · {r}: reprocessed ({n} rows)")
+    for vid, r in result["skipped"]:
+        fps = fps_by_vid.get(vid)
+        fps_arg = f" --fps {fps}" if fps is not None else ""
+        print(f"  {vid} · {r}: skipped — no in-place reprocess yet; "
+              f"run `va reingest {vid}{fps_arg}`")
+    for vid, r, err in result["failed"]:
+        print(f"  {vid} · {r}: FAILED — {err}")
+    nd, ns, nf = len(result["reprocessed"]), len(result["skipped"]), len(result["failed"])
+    print(f"\ndone: {nd} reprocessed, {ns} skipped, {nf} failed")
+    return 1 if nf else 0
 
 
 def _cmd_fixtures(args: argparse.Namespace) -> int:
@@ -432,7 +445,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     prp = sub.add_parser(
         "reprocess",
-        help="plan re-running stale roles on selected videos (§6-b pillar B; dry-run only)")
+        help="re-run stale roles in place (§6-b pillar B; text_embedder wired, others → reingest)")
     prp.add_argument("--role", default=None, choices=list(PROVENANCE_ROLES), metavar="ROLE",
                      help=f"restrict to one role (one of: {', '.join(PROVENANCE_ROLES)})")
     # Exactly one video scope — an explicit choice, so a reprocess can never fan out across
@@ -442,7 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--video", default=None, metavar="IDENT",
                        help="one video by UUID, source_key, URL, or path")
     prp.add_argument("--dry-run", action="store_true",
-                     help="show the plan only (execution is not implemented yet)")
+                     help="plan only — make no changes (otherwise the plan is executed)")
     prp.set_defaults(func=_cmd_reprocess)
 
     pn = sub.add_parser("count", help="distinct object instances (Role 6 tracks)")

@@ -323,3 +323,12 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   (RPRC-1) is not built, so the command can only PLAN (refuses without `--dry-run`). No shared contract
   or schema change. When execution lands it will re-run role rows AND purge the deep-scan `observations`
   cache — a heads-up will follow here before any write path ships.
+- **2026-07-31 (WRITE PATH — pillar B RPRC-1a):** `va reprocess` (without `--dry-run`) now EXECUTES for
+  the first wired role, **`text_embedder`** (`reprocess.py::execute_reprocess`): it rebuilds that
+  video's `text_vectors` shard in place (via `text_index.backfill_text_index`) THEN restamps
+  `role_provenance` — rows first, provenance second, so a crash stays stale (safe to retry). **For the
+  web agent:** on the shared `catalog.db`/workdir, a `text_vectors` shard can now be rebuilt out from
+  under a running `va serve`. `index_text` now embeds BEFORE unlinking the old shard, so a rebuild that
+  fails (e.g. GPU OOM) leaves the prior shard intact; the replace window is just the local `.npz` write,
+  and the shard is idempotent. Only `text_embedder` mutates today; every other stale role is SKIPPED
+  with a `va reingest` pointer (visual/caption reprocessors + the `observations` purge are RPRC-1b/c).

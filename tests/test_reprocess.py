@@ -1,9 +1,13 @@
-"""Batch-reprocess selection (WS-1 §6-b pillar B / RPRC-3 — dry-run front-end).
+"""Batch reprocess — selection (RPRC-3) + execution (RPRC-1a) (WS-1 §6-b pillar B).
 
 `plan_reprocess` resolves the stale (video, role) set scoped by role/video/all-stale,
-read-only. Offline: stub ingest, then poke provenance to simulate a model change. The CLI
-`va reprocess` can only PLAN today — execution (RPRC-1) is gated off.
+read-only; `execute_reprocess` re-runs each wired role and restamps its provenance. Offline:
+stub ingest, then poke provenance to simulate a model change. `va reprocess` executes for
+`text_embedder` (rebuilt in place); every other stale role is skipped with a `va reingest`
+pointer, and `--dry-run` mutates nothing.
 """
+from pathlib import Path
+
 import pytest
 
 from va.media.synth import write_color_video
@@ -117,27 +121,177 @@ def test_non_done_video_scope_flags_reingest_not_current(tmp_path):
         plan_reprocess(wd, video=str(res.video.id))
 
 
-def test_cli_execution_is_gated_off(tmp_path, capsys):
+def test_execute_reprocesses_text_embedder_and_clears_stale(tmp_path):
+    # the wired role (text_embedder) re-runs in place and its provenance is restamped, so it
+    # is no longer stale afterward — with rows/shard written BEFORE the restamp.
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")     # fake old fingerprint
+
+    plan = plan_reprocess(wd, all_stale=True)
+    assert plan and "text_embedder" in plan[0]["stale_roles"]
+    result = execute_reprocess(wd, plan)
+
+    assert [x[:2] for x in result["reprocessed"]] == [(str(res.video.id), "text_embedder")]
+    assert not result["skipped"] and not result["failed"]
+    assert plan_reprocess(wd, all_stale=True, role="text_embedder") == []   # now current
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        assert pv.get(res.video.id, "text_embedder")[0]["fps"] == 2.0   # restamp PRESERVED fps
+    finally:
+        pv.close()
+
+
+def test_execute_skips_role_without_in_place_reprocess(tmp_path):
+    # ocr has no reprocessor -> skipped (NOT restamped), so it stays stale for `va reingest`.
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="ocr")
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert (str(res.video.id), "ocr") in result["skipped"]
+    assert not result["reprocessed"]
+    assert plan_reprocess(wd, all_stale=True, role="ocr")   # still stale (untouched)
+
+
+def test_execute_failure_leaves_role_stale(tmp_path, monkeypatch):
+    # a reprocessor that raises must NOT restamp (else stale data reads as current) and must
+    # NOT abort the batch — the role stays stale, safe to retry.
+    import va.pipeline.reprocess as rp
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+
+    def boom(workdir, video_id):
+        raise RuntimeError("embed boom")
+    monkeypatch.setitem(rp._REPROCESSORS, "text_embedder", boom)
+
+    result = rp.execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert result["failed"] and not result["reprocessed"]
+    assert plan_reprocess(wd, all_stale=True, role="text_embedder")   # still stale (not restamped)
+
+
+def test_execute_on_removed_video_fails_without_resurrecting_provenance(tmp_path):
+    # video removed between plan and execute: backfill can't resolve it -> the role must FAIL,
+    # and NO provenance is restamped (a 0-row "success" would resurrect a purged row current).
+    from va.pipeline.manage import remove_video
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+    plan = plan_reprocess(wd, all_stale=True)         # captured while the video exists
+    remove_video(wd, str(res.video.id))               # ...then it's gone
+
+    result = execute_reprocess(wd, plan)
+    assert result["failed"] and not result["reprocessed"]
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        assert pv.get(res.video.id) == []             # NOT resurrected
+    finally:
+        pv.close()
+
+
+def test_restamp_uses_one_batch_pinned_config(tmp_path, monkeypatch):
+    # every restamp must fingerprint against ONE config pinned at batch start, not a fresh
+    # load per (video, role) — else a mid-batch config edit stamps a fingerprint that drifted
+    # from what the reprocessor ran under (a missed stale; PROV-3's lesson).
+    import va.pipeline.reprocess as rp
+    import va.provenance as provenance
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+
+    pinned = object()
+    monkeypatch.setattr(rp, "load_config", lambda: pinned)
+    seen = []
+    real_fp = provenance.role_fingerprint
+    monkeypatch.setattr(provenance, "role_fingerprint",
+                        lambda role, cfg=None: seen.append(cfg) or real_fp(role))
+    rp.execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert seen and all(c is pinned for c in seen)    # the pinned cfg, never a fresh load
+
+
+def test_failed_text_rebuild_preserves_the_old_shard(tmp_path):
+    # index_text embeds BEFORE unlinking, so a rebuild that fails at embed() (e.g. GPU OOM on
+    # a model switch) leaves the prior text_vectors shard intact — text search keeps working
+    # until a retry succeeds, rather than going silently empty.
+    from va.pipeline.paths import Workspace
+    from va.pipeline.text_index import index_text
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    vdir = ws.video_dir(res.video.source_key, res.video.title)
+    shard = Path(vdir) / "text_vectors.npz"
+    assert shard.exists()
+    before = shard.read_bytes()
+
+    class _BoomEmbedder:
+        model_id = "boom"
+
+        def embed(self, texts):
+            raise RuntimeError("OOM")
+
+    with pytest.raises(RuntimeError):
+        index_text(res.video.id, vdir, ws.catalog_db, embedder=_BoomEmbedder())
+    assert shard.exists() and shard.read_bytes() == before   # old shard untouched
+
+
+def test_skip_pointer_carries_recorded_fps(tmp_path, capsys):
     from va.cli import build_parser
 
     wd = str(tmp_path / ".va")
-    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=2.0)
-    _make_stale(wd, res.video.id)
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=2.0)   # all roles fps=2.0
+    _make_stale(wd, res.video.id, role="ocr")                # poke keeps fps=2.0 -> known
     parser = build_parser()
 
-    # no --dry-run: the plan is shown, but execution REFUSES (rc=1) — never a silent no-op
     args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale"])
+    args.func(args)
+    cap = capsys.readouterr()
+    # the reingest pointer must preserve density (reingest defaults to 1.0)
+    assert "va reingest" in cap.out and "--fps 2.0" in cap.out
+
+
+def test_cli_executes_supported_and_skips_unsupported(tmp_path, capsys):
+    from va.cli import build_parser
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+    _make_stale(wd, res.video.id, role="ocr")                # one wired, one not
+    parser = build_parser()
+
+    args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale"])   # execute
     rc = args.func(args)
     cap = capsys.readouterr()
-    assert rc == 1
-    assert "not implemented" in (cap.out + cap.err)
-    assert "ocr" in cap.out                          # plan still printed
+    assert rc == 0
+    assert "text_embedder: reprocessed" in cap.out
+    assert "ocr: skipped" in cap.out and "reingest" in cap.out
+    # text_embedder now current; ocr still stale
+    assert plan_reprocess(wd, all_stale=True, role="text_embedder") == []
+    assert plan_reprocess(wd, all_stale=True, role="ocr")
 
-    # --dry-run: rc=0 and a clear no-changes notice
+
+def test_cli_dry_run_mutates_nothing(tmp_path, capsys):
+    from va.cli import build_parser
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    _make_stale(wd, res.video.id, role="text_embedder")
+    parser = build_parser()
+
     args = parser.parse_args(["--workdir", wd, "reprocess", "--all-stale", "--dry-run"])
     rc = args.func(args)
     cap = capsys.readouterr()
     assert rc == 0 and "dry run" in cap.out
+    assert plan_reprocess(wd, all_stale=True, role="text_embedder")   # unchanged -> still stale
 
 
 def test_cli_requires_a_scope():
