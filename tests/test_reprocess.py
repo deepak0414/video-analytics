@@ -242,6 +242,56 @@ def test_visual_reembed_aborts_swap_if_video_removed_midway(tmp_path):
     assert not (Path(vdir) / "vectors.npz").exists()    # shard NOT resurrected
 
 
+def test_text_rebuild_aborts_swap_if_video_removed_midway(tmp_path):
+    # the text path has the SAME removed-mid-rebuild guard as reindex_visual — a `va remove`
+    # during the embed must abort the swap, leaving no text_vectors.npz to ghost in search.
+    from va.pipeline.manage import lookup_video, remove_video
+    from va.pipeline.paths import Workspace
+    from va.pipeline.text_index import index_text
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, str(res.video.id))
+    finally:
+        cat.close()
+    vdir = ws.video_dir(video.source_key, video.title)
+    remove_video(wd, str(res.video.id))
+
+    with pytest.raises(ValueError, match="removed during reprocess"):
+        index_text(video.id, vdir, ws.catalog_db, verify_exists=True)   # the reprocess path
+    assert not (Path(vdir) / "text_vectors.npz").exists()   # shard NOT resurrected
+
+
+def test_visual_reembed_preserves_frame_count_and_timestamps(tmp_path):
+    # the "preserve the recorded density" claim: re-embedding at the recorded fps produces the
+    # SAME frames (count + timestamps) as the original ingest — guards against an fps/stride
+    # change silently shifting every re-embedded moment.
+    from va.pipeline.manage import lookup_video
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import reindex_visual
+    from va.storage.structured.catalog_sqlite import Catalog
+    from va.storage.vector.numpy_flat import NumpyFlatVectorStore
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    ws = Workspace(wd)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, str(res.video.id))
+    finally:
+        cat.close()
+    vdir = ws.video_dir(video.source_key, video.title)
+    ts_before = sorted(p["timestamp"] for p in NumpyFlatVectorStore(Path(vdir) / "vectors")._payloads)
+
+    reindex_visual(video, vdir, fps=1.0)                    # same fps as ingest
+    ts_after = sorted(p["timestamp"] for p in NumpyFlatVectorStore(Path(vdir) / "vectors")._payloads)
+    assert ts_after and ts_after == ts_before              # same frame set -> same timestamps
+
+
 def test_caption_reprocess_fails_when_backfill_reports_removed(tmp_path, monkeypatch):
     # backfill returning None (video removed mid-run) must fail the captioner role, not restamp.
     import va.pipeline.text_index as txt
@@ -438,6 +488,54 @@ def test_visual_reembed_zero_frames_raises_and_preserves_shard(tmp_path, monkeyp
     with pytest.raises(ValueError, match="0 frames"):
         reindex_visual(video, vdir, fps=1.0)
     assert shard.read_bytes() == before                             # old shard intact
+
+
+def test_caption_and_text_stale_dedupes_text_index_rebuild(tmp_path, monkeypatch):
+    # RPRC-2: when vlm_captioner AND text_embedder are both stale, re-captioning already rebuilds
+    # the text index with the current embedder, so text_embedder is restamped via the dependency
+    # instead of rebuilding the index a second time.
+    import va.pipeline.text_index as txt
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        pv.record(res.video.id, "vlm_captioner", "old", "STALE-C", fps=1.0)
+        pv.record(res.video.id, "text_embedder", "old", "STALE-T", fps=1.0)
+    finally:
+        pv.close()
+
+    calls = {"n": 0}
+    real = txt.backfill_text_index
+    monkeypatch.setattr(txt, "backfill_text_index",
+                        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), real(*a, **k))[-1])
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    assert calls["n"] == 1                              # ONE text-index rebuild, not two
+    done = {r: n for _, r, n in result["reprocessed"]}
+    assert "vlm_captioner" in done and done["text_embedder"] is None  # text restamped via dependency
+    assert plan_reprocess(wd, all_stale=True) == []    # both now current
+
+
+def test_text_embedder_alone_is_not_deduped(tmp_path):
+    # dedup only applies when the provider (caption) is ALSO in the batch; text_embedder stale by
+    # itself rebuilds normally.
+    from va.pipeline.paths import Workspace
+    from va.pipeline.reprocess import execute_reprocess
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    pv = ProvenanceStore(Workspace(wd).catalog_db)
+    try:
+        pv.record(res.video.id, "text_embedder", "old", "STALE-T", fps=1.0)
+    finally:
+        pv.close()
+
+    result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
+    done = {r: n for _, r, n in result["reprocessed"]}
+    assert done.get("text_embedder") is not None       # actually rebuilt (real row count)
 
 
 def test_execute_reprocesses_vlm_captioner_clears_stale_and_purges_observations(tmp_path):

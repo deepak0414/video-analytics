@@ -355,6 +355,12 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   approach. So a failure ANYWHERE in a text rebuild — embed, a disk-full in `np.savez`, a process kill —
   now leaves the prior `text_vectors` shard intact (the RPRC-1a "leaves the prior shard" claim held only
   for pre-unlink failures before this). Affects ingest's text index too, not just reprocess. No API change.
+- **2026-07-31 (pillar B COMPLETE — RPRC-2):** `va reprocess` is now dependency-aware: when a role's
+  reprocess also rebuilds a dependent's artifact, the dependent is restamped without a redundant rebuild
+  (one active edge: re-captioning rebuilds the text index, so a stale `text_embedder` is restamped, not
+  rebuilt again — shown as "restamped (rebuilt via a dependency)"). Internal optimization; no contract
+  change. Pillar B (§6-b: find-stale via `va stale` → re-run in place via `va reprocess`) is complete
+  for the three standalone-code roles (text/visual embedders, captioner); leaf roles remain `va reingest`.
 - **2026-07-31 (WRITE PATH — pillar B RPRC-1c):** `va reprocess` now also re-runs **`vlm_captioner`**
   (`reprocess._reprocess_vlm_captioner`): re-captions each segment's keyframe and updates
   `segments.caption` (caption-all-first, so a mid-run failure overwrites nothing), then propagates to

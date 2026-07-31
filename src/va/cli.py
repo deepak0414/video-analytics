@@ -297,7 +297,8 @@ def _cmd_reprocess(args: argparse.Namespace) -> int:
     result = execute_reprocess(args.workdir, plan)
     print("\nexecuting (rows re-run, then provenance restamped):")
     for vid, r, n in result["reprocessed"]:
-        print(f"  {vid} · {r}: reprocessed ({n} rows)")
+        detail = f"reprocessed ({n} rows)" if n is not None else "restamped (rebuilt via a dependency)"
+        print(f"  {vid} · {r}: {detail}")
     for vid, r in result["skipped"]:
         fps = fps_by_vid.get(vid)
         fps_arg = f" --fps {fps}" if fps is not None else ""

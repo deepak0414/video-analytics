@@ -5,7 +5,9 @@ set from PROV-4 (`stale_report`), scoped by role/video/all-stale — WITHOUT mut
 `execute_reprocess` then re-runs each stale role that has an in-place reprocessor and
 restamps its provenance. `text_embedder`, `visual_embedder`, and `vlm_captioner` are wired
 so far (`reprocessable_roles()`); every other stale role is left for whole-video `va reingest`
-(D5 scope cap). The CLI runs the plan on `--dry-run` and executes otherwise.
+(D5 scope cap). The CLI runs the plan on `--dry-run` and executes otherwise. Dependency-aware
+(RPRC-2, `_SATISFIES`): when a provider's reprocess also rebuilds a dependent's artifact (re-
+captioning rebuilds the text index), the dependent is restamped without a redundant rebuild.
 """
 from __future__ import annotations
 
@@ -260,6 +262,23 @@ _REPROCESSORS = {
     "vlm_captioner": _reprocess_vlm_captioner,
 }
 
+# RPRC-2 dependency-aware invalidation. `_SATISFIES[provider]` = roles whose derived artifact the
+# provider's reprocess ALSO rebuilds, so they need only a restamp — not a redundant rebuild — when
+# both are stale in the same batch. One edge is active for in-place reprocess: re-captioning
+# (`vlm_captioner`) rebuilds the text index, bringing `text_embedder` current. The rest of the role
+# graph (R1->R4/5/6/7, R5->R6, R8->R9) involves roles that aren't in-place reprocessable — they go
+# through whole-video `va reingest`, which re-runs the pipeline and satisfies those deps wholesale.
+_SATISFIES = {
+    "vlm_captioner": frozenset({"text_embedder"}),
+}
+
+
+def _dependency_ordered(roles):
+    """Stale roles with dependency PROVIDERS first, so a provider's rebuild can satisfy its
+    dependents within the same batch (a light topological order; one active edge today:
+    vlm_captioner -> text_embedder)."""
+    return sorted(roles, key=lambda r: 0 if r in _SATISFIES else 1)
+
 
 def reprocessable_roles() -> frozenset:
     """Roles `va reprocess` can currently re-run in place; the rest need `va reingest`."""
@@ -300,16 +319,24 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
         try:
             for item in plan:
                 vid = item["video_id"]
-                for r in item["stale_roles"]:
-                    fn = _REPROCESSORS.get(r)
-                    if fn is None:
-                        skipped.append((vid, r))  # no in-place reprocess -> `va reingest`
-                        continue
-                    try:
-                        n = fn(workdir, vid)
-                    except Exception as e:  # noqa: BLE001 — one role's failure must not abort the batch
-                        failed.append((vid, r, str(e)))
-                        continue  # NO restamp -> stays stale -> retried next run
+                satisfied: set = set()  # roles a provider already rebuilt for THIS video (RPRC-2)
+                for r in _dependency_ordered(item["stale_roles"]):
+                    if r in satisfied:
+                        # a provider (e.g. re-caption rebuilds the text index) already brought this
+                        # role's artifact current with the current model -> restamp only, skip the
+                        # redundant rebuild. n=None marks "rebuilt via a dependency".
+                        n = None
+                    else:
+                        fn = _REPROCESSORS.get(r)
+                        if fn is None:
+                            skipped.append((vid, r))  # no in-place reprocess -> `va reingest`
+                            continue
+                        try:
+                            n = fn(workdir, vid)
+                        except Exception as e:  # noqa: BLE001 — one role's failure must not abort the batch
+                            failed.append((vid, r, str(e)))
+                            continue  # NO restamp -> stays stale -> retried next run
+                        satisfied |= _SATISFIES.get(r, frozenset())  # this run rebuilt dependents too
                     # Restamp AFTER the rows are written (atomic at the provenance level).
                     ident = role_fingerprint(r, cfg)
                     prev = pv.get(vid, r)

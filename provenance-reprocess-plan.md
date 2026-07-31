@@ -216,3 +216,22 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   inline; RPRC-2 will formalize dependency-aware invalidation for the rest (R1→R4/5/6/7, R5→R6, R8→R9)
   and can dedupe the text-index rebuild when both caption and text_embedder are stale (today they'd each
   rebuild it — redundant but correct). `tests/test_reprocess.py`. Next: **RPRC-2**, then the pillar-B PR.
+- **2026-07-31:** **RPRC-2: dependency-aware invalidation — pillar B COMPLETE.** `_SATISFIES` +
+  `_dependency_ordered` in `execute_reprocess`: a provider whose reprocess also rebuilds a dependent's
+  artifact restamps that dependent WITHOUT a redundant rebuild. Only one edge is active for in-place
+  reprocess — `vlm_captioner`→`text_embedder` (re-captioning rebuilds the text index) — so when both are
+  stale, caption runs (providers ordered first) and text_embedder is restamped current, not rebuilt a
+  second time (`tests/test_reprocess.py`; CLI shows "restamped (rebuilt via a dependency)"). **The rest
+  of the role graph (R1→R4/5/6/7, R5→R6, R8→R9) needs no handling here:** those roles aren't in-place
+  reprocessable (D5), so they go through whole-video `va reingest`, which re-runs the pipeline and
+  satisfies those dependencies wholesale. Pillar B (find-stale → reprocess) is done for the three
+  standalone-code roles; leaf roles remain `va reingest`. Next: the pillar-B PR.
+- **VALIDATION GAP (must close before production reprocessing):** the in-place reprocess WRITE path
+  (`reindex_visual`, `index_text` rebuild, re-caption) is validated only on the STUB combination. Its
+  first real use — reprocessing a SigLIP/Qwen `.va-shots` workdir after a model switch — exercises real
+  ModelManager loading, real embed batching, and golden-query relevance for the FIRST time, where a
+  silent breakage costs hours of GPU. The offline golden gate tests QUERIES, not reprocess execution, so
+  it does not cover this. **Before relying on `va reprocess` in production, run a real-model smoke:**
+  `VA_CONFIG_DIR=run-siglip/config va --workdir .va-shots reprocess --video <id> --role visual_embedder
+  --yes` on a stale video, then re-run the golden queries and confirm relevance survived. The pillar-B
+  PR's `golden-verified` evidence should include this reprocess smoke, not just the query golden run.

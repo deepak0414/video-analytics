@@ -63,7 +63,7 @@ def _collect(catalog_db, video_id) -> list[tuple[str, dict]]:
     return rows
 
 
-def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
+def index_text(video_id, video_dir, catalog_db, embedder=None, verify_exists=False) -> int:
     """(Re)build the `text_vectors` shard for one video. Returns rows indexed."""
     # Tag the shard with the embedder that ACTUALLY produced the vectors: from
     # config on the normal path; an INJECTED embedder must declare its own
@@ -92,6 +92,26 @@ def index_text(video_id, video_dir, catalog_db, embedder=None) -> int:
         store.add(vecs, [p for _, p in rows])
     store.set_meta({"embedder": tag})
     store.persist()
+    # On the REPROCESS path (verify_exists — set by backfill_text_index), a concurrent `va remove`
+    # during the embed deletes the catalog row + dir; persist() just recreated the dir. Re-check
+    # right before the swap (as reindex_visual does) — swapping now would resurrect the removed
+    # video in text search. Off by default: ingest's video always exists, and callers that index a
+    # synthetic/uncataloged id (tagging tests) must not be rejected.
+    if verify_exists:
+        from va.storage.structured.catalog_sqlite import Catalog
+
+        cat = Catalog(catalog_db)
+        try:
+            removed = cat.get(video_id) is None
+        finally:
+            cat.close()
+        if removed:
+            for suf in (".npz", ".json"):
+                p = tmp.with_suffix(suf)
+                if p.exists():
+                    p.unlink()
+            raise ValueError(
+                f"video {video_id} was removed during reprocess — aborting text rebuild")
     swap_shard(tmp, base)
     return len(rows)
 
@@ -111,4 +131,6 @@ def backfill_text_index(workdir: str, ident: str, embedder=None) -> Optional[int
     if v is None:
         return None
     vdir = ws.video_dir(v.source_key, v.title, create=True)
-    return index_text(v.id, vdir, ws.catalog_db, embedder)
+    # verify_exists: this is the reprocess/backfill path, so guard against a concurrent
+    # `va remove` landing during the (possibly long) rebuild.
+    return index_text(v.id, vdir, ws.catalog_db, embedder, verify_exists=True)
