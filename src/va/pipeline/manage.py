@@ -21,10 +21,11 @@ from va.contracts.video import SourceType, Video
 from va.pipeline.paths import Workspace
 from va.storage.structured.catalog_sqlite import Catalog
 
-# every per-role table keyed by video_id (schema.py)
+# every per-role table keyed by video_id (schema.py) — `va remove` purges each so a
+# video is deleted EVERYWHERE (incl. §6-b provenance; else `va stale`/reprocess ghost it)
 _ROLE_TABLES = [
     "segments", "transcripts", "object_detections", "object_tracks",
-    "action_events", "ocr_results", "observations",
+    "action_events", "ocr_results", "observations", "role_provenance",
 ]
 
 

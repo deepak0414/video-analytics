@@ -60,9 +60,14 @@ Order: **C first** (highest value, mostly independent, fixes the mixed-dim crash
 ### A — Provenance (per video × role)
 - **PROV-1 · Identity/fingerprint helper** *(the general form; the shard tag uses the simpler
   `{model, dim}`).* `provenance.fingerprint(role, RoleConfig)` → `{model, hash(salient params)}`.
-- **PROV-2 · Table + migration + store.** `role_provenance(video_id, role, model, fingerprint, dim,
-  run_id, produced_at, rows)` via a `SCHEMA_VERSION` bump; a `ProvenanceStore`.
+- **PROV-2 · Table + migration + store.** `role_provenance(video_id, role, model, fingerprint, fps,
+  run_id, row_count, produced_at)` via a `SCHEMA_VERSION` bump; a `ProvenanceStore`. (No `dim` column —
+  the vector-space dim lives on the TAG-2 shard tag; `fps` records the run-arg the fingerprint can't.
+  `va remove` purges the table via `_ROLE_TABLES`.)
 - **PROV-3 · Stamp during ingest.** Upsert a `(video, role)` row after each best-effort role step.
+  Also record run-time args that change output but are **not** in `(role, cfg)` — notably the ingest
+  sampling **`fps`** (which frames Roles 2/5/6/7 see) — as a column on the row, so PROV-4 can tell a
+  corpus extended at a different fps apart. (Decide these `role_provenance` columns in PROV-2.)
 - **PROV-4 · Report.** `va provenance <video>` / `va stale` — recorded vs current model per role.
 
 ### B — Batch reprocess *(depends on A; visual depends on C)*
@@ -108,6 +113,12 @@ PROV-4** (stale report) → **RPRC-1/2/3** (selective reprocess).
   caption) + whole-video `reingest` fallback for the rest.** *This is a SCOPE CAP: full per-role
   reprocess for all 10 roles is deferred until a real model change demands each.*
 - **D6 — Provenance role scope:** roles 1,2,4,5,6,7,8,9,10 + text_embedder; reasoner excluded.
+  *Correction: the reasoner (Role 11) is NOT row-free — deep-scan persists VLM micro-captions in the
+  `observations` cache. It stays out of the provenance table, but its cache would otherwise go stale
+  on a model upgrade (a missed stale), so `deep_scan.py` folds the **captioner + reasoner
+  fingerprints** into its `prompt_key`/`map_key` — an upgrade re-runs the sweep instead of serving old
+  code-counted answers. B's selective reprocess must therefore also purge `observations`, not just the
+  role tables.*
 
 ## 6. Not building yet
 No Postgres/ANN; no per-role reprocess for roles without a pending model change (YAGNI); one
@@ -118,5 +129,36 @@ canonical workdir (`.va-shots`), no cross-workdir provenance.
   `{embedder, dim}`; `tests/test_shard_tagging.py`) + TAG-3 (query-time guard skips mismatched
   shards, retrieval falls back to lexical with a surfaced note; `tests/test_shard_guard.py`).
   **TAG-4 dissolved** — TAG-3's untagged dim-guard made the backfill redundant; `va reingest` is the
-  real re-tag. Next: **A (provenance)** — PROV-1 (identity helper) → PROV-2 (table + migration) →
-  PROV-3 (stamp at ingest) → PROV-4 (`va stale` report).
+  real re-tag.
+- **2026-07-30:** **A (provenance) started — PROV-1 DONE.** `va.provenance.role_fingerprint(role, cfg)`
+  computes a stable output-only identity `{model, fingerprint}` per role (model + `weights` override
+  + object-detector/action-recognizer vocab; `device`/`dtype`/batch excluded); `tests/test_provenance.py`.
+- **2026-07-30:** **PROV-2 DONE** — `role_provenance` table (`(video_id, role)` PK: model, fingerprint,
+  fps, run_id, row_count, produced_at) via a schema **v2** migration on the §6-a runner +
+  `ProvenanceStore.record()/.get()`; `tests/test_provenance_store.py`. The `fps` column captures the
+  run-arg the fingerprint can't (review note).
+- **2026-07-30:** **PROV-3 DONE** — ingest stamps `role_provenance` per role at the end of a
+  successful run (`ingest._record_provenance`, driven by `provenance.PROVENANCE_ROLES` so write/read
+  can't drift; best-effort). **Roles whose step FAILED are not stamped** — absent = stale, so a
+  transient failure is reprocessed rather than masked as current. The fingerprint is computed from a
+  **config pinned at role-launch time** (not a fresh `load_config()` at ingest end), so a mid-ingest
+  `roles.yaml` edit degrades to a safe false-stale instead of stamping old-model rows with the new
+  fingerprint (a missed stale). Deep-scan's `observations` cache keys also fold in the captioner +
+  reasoner fingerprints, so a model upgrade re-runs the sweep. `tests/test_provenance_ingest.py`,
+  `tests/test_deep_scan.py`. Next: **PROV-4** (`va stale` report).
+- **2026-07-30:** **PROV-4 DONE — pillar A (provenance) COMPLETE.** `va stale [--role R]`
+  (`pipeline/stale.py::stale_report`) lists DONE videos whose recorded fingerprint != the current
+  config's per role (missing/unstamped = stale; non-done videos skipped — they need re-ingest, not a
+  role reprocess). The report prints the active config dir/profile/embedder it compared against, so a
+  forgotten `VA_CONFIG_DIR` (stub vs real) is self-evident before anyone acts on the `va reingest`
+  remedy. Each stale row also surfaces its **recorded ingest fps** (`recorded_fps`): fps is a run arg
+  with no config baseline, so it is REPORTED not compared (staleness stays fingerprint-only), but
+  showing it lets a reprocess preserve the frame density Roles 2/5/6/7 saw — `va reingest` defaults to
+  fps=1.0, so the remedy tells the user to pass `--fps <recorded>`. (Auto-preserving fps across a
+  reprocess is pillar B's job.) `--role` is validated against `PROVENANCE_ROLES` at both the CLI (`choices`) and the library
+  (`ValueError`) so an unstamped role (e.g. the reasoner) or a typo can't silently report every video
+  stale. `tests/test_stale.py`. Read-only; drives pillar B's selective reprocess next.
+  **SCOPE CUT (recorded, not silent):** the PROV-4 spec line names "`va provenance <video>` / `va
+  stale`"; only the corpus-wide `va stale` was built. The per-video `va provenance <video>` inspector
+  is DEFERRED (YAGNI until pillar B needs a single-video drill-down) — the data is already reachable
+  via `ProvenanceStore.get(video_id)`; build the command when B does. Pillar B must NOT assume it exists.

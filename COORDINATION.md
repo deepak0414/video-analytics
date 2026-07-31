@@ -295,3 +295,25 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   shards (stale-embedder videos drop out, with a warning) instead of silently-wrong hits; reprocess /
   reingest re-tags + rejoins them. Legacy untagged shards are admitted when their dim matches
   (best-effort — the honest gap until TAG-4 backfill).
+- **2026-07-30 (storage):** `catalog.db` is now schema **v2** — a new `role_provenance` table
+  (`(video_id, role)` PK; model, fingerprint, fps, run_id, row_count, produced_at) recording which
+  model/config produced each role's rows (WS-1 §6-b provenance). **Action for BOTH agents:** opening a
+  workdir DB auto-migrates it to v2 (adds the table; existing rows untouched). Nothing writes it yet —
+  ingest stamping lands in PROV-3; read/write via `storage.structured.provenance_store.ProvenanceStore`.
+  No contract or query-surface change.
+- **2026-07-30 (storage):** ingest now STAMPS `role_provenance` on every successful run (PROV-3,
+  `ingest._record_provenance`) — supersedes the "nothing writes it yet" above. **Action for BOTH
+  agents:** the shared `catalog.db` gains up to ~10 provenance rows per ingested video (incl. via
+  `va serve`); best-effort so it never fails an ingest, and roles whose best-effort step failed are
+  intentionally NOT stamped (absent row = stale to `va stale`).
+- **2026-07-30 (reasoning cache):** the deep-scan `observations` cache keys now fold in the captioner
+  + reasoner fingerprints (PROV-3, `deep_scan.py`), so a model upgrade re-runs the sweep instead of
+  serving stale code-counted answers. **One-time effect for the web agent:** after this lands, the
+  FIRST `va ask` per previously-cached question on a shared workdir (`.va-shots`, incl. via `va serve`)
+  re-runs a multi-minute VLM sweep because the old cache keys no longer match — this is an intentional
+  one-time invalidation, not a hang or perf regression. Subsequent asks are cached as before.
+- **2026-07-30 (read helper):** new read-only `va stale [--role R]` (`pipeline/stale.py::stale_report`)
+  lists DONE videos whose recorded provenance fingerprint != the current config's, per role. No shared
+  contract or schema change (it only READS `role_provenance`). **Available if useful to the web agent:**
+  `stale_report(workdir)` returns `[{video_id, source_uri, title, stale_roles}]` — handy for a "videos
+  needing reprocessing" view once pillar B (selective reprocess) lands.

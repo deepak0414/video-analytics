@@ -1,0 +1,48 @@
+# Agent review — request_changes
+
+date: 2026-07-30T15:12:44.449132
+range: origin/main..HEAD
+branch: feature/provenance-identity
+findings: 6
+
+- **major** `src/va/provenance.py:36` — _SALIENT_LOAD_KEYS omits min_speakers/max_speakers although the pyannote adapter reads both from config and they gate stored diarization output exactly like the included num_speakers
+  - scenario: A profile adds min_speakers: 2, max_speakers: 4 to fix over-splitting; reingested videos store different transcripts.speaker labels but the Role-9 fingerprint is unchanged, so PROV-4's va stale reports the corpus current and the mixed old/new diarization is never flagged
+- **minor** `src/va/provenance.py:15` — max_new_tokens is documented as speed-only and excluded, but for the Role-4 captioner it truncates the stored caption text, so it is output-affecting for that adapter
+  - scenario: Lowering models.qwen2.5-vl-7b.max_new_tokens from 96 to 32 shortens every stored caption on reingest; fingerprints stay identical and stale detection never distinguishes long-caption from truncated-caption videos
+- **minor** `src/va/provenance.py:36` — ByteTrack's frame_rate load key feeds the motion model and changes stored object_tracks rows but is not in the salient set
+  - scenario: Changing models.bytetrack.frame_rate in a profile alters track association and va count results after reingest, yet the Role-6 fingerprint is unchanged and the mixed corpus is reported current
+- **minor** `src/va/provenance.py:40` — The ingest sampling rate (va ingest --fps) changes which frames Roles 2/5/6/7 process but is a CLI arg invisible to a (role, cfg) fingerprint, and the planned role_provenance table has no column for it
+  - scenario: A corpus ingested at --fps 1.0 is later extended at --fps 2.0; per-role fingerprints match, so neither PROV-4 nor RPRC-2 can tell the two populations apart — decide before PROV-2 freezes the schema whether the stamp records run params like fps
+- **minor** `src/va/provenance.py:53` — Load keys hash only when explicitly present, so writing an adapter's code default into the profile (or changing the code default itself) flips or misses the fingerprint, unlike the vocab path which folds in defaults via get_ingest_*
+  - scenario: Adding conf: 0.25 (YOLO's existing default) to the profile changes the object_detector fingerprint and marks every video falsely stale, triggering a full needless reprocess; conversely raising the adapter's default conf in code changes stored detections with no fingerprint change
+- **minor** `src/va/provenance.py:48` — An unconfigured role fingerprints as a constant 'unknown' and skips the vocab hash, although the registry still runs a real default backend for every role when unconfigured
+  - scenario: A custom VA_CONFIG_DIR omitting object_detector still stores color-stub detections over DEFAULT_INGEST_CLASSES; later explicitly configuring model: color (identical behavior) changes the fingerprint and falsely marks those videos stale, while edits to DEFAULT_INGEST_CLASSES under the unconfigured setup are never detected
+
+---
+
+## Full review
+
+Review complete. This is a single provisional commit (`PROV-1`) adding `src/va/provenance.py` (a per-role output-identity fingerprint), its tests, and a plan-log update. The core design is sound — config-only salient-key hashing, vocab folded in via `get_ingest_classes`/`get_ingest_actions` so default-vocab edits are caught, `is not None` used correctly so falsy-but-set values hash. But I verified the module's central claim ("the salient set is a union of the known output-affecting keys across adapters") against every adapter's actual `load.get()` reads, and it doesn't hold today:
+
+**Major — `min_speakers`/`max_speakers` missing from the salient set** (`src/va/provenance.py:36`). The pyannote adapter reads all three speaker hints from config (`pyannote_inproc.py:35-37`) and passes them into `diarize()` as defaults (`:110-121`), so bounds change the stored `transcripts.speaker` labels exactly like `num_speakers` does — yet only `num_speakers` is in `_SALIENT_LOAD_KEYS`. A user who pins `min_speakers: 2, max_speakers: 4` in a profile and reingests gets different diarization output with an unchanged fingerprint; the future `va stale` (PROV-4) then reports nothing stale. The siblings live three lines apart in the same adapter, so this is incompleteness against the module's own stated contract, not a debatable classification. Fix: add both keys.
+
+**Minor findings** (details in the JSON block):
+
+- The captioner's `max_new_tokens` (`qwen_inproc.py:30`) is explicitly classified in the docstring as speed-only, but for Role 4 it truncates the *stored* caption text — the classification is factually wrong for that one adapter.
+- ByteTrack's `frame_rate` load key (`bytetrack_inproc.py:23`) feeds the motion model and changes stored `object_tracks` rows; not salient.
+- The ingest sampling rate `va ingest --fps` changes which frames are embedded/detected/tracked (Roles 2/5/6) but is a CLI arg invisible to a `(role, cfg)` fingerprint, and the planned PROV-2 table has no column for it — worth deciding now whether PROV-3's stamp records it, before the schema lands.
+- Asymmetric default handling: explicitly writing an adapter's default into the profile (e.g. `conf: 0.25`, equal to YOLO's code default) changes the fingerprint → false-stale reprocess; conversely a change to the adapter's *code* default is never seen → missed-stale. The vocab path solved exactly this via the `get_ingest_*` fallbacks; the load keys don't get the same treatment.
+- An unconfigured role fingerprints as a constant `"unknown"` even though the registry still runs a real default backend (color/motion/sidecar/histogram all have unconfigured fallbacks), and the vocab hash is skipped for an unconfigured detector/action role. Explicitly configuring the identical default later flips the fingerprint (false stale). Low practical exposure since all shipped configs configure every role, but the behavior is baked into a test.
+
+No issues on plan conformance (log entry updated in the same commit, PROV-1 matches the plan's shape), documentation parity (no new user surface; plan doc carries it), test integrity (new tests are real and cover the main axes), or COORDINATION.md (internal module, not a web-layer contract change). Commit subject is a provisional `need_agent_review:`, which is exempt from the clarity rule.
+
+```json
+{"verdict": "request_changes", "findings": [
+{"severity": "major", "file": "src/va/provenance.py", "line": 36, "issue": "_SALIENT_LOAD_KEYS omits min_speakers/max_speakers although the pyannote adapter reads both from config and they gate stored diarization output exactly like the included num_speakers", "scenario": "A profile adds min_speakers: 2, max_speakers: 4 to fix over-splitting; reingested videos store different transcripts.speaker labels but the Role-9 fingerprint is unchanged, so PROV-4's va stale reports the corpus current and the mixed old/new diarization is never flagged"},
+{"severity": "minor", "file": "src/va/provenance.py", "line": 15, "issue": "max_new_tokens is documented as speed-only and excluded, but for the Role-4 captioner it truncates the stored caption text, so it is output-affecting for that adapter", "scenario": "Lowering models.qwen2.5-vl-7b.max_new_tokens from 96 to 32 shortens every stored caption on reingest; fingerprints stay identical and stale detection never distinguishes long-caption from truncated-caption videos"},
+{"severity": "minor", "file": "src/va/provenance.py", "line": 36, "issue": "ByteTrack's frame_rate load key feeds the motion model and changes stored object_tracks rows but is not in the salient set", "scenario": "Changing models.bytetrack.frame_rate in a profile alters track association and va count results after reingest, yet the Role-6 fingerprint is unchanged and the mixed corpus is reported current"},
+{"severity": "minor", "file": "src/va/provenance.py", "line": 40, "issue": "The ingest sampling rate (va ingest --fps) changes which frames Roles 2/5/6/7 process but is a CLI arg invisible to a (role, cfg) fingerprint, and the planned role_provenance table has no column for it", "scenario": "A corpus ingested at --fps 1.0 is later extended at --fps 2.0; per-role fingerprints match, so neither PROV-4 nor RPRC-2 can tell the two populations apart — decide before PROV-2 freezes the schema whether the stamp records run params like fps"},
+{"severity": "minor", "file": "src/va/provenance.py", "line": 53, "issue": "Load keys hash only when explicitly present, so writing an adapter's code default into the profile (or changing the code default itself) flips or misses the fingerprint, unlike the vocab path which folds in defaults via get_ingest_*", "scenario": "Adding conf: 0.25 (YOLO's existing default) to the profile changes the object_detector fingerprint and marks every video falsely stale, triggering a full needless reprocess; conversely raising the adapter's default conf in code changes stored detections with no fingerprint change"},
+{"severity": "minor", "file": "src/va/provenance.py", "line": 48, "issue": "An unconfigured role fingerprints as a constant 'unknown' and skips the vocab hash, although the registry still runs a real default backend for every role when unconfigured", "scenario": "A custom VA_CONFIG_DIR omitting object_detector still stores color-stub detections over DEFAULT_INGEST_CLASSES; later explicitly configuring model: color (identical behavior) changes the fingerprint and falsely marks those videos stale, while edits to DEFAULT_INGEST_CLASSES under the unconfigured setup are never detected"}
+]}
+```

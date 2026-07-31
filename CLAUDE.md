@@ -53,6 +53,7 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) โ
 .venv/bin/va --workdir .va ask "what color is the car?"     # reasoned, cited answer (Role 11)
 .venv/bin/va --workdir .va remove "<uuid|source_key|url>"   # delete a video everywhere
 .venv/bin/va --workdir .va reingest "<...>"                 # re-process (model changes)
+.venv/bin/va --workdir .va stale                            # videos on an outdated model/config (ยง6-b)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use
 VA_CONFIG_DIR=run-siglip/config .venv/bin/va --workdir .va ingest "<url>"

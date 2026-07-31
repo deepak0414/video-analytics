@@ -204,6 +204,46 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_stale(args: argparse.Namespace) -> int:
+    import os
+
+    from va.configuration import load_config
+    from va.pipeline.stale import stale_report
+
+    # Staleness is measured against WHATEVER config is active now, so make that basis
+    # explicit: `va stale` is the tool reached for during model switches, exactly when a
+    # forgotten VA_CONFIG_DIR would compare real-model rows against the stub config, flag
+    # EVERYTHING stale, and its `va reingest` remedy would overwrite real data with stub
+    # output (CLAUDE.md gotcha #2). The header makes that mismatch self-evident.
+    cfg = load_config()
+    cfg_dir = os.environ.get("VA_CONFIG_DIR") or "config (default — stub backends)"
+    embedder = (cfg.roles.get("visual_embedder") or {}).get("model", "?")
+    print(f"comparing against: {cfg_dir} (profile={cfg.active_profile}, "
+          f"visual_embedder={embedder})")
+
+    report = stale_report(args.workdir, role=args.role)
+    scope = f" for role {args.role}" if args.role else ""
+    if not report:
+        print(f"all videos current{scope}")
+        return 0
+    for e in report:
+        label = e["title"] or e["source_uri"] or e["video_id"]
+        fps = e.get("recorded_fps")
+        fps_note = f" [ingested at fps={fps}]" if fps is not None else ""
+        print(f"[stale] {label}{fps_note}: {', '.join(e['stale_roles'])}")
+    unknown_fps = any(e.get("recorded_fps") is None for e in report)
+    fps_help = (
+        "pass `--fps` to match each video's original density — shown above as "
+        "`[ingested at fps=N]` where known"
+        + ("; videos with no fps shown predate provenance, so their original density is "
+           "unknown and reingest's fps=1.0 default may differ from it" if unknown_fps else "")
+    )
+    print(f"\n{len(report)} video(s) need reprocessing{scope} — re-run `va reingest <video>` "
+          f"UNDER THIS SAME CONFIG. ({fps_help}. And if the config line above isn't the one "
+          f"you intend, everything looks stale under the wrong models — fix that first.)")
+    return 0
+
+
 def _cmd_fixtures(args: argparse.Namespace) -> int:
     from va.sources.fixtures import pull_fixtures
 
@@ -337,6 +377,18 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("-k", type=int, default=5, help="evidence per tier")
     pa.add_argument("--show-evidence", action="store_true")
     pa.set_defaults(func=_cmd_ask)
+
+    from va.provenance import PROVENANCE_ROLES
+
+    psl = sub.add_parser("stale",
+                         help="videos whose recorded model/config != the current one (§6-b)")
+    # choices guards against an unstamped role (e.g. reasoner) or a typo — either would
+    # otherwise fingerprint fine but match no recorded row, reporting EVERY video stale.
+    psl.add_argument("--role", default=None, choices=list(PROVENANCE_ROLES),
+                     metavar="ROLE",
+                     help="only check one role, e.g. speech_to_text "
+                          f"(one of: {', '.join(PROVENANCE_ROLES)})")
+    psl.set_defaults(func=_cmd_stale)
 
     pn = sub.add_parser("count", help="distinct object instances (Role 6 tracks)")
     pn.add_argument("text", help="class name(s), e.g. 'car' or 'person dog'")

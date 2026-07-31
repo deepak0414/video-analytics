@@ -270,10 +270,15 @@ def deep_scan_video(
     from va.storage.structured.observations import ObservationStore
 
     prompt = _MICRO_PROMPT.format(target=scan_target)
-    # Key on the canonical INTENT (not prompt wording) + template version, so
-    # planner phrasing can't bust the cache but prompt upgrades invalidate it.
+    # Key on the canonical INTENT (not prompt wording) + template version + the CAPTIONER
+    # fingerprint, so planner phrasing can't bust the cache but a prompt or vlm_captioner
+    # model upgrade does — else `va ask` would serve code-counted answers from old-model
+    # captions forever, a missed stale invisible to `va stale` (§6-b).
+    from va.provenance import role_fingerprint
+
+    captioner_fp = role_fingerprint("vlm_captioner")["fingerprint"]
     prompt_key = hashlib.sha1(
-        f"{_PROMPT_VERSION}|{canonical_key(scan_target)}|{max_frames}|{fps}".encode()
+        f"{_PROMPT_VERSION}|{canonical_key(scan_target)}|{max_frames}|{fps}|{captioner_fp}".encode()
     ).hexdigest()[:16]
 
     store = ObservationStore(Workspace(workdir).catalog_db)
@@ -300,9 +305,10 @@ def deep_scan_video(
     # so repeat asks are fully deterministic (no fresh LLM merge decisions).
     import json as _json
 
-    # ":norm2" = normalization-prompt version (timeline context added) — bump
-    # whenever NORMALIZE_PROMPT changes so stale mappings don't survive.
-    map_key = f"{prompt_key}:norm2"
+    # ":norm2" = normalization-prompt version (timeline context added) — bump whenever
+    # NORMALIZE_PROMPT changes so stale mappings don't survive. Also key on the REASONER
+    # fingerprint (normalization is an LLM call), so a reasoner upgrade re-runs it too.
+    map_key = f"{prompt_key}:norm2:{role_fingerprint('reasoner')['fingerprint']}"
     store = ObservationStore(Workspace(workdir).catalog_db)
     try:
         cached_map = store.load(video_id, map_key)

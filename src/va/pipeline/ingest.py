@@ -16,6 +16,7 @@ from typing import Iterable, Iterator
 from va.contracts.segment import Segment
 from va.contracts.video import IngestStatus, Video
 from va.pipeline.diarize import assign_speakers
+from va.configuration import load_config
 from va.pipeline.text_index import index_text
 from va.media.frames import keyframes_for_spans, sample_frames
 from va.pipeline.paths import Workspace
@@ -34,6 +35,7 @@ from va.registry import (
     get_visual_embedder,
     get_vlm_captioner,
 )
+from va.provenance import PROVENANCE_ROLES
 from va.sources.base import resolve_source
 from va.storage.structured.catalog_sqlite import Catalog
 from va.storage.structured.actions import ActionStore
@@ -86,6 +88,33 @@ def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
         return _ingest_impl(uri, ws, fps)
 
 
+def _record_provenance(ws: Workspace, video_id, fps: float, run_id, counts: dict,
+                       roles, cfg) -> None:
+    """Best-effort §6-b provenance (PROV-3): for each role that SUCCEEDED (`roles`),
+    stamp the model/config fingerprint (`role_fingerprint`) + fps + how many rows it
+    produced. Roles whose best-effort step FAILED are deliberately omitted — an absent
+    row reads as stale to `va stale` (PROV-4), so a transient failure gets reprocessed
+    rather than masked as current provenance (the design's 'false stale OK, missed stale
+    forbidden' rule). `cfg` is the config pinned at role-launch time (the caller's), so
+    the stamp can't drift from what actually ran during a mid-ingest edit. Keyed by
+    (video, role) so a reingest overwrites; never aborts the ingest — a failure here is
+    traced and swallowed, like the roles themselves."""
+    from va.provenance import role_fingerprint
+    from va.storage.structured.provenance_store import ProvenanceStore
+
+    try:
+        store = ProvenanceStore(ws.catalog_db)
+        try:
+            for role in roles:
+                ident = role_fingerprint(role, cfg)
+                store.record(video_id, role, ident["model"], ident["fingerprint"],
+                             fps=fps, run_id=run_id, row_count=counts.get(role))
+        finally:
+            store.close()
+    except Exception as e:  # noqa: BLE001 — provenance is best-effort, never fatal
+        _trace_fail("provenance", e)
+
+
 def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
     catalog = Catalog(ws.catalog_db)
     try:
@@ -128,6 +157,20 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 local_path=local_path, mark_fetched=True,
             )
 
+            # Roles whose best-effort step FAILED — omitted from the provenance stamp
+            # below, so `va stale` reads them as stale and they get reprocessed rather
+            # than masked as current (a transient failure must never read as up-to-date).
+            failed: set[str] = set()
+
+            # Pin the config ONCE here, at role-launch time, so the provenance stamp
+            # reflects what the roles are about to run under — NOT a fresh load_config()
+            # after ingest, which a mid-ingest roles.yaml edit would make stamp old-model
+            # rows with the new fingerprint (a MISSED stale, the one thing §6-b forbids).
+            # Pinning at the start instead degrades that race to a false stale (safe): the
+            # roles self-load config, so an edit mid-ingest can only make a stamp look
+            # older than the run, never newer.
+            cfg = load_config()
+
             # Role 1: scene boundaries -> the segments table (temporal backbone).
             spans = get_scene_detector().detect(fetched.local_path)
             segments = [
@@ -150,6 +193,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 trace("caption", "done", f"{captioned}/{len(segments)} segments captioned")
             except Exception as e:
                 captioned = 0
+                failed.add("vlm_captioner")
                 _trace_fail("caption", e)
             seg_store.close()
 
@@ -169,6 +213,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                             n_speakers = len({ln.speaker for ln in lines if ln.speaker})
                     except Exception as e:
                         n_speakers = 0
+                        failed.add("speaker_diarizer")
                         _trace_fail("diarize", e)
                 tx_store = TranscriptStore(ws.catalog_db)
                 tx_store.replace_transcripts(video.id, lines)
@@ -178,6 +223,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                       f"{transcript_lines} lines, {n_speakers} speakers")
             except Exception as e:
                 transcript_lines = 0
+                failed.update({"speech_to_text", "speaker_diarizer"})  # diarize couldn't run
                 _trace_fail("transcript", e)
 
             # Role 10: on-screen text -> ocr_results (optional, best-effort).
@@ -191,6 +237,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 trace("ocr", "done", f"{ocr_lines} lines")
             except Exception as e:
                 ocr_lines = 0
+                failed.add("ocr")
                 _trace_fail("ocr", e)
 
             # Role 7: action recognition per Role-1 segment (optional, best-effort).
@@ -212,6 +259,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 trace("action", "done", f"{n_actions} events")
             except Exception as exc:
                 n_actions = 0
+                failed.add("action_recognizer")
                 _trace_fail("action", exc)
 
             # Decode the file ONCE at the target fps and fan the single frame
@@ -231,6 +279,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 classes = get_ingest_classes()
             except Exception as e:
                 detector = None
+                failed.update({"object_detector", "object_tracker"})
                 _trace_fail("detect", e)
             det_ok = detector is not None
             frames_dets: list[tuple[float, list]] = []
@@ -258,6 +307,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                     except Exception as e:
                         det_ok = False
                         frames_dets = []
+                        failed.update({"object_detector", "object_tracker"})
                         _trace_fail("detect", e)
             store.set_meta({"embedder": embedder_id("visual_embedder")})
             store.persist()
@@ -284,6 +334,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 except Exception as e:
                     n_detections = 0
                     n_tracks = 0
+                    failed.update({"object_detector", "object_tracker"})
                     _trace_fail("track", e)
 
             # Retrieval Layer (SR.2): semantic text index over the caption /
@@ -295,8 +346,28 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                 trace("text_index", "done", f"{n_text} text vectors")
             except Exception as e:
                 n_text = 0
+                failed.add("text_embedder")
                 _trace_fail("text_index", e)
 
+            # §6-b (PROV-3): record which model/config produced each role's rows so a
+            # later `va stale` can find videos on an outdated model after an upgrade.
+            _record_provenance(
+                ws, video.id, fps, current_run_id(),
+                counts={
+                    "scene_detector": len(segments),
+                    "visual_embedder": n,
+                    "vlm_captioner": captioned,
+                    "object_detector": n_detections,
+                    "object_tracker": n_tracks,
+                    "action_recognizer": n_actions,
+                    "speech_to_text": transcript_lines,
+                    "speaker_diarizer": n_speakers,
+                    "ocr": ocr_lines,
+                    "text_embedder": n_text,
+                },
+                roles=[r for r in PROVENANCE_ROLES if r not in failed],
+                cfg=cfg,
+            )
             # Stamp the video with this ingest's trace run_id (None when tracing is
             # off) so a later query/ask trace can point back at the ingest that
             # produced its data — and any degradations that ingest recorded.
