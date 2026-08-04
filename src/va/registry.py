@@ -289,6 +289,36 @@ def get_ocr_reader(cfg: Optional[Config] = None) -> OcrReader:
     raise NotImplementedError(f"ocr backend not yet wired: {backend!r}")
 
 
+def get_motion_source(cfg: Optional[Config] = None):
+    """MotionSource (WS-4): where per-camera motion windows come from. `sidecar`
+    = deterministic JSON stub (tests/CI); `lnr-eventlog` = the LNR608 log.cgi
+    poller (host from spec/VA_NVR_HOST; credentials from VA_NVR_USER/PASS)."""
+    cfg = cfg or load_config()
+    try:
+        rc = cfg.role("motion_source")
+        backend, model, load = rc.backend, rc.model, rc.load
+        spec = cfg.roles.get("motion_source") or {}
+    except KeyError:
+        backend, model, load, spec = "inproc", "sidecar", {}, {}
+
+    if backend == "inproc":
+        if model in (None, "sidecar"):
+            from va.adapters.motion_source.sidecar_inproc import SidecarMotionSource
+
+            return SidecarMotionSource(spec.get("events_file"))
+        if model == "lnr-eventlog":
+            from va.adapters.motion_source.lnr_eventlog_inproc import (
+                LnrEventLogMotionSource,
+            )
+
+            params = dict(load)
+            params.update({k: v for k, v in spec.items() if k in ("host", "tz")})
+            return LnrEventLogMotionSource(params)
+        raise ValueError(f"unknown motion_source model: {model!r}")
+
+    raise NotImplementedError(f"motion_source backend not yet wired: {backend!r}")
+
+
 def get_reasoner(cfg: Optional[Config] = None) -> Reasoner:
     cfg = cfg or load_config()
     try:
