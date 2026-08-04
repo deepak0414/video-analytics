@@ -1,0 +1,21 @@
+# Footage profile: security (A-LSSRVF — long static scene raw video feed).
+#
+# The per-role adaptation from architecture-evolution-plan.md §3.2: security-camera
+# footage has no microphone, so the speech roles are skipped entirely; the detector
+# vocabulary narrows to the classes that matter for a static home camera (the plan's
+# person/vehicle/package/animal set — adjust per install via a local profile edit).
+# The motion-based Role-1 backend and event-gated sampling land with WS-4; until
+# then this profile only gates roles and vocabulary.
+#
+# Profile-wide knobs (WS2.d; values from the plan's locked decisions — consumers
+# land later, so today these are recorded-but-inert):
+retention_days: 14      # Tier-1 local rolling window (plan §8.2; prune lands with P7.a)
+time_model: wall_clock  # present wall-clock time once start_epoch exists (plan §4, WS-3)
+deep_scan: "off"        # forbid the A-EV deep-scan/outfit heuristics (plan §8.1; R11.a)
+roles:
+  speech_to_text:
+    enabled: false
+  speaker_diarizer:
+    enabled: false
+  object_detector:
+    classes: [person, car, truck, bicycle, package, dog, cat]

@@ -16,7 +16,7 @@ from typing import Iterable, Iterator
 from va.contracts.segment import Segment
 from va.contracts.video import IngestStatus, Video
 from va.pipeline.diarize import assign_speakers
-from va.configuration import load_config
+from va.configuration import default_footage_profile, load_config
 from va.pipeline.text_index import index_text
 from va.media.frames import keyframes_for_spans, sample_frames
 from va.pipeline.paths import Workspace
@@ -79,13 +79,16 @@ def _trace_fail(role: str, exc: Exception) -> None:
           traceback=traceback.format_exc())
 
 
-def ingest(uri: str, workdir: str = ".va", fps: float = 1.0) -> IngestResult:
+def ingest(
+    uri: str, workdir: str = ".va", fps: float = 1.0, profile: str | None = None
+) -> IngestResult:
     """Ingest a source. The body runs inside a VA_TRACE-gated trace run (no-op when
     off); each best-effort role logs success or a visible warn on failure, and the
-    decode pass emits its event."""
+    decode pass emits its event. `profile` selects the footage profile this video
+    is ingested under (WS-2); default is derived from the source type."""
     ws = Workspace(workdir)
     with traced_run("ingest", workdir):
-        return _ingest_impl(uri, ws, fps)
+        return _ingest_impl(uri, ws, fps, profile)
 
 
 def _record_provenance(ws: Workspace, video_id, fps: float, run_id, counts: dict,
@@ -115,19 +118,47 @@ def _record_provenance(ws: Workspace, video_id, fps: float, run_id, counts: dict
         _trace_fail("provenance", e)
 
 
-def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
+def _ingest_impl(
+    uri: str, ws: Workspace, fps: float, profile: str | None = None
+) -> IngestResult:
     catalog = Catalog(ws.catalog_db)
     try:
         source = resolve_source(uri)
         resolved = source.resolve(uri)  # cheap; gives source_key for dedup
         video, created = catalog.get_or_create(resolved)
 
+        # An EXPLICIT profile name is user input: validate it BEFORE any work —
+        # including the dedup return — so a typo fails loudly (load_config raises,
+        # naming the missing file) instead of being swallowed by
+        # "[already-ingested]".
+        if profile is not None:
+            load_config(footage_profile=profile)
+        elif video.profile:
+            # A retry of a not-yet-done row carries the recorded profile forward
+            # (mirroring reingest_video) — otherwise retrying a failed
+            # `--profile security` ingest silently reverts to the source default.
+            # NOT validated up here: a broken carried profile must not break the
+            # idempotent dedup no-op on a done row (the probe below still catches
+            # it before roles run on a real retry).
+            profile = video.profile
+
         if video.ingest_status is IngestStatus.done:
             trace("ingest", "deduped", f"{resolved.source_key} already done")
             return IngestResult(video=video, deduped=True, frames_indexed=0)
 
+        # Resolve the profile to RECORD: it must match what the roles actually run
+        # under — roles self-load config, which applies roles.yaml
+        # `active_footage_profile` — so the probe's resolution (explicit arg >
+        # active_footage_profile > generic) is what we record, with the
+        # source-derived default only as the final fallback.
+        probe = load_config(footage_profile=profile)
+        footage_profile = probe.footage_profile
+        if profile is None and footage_profile == "generic":
+            footage_profile = default_footage_profile(resolved.source_type.value)
+
         try:
             catalog.set_status(video.id, IngestStatus.fetching)
+            catalog.set_profile(video.id, footage_profile)
             fetched = source.fetch(resolved, ws.cache)
             catalog.update_metadata(video.id, fetched)
 
@@ -166,13 +197,47 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
             # reflects what the roles are about to run under — NOT a fresh load_config()
             # after ingest, which a mid-ingest roles.yaml edit would make stamp old-model
             # rows with the new fingerprint (a MISSED stale, the one thing §6-b forbids).
-            # Pinning at the start instead degrades that race to a false stale (safe): the
-            # roles self-load config, so an edit mid-ingest can only make a stamp look
-            # older than the run, never newer.
-            cfg = load_config()
+            # Pinning at the start instead degrades that race to a false stale (safe).
+            # WS2.c: the pin carries the footage-profile overlay and is passed to every
+            # role getter below, so the roles run under — and the stamp records — the
+            # profile this ingest was invoked with.
+            cfg = load_config(footage_profile=footage_profile)
+
+            # Roles the footage profile disables for this input domain (e.g. the
+            # security profile skips speech roles — no mic). Not stamped in
+            # provenance: `va stale` reads them as stale, which is the safe
+            # direction (false stale OK, missed stale forbidden).
+            skipped: set[str] = set()
+
+            def _purge(role: str, store_cls, method: str) -> None:
+                # Purge a skipped role's prior-attempt rows, best-effort: the purge
+                # is bookkeeping for a role that isn't even running — it must never
+                # abort the ingest (e.g. a transient catalog.db lock).
+                try:
+                    s = store_cls(ws.catalog_db)
+                    try:
+                        getattr(s, method)(video.id, [])
+                    finally:
+                        s.close()
+                except Exception as e:  # noqa: BLE001
+                    _trace_fail(f"{role}-purge", e)
+
+            def _enabled(role: str) -> bool:
+                # A role absent from roles.yaml is ENABLED: every registry getter
+                # tolerates that shape via its stub fallback, and the gate must not
+                # be stricter than the getters it guards. For PRESENT roles, go
+                # through cfg.role() so the flag is interpreted with the same
+                # pydantic coercion stale/reprocess use — raw truthiness would read
+                # a string 'false' as enabled while staleness reads it disabled,
+                # a non-convergent stale loop.
+                if role not in cfg.roles or cfg.role(role).enabled:
+                    return True
+                skipped.add(role)
+                trace(role, "skipped", f"disabled by footage profile '{footage_profile}'")
+                return False
 
             # Role 1: scene boundaries -> the segments table (temporal backbone).
-            spans = get_scene_detector().detect(fetched.local_path)
+            spans = get_scene_detector(cfg).detect(fetched.local_path)
             segments = [
                 Segment(video_id=video.id, segment_index=i, start_time=s, end_time=e)
                 for i, (s, e) in enumerate(spans)
@@ -184,17 +249,18 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
             # Role 4: caption each segment from a keyframe (best-effort; the VLM
             # is heavy, and a failure must not abort the whole ingest).
             captioned = 0
-            try:
-                captioner = get_vlm_captioner()
-                keyframes = keyframes_for_spans(fetched.local_path, spans, per_segment=1)
-                for seg, kf in zip(segments, keyframes):
-                    seg_store.set_caption(seg.id, captioner.caption(kf))
-                    captioned += 1
-                trace("caption", "done", f"{captioned}/{len(segments)} segments captioned")
-            except Exception as e:
-                captioned = 0
-                failed.add("vlm_captioner")
-                _trace_fail("caption", e)
+            if _enabled("vlm_captioner"):
+                try:
+                    captioner = get_vlm_captioner(cfg)
+                    keyframes = keyframes_for_spans(fetched.local_path, spans, per_segment=1)
+                    for seg, kf in zip(segments, keyframes):
+                        seg_store.set_caption(seg.id, captioner.caption(kf))
+                        captioned += 1
+                    trace("caption", "done", f"{captioned}/{len(segments)} segments captioned")
+                except Exception as e:
+                    captioned = 0
+                    failed.add("vlm_captioner")
+                    _trace_fail("caption", e)
             seg_store.close()
 
             # Role 8: speech-to-text -> transcripts (recommended, best-effort:
@@ -203,84 +269,109 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
             # diarization failure must not lose the transcript).
             transcript_lines = 0
             n_speakers = 0
-            try:
-                lines = get_speech_to_text().transcribe(fetched.local_path)
-                if lines:
-                    try:
-                        turns = get_speaker_diarizer().diarize(fetched.local_path)
-                        if turns:
-                            lines = assign_speakers(lines, turns)
-                            n_speakers = len({ln.speaker for ln in lines if ln.speaker})
-                    except Exception as e:
-                        n_speakers = 0
-                        failed.add("speaker_diarizer")
-                        _trace_fail("diarize", e)
-                tx_store = TranscriptStore(ws.catalog_db)
-                tx_store.replace_transcripts(video.id, lines)
-                tx_store.close()
-                transcript_lines = len(lines)
-                trace("transcript", "done",
-                      f"{transcript_lines} lines, {n_speakers} speakers")
-            except Exception as e:
-                transcript_lines = 0
-                failed.update({"speech_to_text", "speaker_diarizer"})  # diarize couldn't run
-                _trace_fail("transcript", e)
+            if _enabled("speech_to_text"):
+                # Evaluate the diarizer gate BEFORE knowing whether there are lines:
+                # short-circuiting on `lines` first would leave a disabled diarizer
+                # neither skipped nor failed on a silent video — and therefore
+                # provenance-stamped, violating "skipped roles are never stamped".
+                diarizer_on = _enabled("speaker_diarizer")
+                try:
+                    lines = get_speech_to_text(cfg).transcribe(fetched.local_path)
+                    if lines and diarizer_on:
+                        try:
+                            turns = get_speaker_diarizer(cfg).diarize(fetched.local_path)
+                            if turns:
+                                lines = assign_speakers(lines, turns)
+                                n_speakers = len({ln.speaker for ln in lines if ln.speaker})
+                        except Exception as e:
+                            n_speakers = 0
+                            failed.add("speaker_diarizer")
+                            _trace_fail("diarize", e)
+                    tx_store = TranscriptStore(ws.catalog_db)
+                    tx_store.replace_transcripts(video.id, lines)
+                    tx_store.close()
+                    transcript_lines = len(lines)
+                    trace("transcript", "done",
+                          f"{transcript_lines} lines, {n_speakers} speakers")
+                except Exception as e:
+                    transcript_lines = 0
+                    failed.update({"speech_to_text", "speaker_diarizer"})  # diarize couldn't run
+                    _trace_fail("transcript", e)
+            else:
+                # No transcript lines will exist, so the diarizer can't run either.
+                skipped.add("speaker_diarizer")
+                # Purge rows a prior (failed/other-profile) attempt may have written:
+                # a skipped role must leave NO live rows, or the profile's promise
+                # (e.g. "0 transcript rows under security") is broken by a retry.
+                _purge("speech_to_text", TranscriptStore, "replace_transcripts")
 
             # Role 10: on-screen text -> ocr_results (optional, best-effort).
             ocr_lines = 0
-            try:
-                lines = get_ocr_reader().read(fetched.local_path)
-                ocr_store = OcrStore(ws.catalog_db)
-                ocr_store.replace_lines(video.id, lines)
-                ocr_store.close()
-                ocr_lines = len(lines)
-                trace("ocr", "done", f"{ocr_lines} lines")
-            except Exception as e:
-                ocr_lines = 0
-                failed.add("ocr")
-                _trace_fail("ocr", e)
+            if not _enabled("ocr"):
+                _purge("ocr", OcrStore, "replace_lines")  # prior-attempt rows (see STT)
+            else:
+                try:
+                    lines = get_ocr_reader(cfg).read(fetched.local_path)
+                    ocr_store = OcrStore(ws.catalog_db)
+                    ocr_store.replace_lines(video.id, lines)
+                    ocr_store.close()
+                    ocr_lines = len(lines)
+                    trace("ocr", "done", f"{ocr_lines} lines")
+                except Exception as e:
+                    ocr_lines = 0
+                    failed.add("ocr")
+                    _trace_fail("ocr", e)
 
             # Role 7: action recognition per Role-1 segment (optional, best-effort).
             n_actions = 0
-            try:
-                per_span = get_action_recognizer().recognize(
-                    fetched.local_path, spans, get_ingest_actions()
-                )
-                events = []
-                for seg, seg_events in zip(segments, per_span):
-                    for e in seg_events:
-                        events.append(e.model_copy(update={
-                            "video_id": video.id, "segment_id": seg.id,
-                        }))
-                act_store = ActionStore(ws.catalog_db)
-                act_store.replace_events(video.id, events)
-                act_store.close()
-                n_actions = len(events)
-                trace("action", "done", f"{n_actions} events")
-            except Exception as exc:
-                n_actions = 0
-                failed.add("action_recognizer")
-                _trace_fail("action", exc)
+            if not _enabled("action_recognizer"):
+                _purge("action_recognizer", ActionStore, "replace_events")
+            else:
+                try:
+                    per_span = get_action_recognizer(cfg).recognize(
+                        fetched.local_path, spans, get_ingest_actions(cfg)
+                    )
+                    events = []
+                    for seg, seg_events in zip(segments, per_span):
+                        for e in seg_events:
+                            events.append(e.model_copy(update={
+                                "video_id": video.id, "segment_id": seg.id,
+                            }))
+                    act_store = ActionStore(ws.catalog_db)
+                    act_store.replace_events(video.id, events)
+                    act_store.close()
+                    n_actions = len(events)
+                    trace("action", "done", f"{n_actions} events")
+                except Exception as exc:
+                    n_actions = 0
+                    failed.add("action_recognizer")
+                    _trace_fail("action", exc)
 
             # Decode the file ONCE at the target fps and fan the single frame
             # stream out to BOTH Role 2 (visual embedding, critical) and Role 5
             # (object detection, best-effort) — previously two separate full decode
             # passes over the identical frames. Streaming per batch keeps memory to
             # one batch, not the whole video.
-            embedder = get_visual_embedder()
+            embedder = get_visual_embedder(cfg)
             # per-video vector shard (layout v2): removal = delete the video dir
             store = NumpyFlatVectorStore(video_dir / "vectors")
 
             # Role 5 detector is optional; if it won't even load we still embed.
             detector = None
             classes = None
-            try:
-                detector = get_object_detector()
-                classes = get_ingest_classes()
-            except Exception as e:
-                detector = None
-                failed.update({"object_detector", "object_tracker"})
-                _trace_fail("detect", e)
+            if _enabled("object_detector"):
+                try:
+                    detector = get_object_detector(cfg)
+                    classes = get_ingest_classes(cfg)
+                except Exception as e:
+                    detector = None
+                    failed.update({"object_detector", "object_tracker"})
+                    _trace_fail("detect", e)
+            else:
+                # No detections means the tracker has nothing to associate.
+                skipped.add("object_tracker")
+                _purge("object_detector", DetectionStore, "replace_detections")
+                _purge("object_tracker", TrackStore, "replace_tracks")
             det_ok = detector is not None
             frames_dets: list[tuple[float, list]] = []
 
@@ -309,7 +400,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                         frames_dets = []
                         failed.update({"object_detector", "object_tracker"})
                         _trace_fail("detect", e)
-            store.set_meta({"embedder": embedder_id("visual_embedder")})
+            store.set_meta({"embedder": embedder_id("visual_embedder", cfg)})
             store.persist()
             trace("ingest", "decode",
                   f"{n} frames @ {fps}fps -> embedding + detection (single pass)",
@@ -319,9 +410,36 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
             # (best-effort). The tracker fills video_id/timestamp/track_id.
             n_detections = 0
             n_tracks = 0
-            if det_ok and frames_dets:
+            # Evaluate the tracker gate UNCONDITIONALLY (like diarizer_on): with
+            # zero decoded frames the branches below never run, and a disabled
+            # tracker that never registered as skipped would be provenance-stamped
+            # — permanently stale under the stamped-and-disabled rule.
+            tracker_on = _enabled("object_tracker")
+            if not tracker_on:
+                # Hoisted out of the det_ok branch: the no-live-rows invariant for
+                # a disabled role must hold even when the detector failed to load,
+                # died mid-decode, or decoded zero frames.
+                _purge("object_tracker", TrackStore, "replace_tracks")
+            if det_ok and frames_dets and not tracker_on:
+                # Tracker disabled by the profile: keep the detector's output
+                # (untracked, track_id NULL) and purge any prior-attempt tracks.
                 try:
-                    result = get_object_tracker().track(video.id, frames_dets)
+                    flat = [
+                        d.model_copy(update={"video_id": video.id, "timestamp": ts})
+                        for ts, dets in frames_dets for d in dets
+                    ]
+                    det_store = DetectionStore(ws.catalog_db)
+                    det_store.replace_detections(video.id, flat)
+                    det_store.close()
+                    n_detections = len(flat)
+                    trace("track", "skipped-stored-untracked", f"{n_detections} detections")
+                except Exception as e:  # noqa: BLE001 — best-effort, like the enabled path
+                    n_detections = 0
+                    failed.add("object_detector")
+                    _trace_fail("detect", e)
+            elif det_ok and frames_dets:
+                try:
+                    result = get_object_tracker(cfg).track(video.id, frames_dets)
                     det_store = DetectionStore(ws.catalog_db)
                     det_store.replace_detections(video.id, result.detections)
                     det_store.close()
@@ -342,7 +460,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
             # already written above, which they are).
             n_text = 0
             try:
-                n_text = index_text(video.id, video_dir, ws.catalog_db)
+                n_text = index_text(video.id, video_dir, ws.catalog_db, cfg=cfg)
                 trace("text_index", "done", f"{n_text} text vectors")
             except Exception as e:
                 n_text = 0
@@ -365,7 +483,7 @@ def _ingest_impl(uri: str, ws: Workspace, fps: float) -> IngestResult:
                     "ocr": ocr_lines,
                     "text_embedder": n_text,
                 },
-                roles=[r for r in PROVENANCE_ROLES if r not in failed],
+                roles=[r for r in PROVENANCE_ROLES if r not in failed and r not in skipped],
                 cfg=cfg,
             )
             # Stamp the video with this ingest's trace run_id (None when tracing is

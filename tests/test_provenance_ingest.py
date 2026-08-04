@@ -93,8 +93,13 @@ def test_stamp_uses_config_pinned_at_role_launch_not_ingest_end(tmp_path, monkey
     import va.pipeline.ingest as ing
     import va.provenance as provenance
 
-    pinned = object()                                  # a sentinel "config at role-launch"
-    monkeypatch.setattr(ing, "load_config", lambda: pinned)
+    # A sentinel "config at role-launch" — identity-checked below. A REAL Config
+    # (not a bare object) because ingest reads .footage_profile off the probe
+    # (WS2.b) and passes the pin to role getters + _enabled(), which call
+    # .role()/.roles on it (WS2.c). Identity is still what the assertion checks.
+    from va.configuration import load_config as real_load_config
+    pinned = real_load_config()
+    monkeypatch.setattr(ing, "load_config", lambda **kw: pinned)
 
     seen: list = []
     monkeypatch.setattr(provenance, "role_fingerprint",

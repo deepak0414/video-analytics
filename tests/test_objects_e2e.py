@@ -10,7 +10,7 @@ from va.pipeline.objects import query_objects
 def test_ingest_detects_and_queries_objects(tmp_path, monkeypatch):
     # the stub only "detects" colors, so make the ingest vocabulary colors
     import va.pipeline.ingest as ingest_mod
-    monkeypatch.setattr(ingest_mod, "get_ingest_classes", lambda: ["red", "blue"])
+    monkeypatch.setattr(ingest_mod, "get_ingest_classes", lambda *a, **k: ["red", "blue"])
 
     video = write_box_video(
         tmp_path / "clip.mp4", bg_rgb=(128, 128, 128), box_rgb=(220, 30, 30),

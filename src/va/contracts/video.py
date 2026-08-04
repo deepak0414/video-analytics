@@ -48,6 +48,17 @@ class ResolvedVideo(BaseModel):
     metadata: VideoMetadata = Field(default_factory=VideoMetadata)
 
 
+class Camera(BaseModel):
+    """A fixed camera/stream (the `cameras` table, WS-3). Videos ("chunks") of an
+    A-LSSRVF reference one via `camera_id`; a camera's chunks form a collection."""
+
+    id: str
+    name: str
+    source_ref: Optional[str] = None   # how to reach the feed (RTSP URL / NVR channel)
+    location: Optional[str] = None     # human spatial hint ("front door"); WS-5 topology input
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class Video(BaseModel):
     """A catalog row (the `videos` table)."""
 
@@ -69,6 +80,15 @@ class Video(BaseModel):
     # Trace run_id of the ingest that last processed this video (ingest<->query
     # trace link). None when it was ingested with tracing off.
     last_ingest_run_id: Optional[str] = None
+    # Footage profile the video was ingested under (WS-2). None = ingested
+    # before the profile layer existed.
+    profile: Optional[str] = None
+    # Camera this chunk came from (WS-3, A-LSSRVF). None = standalone video (A-EV).
+    camera_id: Optional[str] = None
+    # Absolute UTC epoch seconds of this chunk's t=0 (dual time model, plan §4).
+    # None = relative-only. Every stored timestamp stays video-relative;
+    # absolute = start_epoch + relative.
+    start_epoch: Optional[float] = None
 
     @classmethod
     def from_resolved(cls, r: ResolvedVideo) -> "Video":

@@ -7,9 +7,17 @@ upgrade needs to reprocess (pillar B). Read-only; drives `va stale`.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
-from va.configuration import load_config
+logger = logging.getLogger(__name__)
+
+from va.configuration import (
+    GATE_DEPENDENTS,
+    GATEABLE_ROLES,
+    config_for,
+    default_footage_profile,
+)
 from va.contracts.video import IngestStatus
 from va.pipeline.paths import Workspace
 from va.provenance import PROVENANCE_ROLES, role_fingerprint
@@ -32,10 +40,27 @@ def stale_report(workdir: str, role: Optional[str] = None) -> list[dict[str, Any
         raise ValueError(
             f"unknown provenance role {role!r}; expected one of {', '.join(PROVENANCE_ROLES)}")
     roles = [role] if role else list(PROVENANCE_ROLES)
-    # One config snapshot for the whole report: every role is compared against the same
-    # current config (and we load it once, not once per role).
-    cfg = load_config()
-    current = {r: role_fingerprint(r, cfg)["fingerprint"] for r in roles}
+    # One config snapshot PER FOOTAGE PROFILE for the whole report (memoized): each
+    # video is compared against the config its roles actually run under — its
+    # recorded profile (WS2.c record==reality) — not the base config, which would
+    # read every profile-ingested video as permanently stale for overridden roles.
+    # Roles the profile DISABLES are excluded outright: they are deliberately
+    # unstamped (never run under this profile), not stale.
+    _snap: dict[str, tuple[dict[str, str], set[str]]] = {}
+
+    def _current(v) -> tuple[dict[str, str], set[str]]:
+        prof = v.profile or default_footage_profile(v.source_type.value)
+        if prof not in _snap:
+            cfg = config_for(v.profile, v.source_type.value)
+            fps_ = {r: role_fingerprint(r, cfg)["fingerprint"] for r in roles}
+            disabled = {r for r in GATEABLE_ROLES
+                        if r in cfg.roles and not cfg.role(r).enabled}
+            for parent in list(disabled):
+                # dependency closure: ingest skips these with their parent
+                disabled |= GATE_DEPENDENTS.get(parent, frozenset())
+            disabled &= set(roles)
+            _snap[prof] = (fps_, disabled)
+        return _snap[prof]
 
     ws = Workspace(workdir)
     cat = Catalog(ws.catalog_db)
@@ -50,7 +75,21 @@ def stale_report(workdir: str, role: Optional[str] = None) -> list[dict[str, Any
                 continue
             rows = pv.get(v.id)
             recorded = {row["role"]: row["fingerprint"] for row in rows}
-            stale = [r for r in roles if recorded.get(r) != current[r]]
+            try:
+                current, disabled = _current(v)
+            except Exception as e:  # noqa: BLE001 — e.g. the video's profile yaml was
+                # renamed; one broken profile must not kill the whole report.
+                logger.warning(
+                    "stale: skipping video %s — footage profile %r can't be loaded (%s)",
+                    v.id, v.profile, e)
+                continue
+            # A disabled role is excluded ONLY while unstamped (never ran under this
+            # profile). Stamped-AND-disabled means the profile was edited after the
+            # ingest: the rows contradict the profile and must surface as stale
+            # (the remedy — reingest under the carried profile — purges them).
+            stale = [r for r in roles
+                     if (r in disabled and recorded.get(r) is not None)
+                     or (r not in disabled and recorded.get(r) != current[r])]
             if stale:
                 # Surface the recorded ingest fps (all roles of one ingest share it) so a
                 # reprocess can preserve the frame density Roles 2/5/6/7 saw — `va reingest`
@@ -64,6 +103,10 @@ def stale_report(workdir: str, role: Optional[str] = None) -> list[dict[str, Any
                     "title": v.title,
                     "stale_roles": stale,
                     "recorded_fps": next(iter(fps_vals)) if len(fps_vals) == 1 else None,
+                    # The footage profile the comparison ran under — reprocess must
+                    # rebuild + restamp under this same profile (WS2.c).
+                    "profile": v.profile,
+                    "source_type": v.source_type.value,
                 })
         return out
     finally:

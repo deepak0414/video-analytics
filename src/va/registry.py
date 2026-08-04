@@ -344,13 +344,15 @@ def get_ingest_actions(cfg: Optional[Config] = None) -> list[str]:
     return list(spec.get("actions") or DEFAULT_INGEST_ACTIONS)
 
 
-def embedder_id(role: str) -> str:
+def embedder_id(role: str, cfg: Optional[Config] = None) -> str:
     """Model id backing an embedder role (`visual_embedder` / `text_embedder`) — the
     identity stamped onto that role's vector shards for shard tagging
     (provenance-reprocess-plan.md). Falls back to the `hash` stub id exactly as
-    get_text_embedder does when roles.yaml omits the role."""
+    get_text_embedder does when roles.yaml omits the role. Pass the same cfg the
+    embedder was built from (e.g. ingest's footage-profile pin) — a mismatched
+    tag makes the TAG-3 guard silently drop the shard from search."""
     try:
-        model = load_config().role(role).model
+        model = (cfg or load_config()).role(role).model
     except KeyError:
         model = None
     return model or "hash"

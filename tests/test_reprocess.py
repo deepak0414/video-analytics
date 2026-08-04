@@ -153,7 +153,7 @@ def test_execute_skips_role_without_in_place_reprocess(tmp_path):
     _make_stale(wd, res.video.id, role="ocr")
 
     result = execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
-    assert (str(res.video.id), "ocr") in result["skipped"]
+    assert (str(res.video.id), "ocr", "no in-place reprocess yet") in result["skipped"]
     assert not result["reprocessed"]
     assert plan_reprocess(wd, all_stale=True, role="ocr")   # still stale (untouched)
 
@@ -308,9 +308,10 @@ def test_caption_reprocess_fails_when_backfill_reports_removed(tmp_path, monkeyp
 
 
 def test_restamp_uses_one_batch_pinned_config(tmp_path, monkeypatch):
-    # every restamp must fingerprint against ONE config pinned at batch start, not a fresh
-    # load per (video, role) — else a mid-batch config edit stamps a fingerprint that drifted
-    # from what the reprocessor ran under (a missed stale; PROV-3's lesson).
+    # every restamp must fingerprint against ONE config pinned at batch start (per footage
+    # profile since WS2.c), not a fresh load per (video, role) — else a mid-batch config
+    # edit stamps a fingerprint that drifted from what the reprocessor ran under (a missed
+    # stale; PROV-3's lesson). The pin seam is config_for (per-profile), not load_config.
     import va.pipeline.reprocess as rp
     import va.provenance as provenance
 
@@ -318,14 +319,19 @@ def test_restamp_uses_one_batch_pinned_config(tmp_path, monkeypatch):
     res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
     _make_stale(wd, res.video.id, role="text_embedder")
 
-    pinned = object()
-    monkeypatch.setattr(rp, "load_config", lambda: pinned)
+    # A REAL Config as the identity sentinel: execute_reprocess reads .roles/.role()
+    # off the pin for the profile-disabled check (WS2.c round 7).
+    from va.configuration import load_config as _lc
+    pinned = _lc()
+    calls = []
+    monkeypatch.setattr(rp, "config_for", lambda *a, **k: calls.append(a) or pinned)
     seen = []
     real_fp = provenance.role_fingerprint
     monkeypatch.setattr(provenance, "role_fingerprint",
                         lambda role, cfg=None: seen.append(cfg) or real_fp(role))
     rp.execute_reprocess(wd, plan_reprocess(wd, all_stale=True))
     assert seen and all(c is pinned for c in seen)    # the pinned cfg, never a fresh load
+    assert len(calls) == 1                            # memoized: one load per profile per batch
 
 
 def test_failed_text_rebuild_preserves_the_old_shard(tmp_path):
