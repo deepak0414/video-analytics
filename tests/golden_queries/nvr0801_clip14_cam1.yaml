@@ -1,0 +1,12 @@
+# NVR 2026-08-01 clip 14, cam 1 (driveway) — documented occlusion miss.
+# Human truth: "Seen a person in white clothings behind the hedges."
+# Spike scorecard #14: YOLO person 0/37 frames — the person is small + occluded by
+# the hedge. Strict xfail: a detector that finds them turns this red for promotion.
+video_id: nvr0801_clip14_cam1
+source_key: "sha256:5292cdf071ae1d896a45c308691339efbcdff861ac35022cfabe026fc14077b0"
+title: NVR clip 14 cam1 — person behind hedges (occluded)
+default_min_score: 0.10
+
+queries:
+  - {id: nvr14-obj-01, query: "person", modality: object, expect: match, provenance: human-verified,
+     xfail: "YOLO occlusion miss: person behind hedges detected in 0/37 frames (spike scorecard #14)"}

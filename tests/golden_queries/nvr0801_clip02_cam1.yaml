@@ -1,0 +1,29 @@
+# NVR 2026-08-01 clip 02, cam 1 (driveway) — THE transient-event clip.
+# Human truth: "2 kids going on road in front of house. one is on scooter (may be
+# electric) and other one is on a bike."
+# Spike scorecard #02: detection ✅ (person×4, bicycle, skateboard — full vocab);
+# caption ❌ ("another car driving away" — one scene-level caption per segment,
+# keyframe is the static scene). The caption miss is the documented A-LSSRVF
+# limitation; strict xfail alerts when a transient-aware captioner lands.
+video_id: nvr0801_clip02_cam1
+source_key: "sha256:44265e93d3b323c344d89c02b808e29979d878b015b99fff53679b5b838f4d67"
+title: NVR clip 02 cam1 — two kids, scooter + bike
+default_min_score: 0.10
+
+queries:
+  # Calibration run 2026-08-04 (.va-nvr): the in-ingest detector (1 fps sampling,
+  # narrowed vocab) finds NO person/bicycle here — only the spike's STANDALONE
+  # 2 fps run caught the kids. Strict xfail = the in-ingest transient gap, alerts
+  # when event-gated sampling (WS-4) closes it.
+  - {id: nvr02-obj-01, query: "person",  modality: object, expect: match, provenance: human-verified,
+     xfail: "in-ingest 1fps detection misses the transient kids (spike's standalone 2fps run found person x4)"}
+  - {id: nvr02-obj-02, query: "bicycle", modality: object, expect: match, provenance: human-verified,
+     xfail: "in-ingest 1fps detection misses the transient bicycle (spike's standalone 2fps run found it)"}
+  # Calibration 2026-08-04: SigLIP 0.048 (whole-frame embedding dominated by the
+  # static scene) AND the SR.6 VLM scene-presence fallback confirmed 0/8 sampled
+  # frames — the kids are too small/transient for BOTH retrieval paths. verify
+  # stays on so the strict xfail flips red when either path improves.
+  - {id: nvr02-pos-01, query: "children riding on the road", expect: match, verify: true, provenance: human-verified,
+     xfail: "kids invisible to both paths: SigLIP 0.048 < 0.10 and VLM scene-presence 0/8 (calibration 2026-08-04)"}
+  - {id: nvr02-cap-01, query: "children playing outside", modality: caption, expect: match, provenance: human-verified,
+     xfail: "Role-4 transient blindness: one keyframe caption per segment sees only the static scene — spike #02 captioned this 'another car driving away'"}

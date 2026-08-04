@@ -1,0 +1,17 @@
+# NVR 2026-08-01 clip 15, cam 2 (front entrance) — documented false positive.
+# Human truth: "Apart from static scene in the background, leaves and wind chimes
+# moving due to wind." — NO people.
+# Spike scorecard #15: YOLO's STANDALONE 2 fps run reported person×7 here (false
+# positive). The in-ingest run (calibration 2026-08-04) is clean — 0 person — so
+# this is a plain true-negative pin: if the hallucination returns, this turns red.
+video_id: nvr0801_clip15_cam2
+source_key: "sha256:999bae73fe06418f7c8189ee2ad57cd0aaa6347605af8e0c447cd1435fd70fa9"
+title: NVR clip 15 cam2 — ambient only (wind), no people
+default_min_score: 0.10
+
+queries:
+  - {id: nvr15-obj-01, query: "person", modality: object, expect: no_match, provenance: human-verified}
+  # Positive control: without a match anchor the no_match above passes vacuously
+  # when the detector silently stores zero rows (the batch-ingest starvation
+  # mode) — the parked BMW keeps this red if the detector ever goes dead.
+  - {id: nvr15-obj-02, query: "car", modality: object, expect: match, provenance: human-verified}

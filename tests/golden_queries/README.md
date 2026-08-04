@@ -2,7 +2,9 @@
 
 Ground-truth query/answer sets per video, used to test the search system end-to-end.
 Each video has a human-readable `<video_id>.md` (queries + answers) and a machine-readable
-`<video_id>.yaml` (assertions the test harness runs).
+`<video_id>.yaml` (assertions the test harness runs). A *family* of related clips may
+share one set-level `.md` instead of per-clip ones (example: the NVR set,
+`nvr_2026-08-01_1200-1400.md` covering the `nvr0801_clip*.yaml` fixtures).
 
 ## How fixtures are generated (the "video-analyst" agent)
 
@@ -67,6 +69,9 @@ Skipped automatically without `RUN_GOLDEN=1` (needs GPU models, the claude CLI, 
 ingested workdir); individual questions skip if their video isn't in the workdir.
 
 **Provenance labels** (`provenance:` per query):
+- `human-verified` — a human watched the footage and wrote the truth down (hand counts,
+  the NVR clips' owner-written descriptions). Strongest: tests *accuracy* against
+  first-hand observation. Valid for `queries:` and `ask_questions:` blocks alike.
 - `vision-verified` — ground truth independently confirmed from frames by the adversarial
   workflow. Strong: tests *accuracy*.
 - `model-regression` — pins behavior we observed from a validated real-model run (e.g.
@@ -99,6 +104,14 @@ ingested workdir); individual questions skip if their video isn't in the workdir
   `dresses-pos-04`), YOLO vocab gap (`cobra-obj-01`). Running it also **caught an SR.5
   regression**: the relevance gate emptied evidence and starved the deep-scan target
   resolver — fixed by stashing the pre-gate dominant video.
+- ✅ 2026-08-04: **first real-footage fixture set** — `nvr0801_clip*.yaml` (9 of the 22
+  Lorex NVR clips from 2026-08-01 12:00–14:00; see `nvr_2026-08-01_1200-1400.md`).
+  Provenance is **human-verified** from the owner's per-clip ground-truth file, with
+  `xfail`s sourced from the `security-footage-spike-findings.md` scorecard. Runs against
+  its own workdir: `GOLDEN_WORKDIR=.va-nvr` (clips ingested with `--profile security`,
+  so object queries use the narrowed vocabulary). NB: batch-ingesting all 22 in ONE
+  process silently starves YOLO after the first clip (spike infra finding, reproduced) —
+  ingest each clip in its own `va ingest` process.
 - ⏳ The diarization block is checked by reading the existing transcripts table's distinct
   speaker count; a *re-ingest-with-hint* harness (auto-4 vs `num_speakers=5`) is not built.
 - Each video keeps its `future_queries` so the test set grows as Roles 1/4/5/7/8/10 land.

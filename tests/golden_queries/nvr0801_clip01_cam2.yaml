@@ -1,0 +1,14 @@
+# NVR 2026-08-01 clip 01, cam 2 (front entrance) — true-negative control.
+# Human truth: "House entrance view. Silver bmw sedan parked in driveway. Two wind
+# chimes moving slowly." — no people anywhere in the clip.
+# Spike scorecard #01: detector correctly reported NO people. This fixture pins that
+# true negative (cf. clip 15 where the same detector hallucinates person×7).
+video_id: nvr0801_clip01_cam2
+source_key: "sha256:28981471fe6ed40140db53a9704336b2fb3acebe6c02663d109505de0bd9de7d"
+title: NVR clip 01 cam2 — entrance, no people
+default_min_score: 0.10
+
+queries:
+  - {id: nvr01-obj-01, query: "person",  modality: object, expect: no_match, provenance: human-verified}
+  - {id: nvr01-obj-02, query: "car",     modality: object, expect: match,    provenance: human-verified}
+  - {id: nvr01-neg-01, query: "people riding bicycles",    expect: no_match, provenance: human-verified}

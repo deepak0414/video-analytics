@@ -1,0 +1,14 @@
+# NVR 2026-08-01 clip 12, cam 1 (driveway) — moving-vehicle regime.
+# Human truth: "A white mid-size SUV with rack railings on top is driving right to
+# left on road. Tree branches and leaves shaking as wind blows."
+# Spike scorecard #12: detection 🟨 (suv×3, weak + noise); caption ❌ (static).
+# A moving vehicle is barely distinguishable from the parked ones for every current
+# role — this fixture measures the retrieval side of that gap.
+video_id: nvr0801_clip12_cam1
+source_key: "sha256:a1f32d5ca80f1abddbbe9b8801a23f73dcf831ffabece38eceee69a81227b114"
+title: NVR clip 12 cam1 — white SUV driving right-to-left
+default_min_score: 0.10
+
+queries:
+  - {id: nvr12-pos-01, query: "a white SUV on a residential street", expect: match, provenance: human-verified}
+  - {id: nvr12-obj-01, query: "car", modality: object, expect: match, provenance: human-verified}

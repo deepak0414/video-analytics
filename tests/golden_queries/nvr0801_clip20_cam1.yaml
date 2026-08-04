@@ -1,0 +1,20 @@
+# NVR 2026-08-01 clip 20, cam 1 (driveway) — multi-person + transient child.
+# Human truth: "woman ... on sidewalk. A young little girl appears running on
+# driveway, goes inside house via garage and reappears ... Young girl is wearing
+# grey pants, purple top and has blueish shoes."
+# Spike scorecard #20: detection ✅ people (max 2/frame); caption 🟨 — the woman
+# is seen, the RUNNING GIRL is missed (transient). The girl-specific caption
+# assertion is the strict-xfail documentation of that miss.
+video_id: nvr0801_clip20_cam1
+source_key: "sha256:6014ebf5328e5573e0179ee5990f8488f1a9b1a6916049954dd9a05164214471"
+title: NVR clip 20 cam1 — woman on sidewalk + running girl
+default_min_score: 0.10
+
+queries:
+  - {id: nvr20-obj-01, query: "person", modality: object, expect: match, provenance: human-verified}
+  # Query deliberately stopword-free: the caption search is bare token overlap,
+  # and "a" ties with every caption in the corpus (rank then depends on DB
+  # insertion order under the global k=20 cut) — "child running" overlaps the
+  # static-scene captions in zero tokens, so the xfail is deterministic.
+  - {id: nvr20-cap-01, query: "child running", modality: caption, expect: match, provenance: human-verified,
+     xfail: "Role-4 transient blindness: the running girl never makes the keyframe caption (spike scorecard #20)"}

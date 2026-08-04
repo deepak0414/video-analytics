@@ -1,0 +1,17 @@
+# NVR 2026-08-01 clip 16, cam 2 (front entrance) — the spike's strongest caption hit.
+# Human truth: "A woman in may 60s seen on the front porch with pink sweater and
+# yellow clothes walking towards driveway and facing towards the house and camera 1."
+# Spike scorecard #16: caption ✅✅ ("pink top, yellow skirt, near entrance");
+# detection ✅ person 35/35 frames.
+video_id: nvr0801_clip16_cam2
+source_key: "sha256:01795e491e3938449edff987c8d1a713bafbebd10cbf3026ac32e8e8b172215e"
+title: NVR clip 16 cam2 — woman in pink sweater on porch
+default_min_score: 0.10
+
+queries:
+  - {id: nvr16-obj-01, query: "person", modality: object, expect: match, provenance: human-verified}
+  # SigLIP scored 0.018 (calibration 2026-08-04): the woman is a tiny region of a
+  # 2688x1520 static frame — whole-frame embedding sees only the scene. The SR.6
+  # VLM verifier recovers her (the Role-4 caption literally read "pink top").
+  - {id: nvr16-pos-01, query: "a woman wearing a pink sweater", expect: match, verify: true, provenance: human-verified}
+  - {id: nvr16-cap-01, query: "a person in pink near the entrance", modality: caption, expect: match, provenance: human-verified}
