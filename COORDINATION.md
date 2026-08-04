@@ -369,3 +369,88 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   next `va ask` re-sweeps. **For the web agent:** after a caption reprocess a video's `segments.caption`,
   `text_vectors` shard, AND cached `va ask` sweeps all change together. This completes RPRC-1 (all three
   standalone-code roles — text, visual, caption — wired); the remaining stale roles still → `va reingest`.
+- **2026-08-03 (roles):** Footage-profile config layer landed (architecture-evolution-plan WS-2,
+  item WS2.a). `load_config()` gained an optional third layer: `config/profiles/footage/<name>.yaml`
+  per-role overrides deep-merged over roles.yaml specs at load time; `Config` gained
+  `footage_profile: str` (default `"generic"` = no-op; missing generic file tolerated, so run-siglip/
+  run-claude/run-qwen3vl config dirs are unaffected). Additive only: `load_config()` signature gains
+  optional `footage_profile=`; no call-site or behavior change under the default — full suite green
+  (530 passed). Per-ingest selection (`--profile`, `videos.profile`) is the next item (WS2.b).
+- **2026-08-03 (roles):** Per-ingest footage-profile selection landed (WS2.b, stacked on WS2.a).
+  Additive shared-surface changes: catalog DB is schema **v3** (`videos.profile` TEXT, NULL =
+  pre-profile ingest; auto-migrates on open), the `Video` contract + catalog row mapping gain
+  `profile`, `ingest()` gains optional `profile=` (validated via `load_config` BEFORE fetch; unknown
+  name raises `FileNotFoundError`, even on the already-ingested dedup path; recorded name resolves
+  explicit arg > roles.yaml `active_footage_profile` > source-derived default, so the record matches
+  what roles self-loading config actually run under), `va ingest` gains
+  `--profile` (default source-derived, currently always `generic`; a deduped ingest with a differing
+  profile prints a not-applied notice), and `va reingest` gains `--profile` — `reingest_video()`
+  carries the video's recorded profile forward by default instead of resetting it to the source
+  default, and validates the target profile BEFORE the destructive removal (a typo'd name leaves
+  the video intact). NOTE: the profile is *recorded only* — roles do not consume it until WS2.c, and
+  the provenance stamp still fingerprints the base config on purpose (stamping overlay-modified cfg
+  before roles apply it would stamp models that didn't run). Full suite 538 passed / 2 skipped.
+  One test double updated (`test_provenance_ingest` load_config lambda now accepts kwargs).
+- **2026-08-03 (roles):** Footage profiles now GATE roles + vocab at ingest (WS2.c, stacked on
+  WS2.b). `RoleConfig` gains `enabled: bool = True`; ingest pins `load_config(footage_profile=…)`
+  and passes that cfg to EVERY role getter (they always accepted an optional cfg), so per-role
+  overlay overrides — including `classes:`/`actions:` vocab — now actually apply per ingest.
+  `enabled: false` skips a best-effort role (a trace `skipped` event is emitted); dependent roles
+  skip with their parent (STT off → diarizer; detector off → tracker). SKIPPED roles are NOT
+  provenance-stamped, so `va stale` reads them as stale — deliberate (false stale OK). This
+  SUPERSEDES the WS2.b note: the provenance stamp now fingerprints the overlay-applied config,
+  which is what the roles really ran under. New checked-in `config/profiles/footage/security.yaml`
+  (skips roles 8/9, narrows detector classes). ⚠ Behavior note for the web agent: an ingest under a
+  non-generic profile can legitimately produce 0 transcript rows by design — not a Whisper failure.
+  Five zero-arg test doubles of registry getters updated to `lambda *a, **k:` (see the new CLAUDE.md
+  lesson). Also profile-aware after review: `embedder_id(role, cfg=None)` + `index_text(..., cfg=)`
+  tag shards from the SAME overlaid config that embedded them; `va stale` / `va reprocess` compare,
+  rebuild, and restamp each video under ITS recorded profile (`config_for()` helper; stale rows
+  gained `profile`/`source_type`; profile-DISABLED roles are excluded from staleness, not reported
+  forever-stale); a skipped role PURGES rows a prior attempt wrote (empty `replace_*`), so a retry
+  under a gating profile honors the 0-rows promise; footage profiles now ship in all four config
+  dirs (run-siglip/run-claude/run-qwen3vl too). One reprocess test double moved to the new pin seam
+  (`config_for`), assertions kept. Round-2 review fixes: the enabled-gate tolerates a roles.yaml
+  that OMITS roles (missing = enabled, mirroring the getters' stub fallback — a minimal config no
+  longer aborts ingest); `object_tracker: {enabled: false}` now honored (detections stored
+  UNTRACKED with `track_id` NULL, tracks purged); vocab override proven end-to-end (color-class
+  profile drives stub detections); ⚠ documented caveat: do not override EMBEDDER models in a
+  footage profile — the query path is profile-unaware and would tag-skip those shards (CLAUDE.md +
+  loop backlog). Full suite 555 passed / 2 skipped.
+- **2026-08-03 (roles):** WS2.c staleness semantics CORRECTED (supersedes "profile-DISABLED roles
+  are excluded from staleness" two entries up): a disabled role is excluded ONLY while unstamped;
+  a role that RAN before the profile was edited to disable it now READS STALE (its rows contradict
+  the profile; `va reingest` under the carried profile purges them and converges). `va reprocess`
+  routes profile-disabled roles to `skipped` (never re-runs them — a disabled captioner is not
+  regenerated). Also stricter load validation: `enabled:` in a footage yaml must be a real YAML
+  boolean (`enabled: "false"` now raises at `load_config`, closing an ingest/stale divergence),
+  and core (non-gateable) roles reject `enabled: false` outright. Full suite 565 expected green —
+  count in the final digest.
+- **2026-08-03 (roles):** WS2.d — footage profiles gain PROFILE-WIDE knobs (config surface only,
+  stacked on WS2.c): `Config.footage: FootageSettings` with `retention_days` (None = keep forever),
+  `time_model` (relative|wall_clock), `deep_scan` (auto|"off"), validated at load with
+  extra='forbid' (a typo'd knob raises, naming the yaml). `security.yaml` records the plan's locked
+  values (14 / wall_clock / off) — inert until P7.a, WS-3, and R11.a consume them. ⚠ Small shape
+  change: `execute_reprocess`'s `skipped` rows are now 3-tuples `(video_id, role, reason)` (the
+  CLI prints the real reason — "profile disables this role" vs "no in-place reprocess yet").
+  Full suite 575 passed / 2 skipped.
+- **2026-08-03 (roles):** WS3.a — camera entity landed (schema **v4**; stacked on WS2.d).
+  Additive: new `cameras` table (`id/name/source_ref/location/created_at`) + `videos.camera_id`
+  (nullable FK; NULL = standalone A-EV video — every existing row and all A-EV ingests stay NULL),
+  auto-migrating on open. New `Camera` contract (`contracts/video.py`), `CameraStore`
+  (`storage/structured/cameras.py`: get_or_create/get/list, id = idempotency key), and
+  `Catalog.set_camera(video_id, camera_id)`. Nothing sets `camera_id` during ingest yet — WS-4's
+  stream source will — but `reingest_video` PRESERVES an existing camera link across its
+  remove+ingest cycle (re-attached on the failure path too, so a later plain-ingest retry keeps
+  it). Full suite 582 passed / 2 skipped.
+- **2026-08-03 (roles):** WS3.b — dual time model landed (schema **v5**; stacked on WS3.a).
+  Additive: `videos.start_epoch` REAL (absolute UTC epoch seconds of a chunk's t=0; NULL =
+  relative-only — every existing row and all A-EV ingests), `Video.start_epoch`,
+  `Catalog.set_start_epoch`, and NEW `pipeline/timeline.py` — `absolute_time(video, rel)` and
+  `wallclock_to_chunks(videos, t0, t1) -> [ChunkRange(video_id, rel_start, rel_end)]` (skips
+  NULL-epoch videos; clamps + orders; unknown-duration chunks are CAPPED at the range end, never
+  open-ended). `reingest_video` carries `start_epoch` across the cycle like camera_id. Storage rule
+  unchanged: ALL stored timestamps remain video-relative (plan §4). Nothing sets `start_epoch`
+  yet — WS-4's NVR chunk source will. NB for the future query layer: `va query`/web endpoints are
+  still relative-only; wall-clock query surfaces come with WS-4/5. Full suite 589 passed / 2
+  skipped.

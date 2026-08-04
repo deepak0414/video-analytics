@@ -1,0 +1,24 @@
+# Footage profile: generic (the default) — a deliberate NO-OP.
+#
+# A footage profile is the third config layer (roles.yaml base + hardware profile +
+# footage profile), selecting per-input-domain role overrides — see
+# architecture-evolution-plan.md WS-2. `generic` keeps the A-EV (edited-video) behavior
+# byte-for-byte identical to a config with no footage layer at all; loaders tolerate
+# this file being absent for exactly that reason.
+#
+# Shape: a `roles:` mapping whose entries deep-merge over roles.yaml's `roles:` specs.
+# The vocab keys the code actually reads are `classes:` (object_detector) and
+# `actions:` (action_recognizer); best-effort roles may set `enabled: false`. E.g.
+#   roles:
+#     object_detector:
+#       classes: [person, car, bicycle, dog]
+#     speech_to_text:
+#       enabled: false
+#
+# Profile-wide knobs may sit alongside `roles:` (EXAMPLE values — the defaults are
+# retention_days: null (keep forever), time_model: relative, deep_scan: auto; unknown
+# keys are rejected at load):
+#   retention_days: 14        # Tier-1 rolling window in days; null = keep forever
+#   time_model: wall_clock    # relative | wall_clock (presentation only)
+#   deep_scan: "off"          # auto | "off" (quote "off" — bare off is YAML false)
+roles: {}

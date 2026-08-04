@@ -10,7 +10,7 @@ from va.pipeline.ingest import ingest
 
 def _setup(tmp_path, monkeypatch):
     import va.pipeline.ingest as ingest_mod
-    monkeypatch.setattr(ingest_mod, "get_ingest_classes", lambda: ["red", "blue"])
+    monkeypatch.setattr(ingest_mod, "get_ingest_classes", lambda *a, **k: ["red", "blue"])
     video = write_boxes_video(
         tmp_path / "clip.mp4", bg_rgb=(128, 128, 128),
         boxes=[

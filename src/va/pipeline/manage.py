@@ -88,9 +88,29 @@ def remove_video(workdir: str, ident: str, keep_media: bool = False) -> Optional
         catalog.close()
 
 
-def reingest_video(workdir: str, ident: str, fps: float = 1.0):
-    """remove + ingest from the canonical source. Returns IngestResult or None."""
+def reingest_video(workdir: str, ident: str, fps: float = 1.0, profile: str | None = None):
+    """remove + ingest from the canonical source. Returns IngestResult or None.
+    The recorded footage profile carries forward unless `profile` overrides it
+    (a pre-profile row's None falls through to the source-derived default)."""
+    from va.configuration import load_config
     from va.pipeline.ingest import ingest
+
+    ws = Workspace(workdir)
+    catalog = Catalog(ws.catalog_db)
+    try:
+        existing = lookup_video(catalog, ident)
+    finally:
+        catalog.close()
+    if existing is None:
+        return None
+    # Validate the target profile BEFORE the destructive removal: a typo'd
+    # --profile (or a recorded profile whose yaml was renamed since ingest) must
+    # fail here with the video's data intact, not after remove_video ran.
+    # Unconditional: a None target resolves exactly as ingest's own probe will
+    # (roles.yaml active_footage_profile > generic), so a broken active profile
+    # also fails pre-removal rather than post.
+    target_profile = profile or existing.profile
+    load_config(footage_profile=target_profile)
 
     video = remove_video(workdir, ident, keep_media=True)
     if video is None:
@@ -100,4 +120,36 @@ def reingest_video(workdir: str, ident: str, fps: float = 1.0):
         src = video.local_path or video.source_uri
     else:
         src = video.source_uri          # e.g. the YouTube URL: re-download
-    return ingest(src, workdir=workdir, fps=fps)
+    def _reattach_chunk_metadata() -> None:
+        # Carry the chunk metadata (camera link + wall-clock base) across the
+        # remove+ingest cycle, like the profile: reingesting a chunk must not
+        # sever it from its camera's collection or drop it from wall-clock
+        # queries. Runs on the FAILURE path too — ingest recreates the row before
+        # it can fail, and a later plain-`va ingest` retry completes that row
+        # as-is, so the metadata must already be on it.
+        if existing.camera_id is None and existing.start_epoch is None:
+            return
+        catalog = Catalog(ws.catalog_db)
+        try:
+            row = catalog.get_by_source_key(existing.source_key)
+            if row is not None:
+                if existing.camera_id is not None:
+                    catalog.set_camera(row.id, existing.camera_id)
+                if existing.start_epoch is not None:
+                    catalog.set_start_epoch(row.id, existing.start_epoch)
+        finally:
+            catalog.close()
+
+    try:
+        result = ingest(src, workdir=workdir, fps=fps, profile=target_profile)
+    except Exception:
+        _reattach_chunk_metadata()
+        raise
+    _reattach_chunk_metadata()
+    if result is not None:
+        result.video = result.video.model_copy(update={
+            "camera_id": existing.camera_id or result.video.camera_id,
+            "start_epoch": existing.start_epoch
+            if existing.start_epoch is not None else result.video.start_epoch,
+        })
+    return result

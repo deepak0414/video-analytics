@@ -40,7 +40,7 @@ def test_ingest_surfaces_swallowed_role_failure(tmp_path, monkeypatch):
         def read(self, path):
             raise RuntimeError("ocr backend exploded")
 
-    monkeypatch.setattr(ingest_mod, "get_ocr_reader", lambda: Boom())
+    monkeypatch.setattr(ingest_mod, "get_ocr_reader", lambda *a, **k: Boom())
     wd = str(tmp_path / ".va")
     res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
 

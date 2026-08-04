@@ -20,7 +20,7 @@ _COLS = [
     "id", "source_type", "source_uri", "source_key", "local_path", "title",
     "duration_seconds", "fps", "resolution", "has_audio", "ingest_status",
     "ingest_error", "created_at", "fetched_at", "processed_at",
-    "last_ingest_run_id",
+    "last_ingest_run_id", "profile", "camera_id", "start_epoch",
 ]
 
 
@@ -56,6 +56,9 @@ class Catalog:
             "fetched_at": v.fetched_at.isoformat() if v.fetched_at else None,
             "processed_at": v.processed_at.isoformat() if v.processed_at else None,
             "last_ingest_run_id": v.last_ingest_run_id,
+            "profile": v.profile,
+            "camera_id": v.camera_id,
+            "start_epoch": v.start_epoch,
         }
 
     @staticmethod
@@ -77,6 +80,9 @@ class Catalog:
             fetched_at=datetime.fromisoformat(r["fetched_at"]) if r["fetched_at"] else None,
             processed_at=datetime.fromisoformat(r["processed_at"]) if r["processed_at"] else None,
             last_ingest_run_id=r["last_ingest_run_id"],
+            profile=r["profile"],
+            camera_id=r["camera_id"],
+            start_epoch=r["start_epoch"],
         )
 
     # --- ops ---------------------------------------------------------------
@@ -137,6 +143,29 @@ class Catalog:
         if existing is not None:
             return existing, False
         return self.upsert(Video.from_resolved(resolved)), True
+
+    def set_start_epoch(self, video_id: UUID, start_epoch: float) -> None:
+        """Record the absolute UTC base of this chunk's t=0 (WS-3 dual time model;
+        the WS-4 stream source sets it from the NVR segment's start time)."""
+        self._conn.execute(
+            "UPDATE videos SET start_epoch = ? WHERE id = ?",
+            (start_epoch, str(video_id)),
+        )
+        self._conn.commit()
+
+    def set_camera(self, video_id: UUID, camera_id: str) -> None:
+        """Attach a chunk to its camera (WS-3; the WS-4 stream source sets it)."""
+        self._conn.execute(
+            "UPDATE videos SET camera_id = ? WHERE id = ?", (camera_id, str(video_id))
+        )
+        self._conn.commit()
+
+    def set_profile(self, video_id: UUID, profile: str) -> None:
+        """Record the footage profile this ingest runs under (WS-2)."""
+        self._conn.execute(
+            "UPDATE videos SET profile = ? WHERE id = ?", (profile, str(video_id))
+        )
+        self._conn.commit()
 
     def set_status(
         self,

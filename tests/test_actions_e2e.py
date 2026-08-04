@@ -12,7 +12,7 @@ def _patch_vocab(monkeypatch):
     # the stub only grounds motion-vs-static, so make that the ingest vocabulary
     import va.pipeline.ingest as ingest_mod
     monkeypatch.setattr(
-        ingest_mod, "get_ingest_actions", lambda: ["motion", "static scene"]
+        ingest_mod, "get_ingest_actions", lambda *a, **k: ["motion", "static scene"]
     )
 
 

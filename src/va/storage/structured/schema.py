@@ -39,8 +39,26 @@ CREATE TABLE IF NOT EXISTS videos (
     created_at    TEXT,
     fetched_at    TEXT,
     processed_at  TEXT,
-    last_ingest_run_id TEXT   -- trace run_id of the ingest that last wrote this row
-                              -- (ingest<->query trace link); NULL when ingested untraced
+    -- NB: keep column comments on ONE line ending at the comma — SQLite's textual
+    -- DROP COLUMN cannot digest comment lines between a comma and the next column.
+    last_ingest_run_id TEXT,  -- ingest<->query trace link; NULL when ingested untraced
+    profile       TEXT,       -- WS-2 footage profile; NULL = pre-profile ingest
+    camera_id     TEXT REFERENCES cameras(id),  -- WS-3 camera; NULL = standalone (A-EV)
+    start_epoch   REAL        -- plan §4 absolute UTC base of t=0; NULL = relative-only
+);
+"""
+
+# --- WS-3: camera entity (A-LSSRVF) -------------------------------------------
+# A fixed camera/stream that videos ("chunks") reference. `source_ref` is how to
+# reach the feed (RTSP URL / NVR channel); `location` is the human spatial hint
+# ("front door") that WS-5's hand-configured topology will build on.
+CAMERAS = """
+CREATE TABLE IF NOT EXISTS cameras (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    source_ref    TEXT,
+    location      TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -161,6 +179,7 @@ INDEXES = [
 ]
 
 ALL_TABLES = [
+    CAMERAS,  # before VIDEOS: videos.camera_id REFERENCES cameras(id)
     VIDEOS, SEGMENTS, OBJECT_TRACKS, OBJECT_DETECTIONS,
     ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS, ROLE_PROVENANCE,
 ]
@@ -181,7 +200,7 @@ ALL_TABLES = [
 # a migrated-in column is safe: apply_schema() builds INDEXES *after* running the
 # migrations, so the column already exists by the time its index is created.
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 5
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -208,10 +227,33 @@ def _m2_role_provenance(conn: sqlite3.Connection) -> None:
     conn.execute(ROLE_PROVENANCE)
 
 
+def _m3_videos_profile(conn: sqlite3.Connection) -> None:
+    """→ v3: the footage profile a video was ingested under (WS-2). Nullable —
+    pre-profile ingests stay NULL, read back as 'ingested before profiles'."""
+    add_column(conn, "videos", "profile", "TEXT")
+
+
+def _m4_cameras(conn: sqlite3.Connection) -> None:
+    """→ v4: the camera entity + videos.camera_id (WS-3). Nullable — standalone
+    (A-EV) videos stay NULL. CREATE IF NOT EXISTS + add_column are both
+    idempotent and no-ops on a fresh DB."""
+    conn.execute(CAMERAS)
+    add_column(conn, "videos", "camera_id", "TEXT REFERENCES cameras(id)")
+
+
+def _m5_start_epoch(conn: sqlite3.Connection) -> None:
+    """→ v5: the absolute time base (plan §4 dual time model). Nullable — every
+    stored timestamp stays video-relative; absolute = start_epoch + relative."""
+    add_column(conn, "videos", "start_epoch", "REAL")
+
+
 # Ordered; MIGRATIONS[i] takes the DB from version i to version i+1.
 MIGRATIONS = [
     _m1_last_ingest_run_id,          # -> 1
     _m2_role_provenance,             # -> 2
+    _m3_videos_profile,              # -> 3
+    _m4_cameras,                     # -> 4
+    _m5_start_epoch,                 # -> 5
 ]
 assert len(MIGRATIONS) == SCHEMA_VERSION, "SCHEMA_VERSION must equal the migration count"
 

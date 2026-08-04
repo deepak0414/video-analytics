@@ -197,6 +197,10 @@ layer. Instructions decay; hooks don't — if a lesson is a mechanical invariant
 - 2026-07-28: Prose is not an action — three guards in a row false-blocked legitimate work
   by matching command TEXT (a label name in a PR body, "until" inside a heredoc string).
   Key rules on token position and flags, never on a word appearing somewhere.
+- 2026-08-03: Best-effort except blocks swallow test-double signature mismatches —
+  widening `get_ingest_classes()` to take `cfg` broke five zero-arg `lambda:` doubles as
+  silent 0-count assertion failures, never a visible TypeError. Before widening an
+  internal callable's signature, grep tests/ for lambda doubles of it.
 
 ## The two things most likely to trip you up
 
@@ -227,9 +231,29 @@ locally OR remotely without caller changes) shapes everything. Three seams per r
 - **Registry** — `src/va/registry.py` reads config and returns the right adapter. Swapping a
   backend is a one-line edit in `config/roles.yaml`; no pipeline code changes.
 
-`src/va/configuration.py` merges `roles.yaml` (which backend+model per role) with the active
-`config/profiles/<name>.yaml` (per-model load params: device/dtype/weights) into one
-`RoleConfig`. `VA_CONFIG_DIR` overrides the config directory.
+`src/va/configuration.py` merges three layers into one `RoleConfig`: `roles.yaml` (which
+backend+model per role) + the active **hardware profile** `config/profiles/<name>.yaml`
+(per-model load params: device/dtype/weights) + an optional **footage profile**
+`config/profiles/footage/<name>.yaml` (per-input-domain role overrides, deep-merged over
+the role specs; default `generic` = no-op, missing file tolerated). Select via
+`load_config(footage_profile=...)`, roles.yaml `active_footage_profile`, or per-ingest
+`va ingest --profile <name>` (validated up front, source-derived default, recorded as
+`videos.profile`; NULL = pre-profile ingest). Ingest pins the overlaid config and passes
+it to every role getter, so a profile GATES roles (`enabled: false` skips a best-effort
+role; dependents skip with their parent — STT→diarizer, detector→tracker). Skipped roles
+are not provenance-stamped, and `va stale` EXCLUDES them (with the same dependency
+closure) while the profile disables them AND they are unstamped; a role that RAN before
+the profile was edited to disable it reads stale (its rows contradict the profile —
+reingest purges them). Profiles also override vocab (`classes:`/`actions:`) and carry profile-wide knobs on
+`Config.footage` — `retention_days` / `time_model` / `deep_scan` (recorded-but-inert until
+P7.a, WS-3, R11.a consume them; unknown or ill-typed knobs fail at load; quote
+`deep_scan: "off"` — bare `off` is YAML false). `security` (A-LSSRVF) ships: skips speech
+roles 8/9, narrows detector vocab. Core roles (scene detect, embedders) ignore `enabled`.
+**Caveat: do NOT override embedder models in a footage profile yet** — ingest tags shards
+honestly from the overlay, but the QUERY path is profile-unaware (loads base config), so
+such shards get tag-skipped at query time and the video vanishes from search. Query-side
+profile awareness is future work (loop backlog). `VA_CONFIG_DIR` overrides the config
+directory.
 
 ## Architecture: two pipelines over shared stores
 
@@ -263,7 +287,10 @@ Supporting layers:
 - **`src/va/sources/`** — `youtube.py` (any URL form → 11-char video_id = `source_key`),
   `local.py` (sha256 = `source_key`); `base.resolve_source()` dispatches.
 - **`src/va/storage/`** — the **central correlation DB** is one SQLite file (`<workdir>/catalog.db`)
-  whose full schema is `structured/schema.py`: `videos` (catalog/dedup) + one table per role
+  whose full schema is `structured/schema.py`: `videos` (catalog/dedup; `camera_id` links
+  a chunk to its camera and `start_epoch` is the absolute UTC base of t=0 — both NULL for
+  standalone A-EV videos; stored timestamps stay video-relative, translation lives in
+  `pipeline/timeline.py`) + `cameras` (WS-3 camera entity) + one table per role
   (`segments`, `object_tracks`, `object_detections`, `action_events`, `transcripts`, `ocr_results`),
   all keyed by `video_id`. All tables are created up front; complex queries will correlate roles
   via temporal SQL joins on `video_id` + time. Today `catalog_sqlite.py` (videos) and

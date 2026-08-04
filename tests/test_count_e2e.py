@@ -10,7 +10,7 @@ from va.pipeline.objects import count_objects, query_objects
 
 def test_distinct_count_vs_frame_appearances(tmp_path, monkeypatch):
     import va.pipeline.ingest as ingest_mod
-    monkeypatch.setattr(ingest_mod, "get_ingest_classes", lambda: ["red", "blue"])
+    monkeypatch.setattr(ingest_mod, "get_ingest_classes", lambda *a, **k: ["red", "blue"])
 
     # two reds far apart (one drifting), one blue
     video = write_boxes_video(

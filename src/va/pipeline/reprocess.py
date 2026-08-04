@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from va.configuration import load_config
+from va.configuration import (
+    GATE_DEPENDENTS,
+    GATEABLE_ROLES,
+    config_for,
+    default_footage_profile,
+    load_config,
+)
 from va.contracts.video import IngestStatus
 from va.pipeline.manage import lookup_video
 from va.pipeline.paths import Workspace
@@ -100,7 +106,8 @@ def _reprocess_text_embedder(workdir: str, video_id: str) -> int:
     return n
 
 
-def reindex_visual(video, video_dir, fps: float, catalog_db=None, embedder=None) -> int:
+def reindex_visual(video, video_dir, fps: float, catalog_db=None, embedder=None,
+                   cfg=None) -> int:
     """(Re)build the visual `vectors` shard: re-sample frames at `fps` and re-embed.
 
     Builds to a TEMP shard and swaps it in only on full success, so a failed re-embed (e.g.
@@ -116,8 +123,10 @@ def reindex_visual(video, video_dir, fps: float, catalog_db=None, embedder=None)
     from va.storage.vector.numpy_flat import NumpyFlatVectorStore, swap_shard
 
     if embedder is None:
-        embedder = get_visual_embedder()
-        tag = embedder_id("visual_embedder")
+        # cfg: the footage-profile-overlaid config the video runs under (WS2.c) —
+        # build AND tag from the same config or the TAG-3 guard drops the shard.
+        embedder = get_visual_embedder(cfg)
+        tag = embedder_id("visual_embedder", cfg)
     else:  # injected embedder must declare its own id, else tag "unknown" (TAG-3 skips it)
         tag = getattr(embedder, "model_id", None) or "unknown"
 
@@ -197,7 +206,8 @@ def _reprocess_visual_embedder(workdir: str, video_id: str) -> int:
             f"video {video_id} recorded visual fps is unknown — density can't be preserved; "
             f"use `va reingest {video_id} --fps <N>`")
     return reindex_visual(video, ws.video_dir(video.source_key, video.title), fps,
-                          catalog_db=ws.catalog_db)
+                          catalog_db=ws.catalog_db,
+                          cfg=config_for(video.profile, video.source_type.value))
 
 
 def _reprocess_vlm_captioner(workdir: str, video_id: str) -> int:
@@ -228,7 +238,8 @@ def _reprocess_vlm_captioner(workdir: str, video_id: str) -> int:
         segments = seg_store.get_segments(video.id)
         spans = [(s.start_time, s.end_time) for s in segments]
         keyframes = keyframes_for_spans(video.local_path, spans, per_segment=1)
-        captioner = get_vlm_captioner()
+        # Re-caption under the video's recorded footage profile (WS2.c).
+        captioner = get_vlm_captioner(config_for(video.profile, video.source_type.value))
         # Caption ALL segments first, THEN write — so a captioner failure mid-run leaves the
         # existing captions intact (nothing half-written), the same durability as the shard
         # rebuilds. On failure the role stays stale (not restamped) and retries cleanly.
@@ -296,7 +307,7 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
     recorded ingest fps (a run arg the role's output may depend on) and carries the new
     fingerprint, so `va stale` goes clean only for what actually re-ran.
 
-    Returns {"reprocessed": [(video_id, role, rows)], "skipped": [(video_id, role)],
+    Returns {"reprocessed": [(video_id, role, rows)], "skipped": [(video_id, role, reason)],
              "failed": [(video_id, role, error)]}.
     """
     from va.provenance import role_fingerprint
@@ -304,11 +315,30 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
     from va.storage.structured.provenance_store import ProvenanceStore
 
     ws = Workspace(workdir)
-    # One config snapshot for the whole batch (PROV-3's lesson): fingerprinting each restamp
-    # against a fresh load_config() would let a mid-batch config edit stamp a fingerprint that
-    # drifted from what the reprocessor ran under — a missed stale. Pinning here keeps that a
-    # safe false-stale at worst.
-    cfg = load_config()
+    # One config snapshot PER FOOTAGE PROFILE for the whole batch (PROV-3's lesson):
+    # fingerprinting each restamp against a fresh load_config() would let a mid-batch
+    # config edit stamp a fingerprint that drifted from what the reprocessor ran under —
+    # a missed stale. Pinned per profile because each video is rebuilt+restamped under
+    # ITS recorded profile (WS2.c), not the base config. Plan rows carry profile/
+    # source_type (stale_report); older/hand-built rows fall back to a catalog lookup.
+    _cfg_pin: dict[str, Any] = {}
+
+    def _cfg_for_item(item: dict[str, Any]):
+        if "source_type" in item:
+            prof, stype = item.get("profile"), item["source_type"]
+        else:
+            cat = Catalog(ws.catalog_db)
+            try:
+                v = lookup_video(cat, item["video_id"])
+            finally:
+                cat.close()
+            if v is None:
+                return None
+            prof, stype = v.profile, v.source_type.value
+        key = prof or default_footage_profile(stype)
+        if key not in _cfg_pin:
+            _cfg_pin[key] = config_for(prof, stype)
+        return _cfg_pin[key]
     reprocessed: list = []
     skipped: list = []
     failed: list = []
@@ -319,8 +349,32 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
         try:
             for item in plan:
                 vid = item["video_id"]
+                try:
+                    cfg = _cfg_for_item(item)
+                except Exception as e:  # noqa: BLE001 — e.g. the profile yaml was renamed;
+                    # one item's config must not abort the batch (resumable contract)
+                    for r in item["stale_roles"]:
+                        failed.append((vid, r, f"footage profile unavailable: {e}"))
+                    continue
+                if cfg is None:
+                    for r in item["stale_roles"]:
+                        failed.append((vid, r, "video not found — removed before reprocess"))
+                    continue
+                # Roles the item's profile DISABLES must never be re-run here:
+                # rebuilding them regenerates data the profile forbids and restamps
+                # a stale signal that immediately re-fires (no convergence). Route
+                # them to `skipped` — the printed remedy (`va reingest`) purges
+                # their rows under the carried profile, which converges.
+                disabled = {x for x in GATEABLE_ROLES
+                            if x in cfg.roles and not cfg.role(x).enabled}
+                for parent in list(disabled):
+                    disabled |= GATE_DEPENDENTS.get(parent, frozenset())
                 satisfied: set = set()  # roles a provider already rebuilt for THIS video (RPRC-2)
                 for r in _dependency_ordered(item["stale_roles"]):
+                    if r in disabled:
+                        skipped.append((vid, r,
+                                        "profile disables this role — reingest purges its rows"))
+                        continue
                     if r in satisfied:
                         # a provider (e.g. re-caption rebuilds the text index) already brought this
                         # role's artifact current with the current model -> restamp only, skip the
@@ -329,7 +383,7 @@ def execute_reprocess(workdir: str, plan: list[dict[str, Any]]) -> dict[str, lis
                     else:
                         fn = _REPROCESSORS.get(r)
                         if fn is None:
-                            skipped.append((vid, r))  # no in-place reprocess -> `va reingest`
+                            skipped.append((vid, r, "no in-place reprocess yet"))
                             continue
                         try:
                             n = fn(workdir, vid)

@@ -17,8 +17,12 @@ import sys
 def _cmd_ingest(args: argparse.Namespace) -> int:
     from va.pipeline.ingest import ingest
 
-    result = ingest(args.uri, workdir=args.workdir, fps=args.fps)
+    result = ingest(args.uri, workdir=args.workdir, fps=args.fps, profile=args.profile)
     status = "already-ingested" if result.deduped else "ingested"
+    if result.deduped and args.profile and result.video.profile != args.profile:
+        print(f"note: --profile {args.profile} NOT applied — video already ingested "
+              f"under profile '{result.video.profile or '(pre-profile)'}'; "
+              f"use `va reingest {args.uri} --profile {args.profile}` to change it")
     print(f"[{status}] {result.video.source_type.value}:{result.video.source_key} "
           f"id={result.video.id} frames={result.frames_indexed} segments={result.segments} "
           f"captioned={result.captioned_segments} transcript_lines={result.transcript_lines} "
@@ -169,7 +173,7 @@ def _cmd_remove(args: argparse.Namespace) -> int:
 def _cmd_reingest(args: argparse.Namespace) -> int:
     from va.pipeline.manage import reingest_video
 
-    result = reingest_video(args.workdir, args.video, fps=args.fps)
+    result = reingest_video(args.workdir, args.video, fps=args.fps, profile=args.profile)
     if result is None:
         print(f"no video matching {args.video!r}")
         return 1
@@ -299,11 +303,10 @@ def _cmd_reprocess(args: argparse.Namespace) -> int:
     for vid, r, n in result["reprocessed"]:
         detail = f"reprocessed ({n} rows)" if n is not None else "restamped (rebuilt via a dependency)"
         print(f"  {vid} · {r}: {detail}")
-    for vid, r in result["skipped"]:
+    for vid, r, reason in result["skipped"]:
         fps = fps_by_vid.get(vid)
         fps_arg = f" --fps {fps}" if fps is not None else ""
-        print(f"  {vid} · {r}: skipped — no in-place reprocess yet; "
-              f"run `va reingest {vid}{fps_arg}`")
+        print(f"  {vid} · {r}: skipped — {reason}; run `va reingest {vid}{fps_arg}`")
     for vid, r, err in result["failed"]:
         print(f"  {vid} · {r}: FAILED — {err}")
     nd, ns, nf = len(result["reprocessed"]), len(result["skipped"]), len(result["failed"])
@@ -396,6 +399,11 @@ def build_parser() -> argparse.ArgumentParser:
     pi = sub.add_parser("ingest", help="ingest a video URL or local path")
     pi.add_argument("uri")
     pi.add_argument("--fps", type=float, default=1.0, help="frame sampling rate")
+    pi.add_argument(
+        "--profile", default=None,
+        help="footage profile to ingest under (config/profiles/footage/<name>.yaml; "
+             "default derived from the source type)",
+    )
     pi.set_defaults(func=_cmd_ingest)
 
     pq = sub.add_parser("query", help="visual search over ingested videos")
@@ -519,6 +527,10 @@ def build_parser() -> argparse.ArgumentParser:
     pri = sub.add_parser("reingest", help="remove + ingest again (e.g. after model change)")
     pri.add_argument("video", help="video UUID, source_key, URL, or path")
     pri.add_argument("--fps", type=float, default=1.0)
+    pri.add_argument(
+        "--profile", default=None,
+        help="footage profile to reingest under (default: the video's recorded profile)",
+    )
     pri.set_defaults(func=_cmd_reingest)
 
     pmg = sub.add_parser("migrate-layout", help="migrate a workdir to layout v2 (per-video dirs)")
