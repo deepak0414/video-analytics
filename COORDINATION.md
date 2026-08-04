@@ -454,3 +454,17 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   yet — WS-4's NVR chunk source will. NB for the future query layer: `va query`/web endpoints are
   still relative-only; wall-clock query surfaces come with WS-4/5. Full suite 589 passed / 2
   skipped.
+- **2026-08-03 (roles):** WS4.a1 — MotionSource role landed (plan §3.1). New: `roles/motion_source.py`
+  (`MotionSource.events(start_epoch, end_epoch, camera_ref=None) -> [MotionEvent]` Protocol +
+  `cluster_events(events, gap_s)`), `contracts/motion.py` (`MotionEvent`: camera_ref/start_epoch/
+  end_epoch/kind/attributes, extra-tolerant), adapters `motion_source/sidecar_inproc.py` (JSON stub,
+  `events_file` in the role spec) + `lnr_eventlog_inproc.py` (LNR608 `log.cgi` startFind/doFind/
+  stopFind poller; host via spec or VA_NVR_HOST; credentials ONLY via VA_NVR_USER/VA_NVR_PASS env —
+  never config; NVR-clock timezone via role-spec `tz:` or VA_NVR_TZ, default = system-local rules
+  (DST-aware per date); `camera_ref` = the NVR's 1-indexed DISPLAY number, display→API channel mapping
+  deferred to the pull step), `get_motion_source()` in registry, `motion_source:` role (sidecar) in
+  all four roles.yaml, and a `va motion-probe <start> <end> [--camera] [--cluster-gap]` diagnostic
+  CLI. Nothing consumes it at ingest yet (WS4.b/c). LIVE-VALIDATED against the LNR608 (WS4.a2): this firmware emits MULTI-LINE Detail values and
+  logs each episode as separate Start/End marker entries — the adapter parses continuations and
+  pairs markers per channel (verbatim live fixture in tests). Ground-truth window check: 25 probe
+  windows vs 22 golden clips for Aug 1 noon-2pm, consistent. Full suite 610 passed / 2 skipped.

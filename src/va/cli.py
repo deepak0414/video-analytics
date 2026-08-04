@@ -225,6 +225,38 @@ def _active_config_line() -> str:
             f"(profile={cfg.active_profile}, visual_embedder={embedder})")
 
 
+def _cmd_motion_probe(args: argparse.Namespace) -> int:
+    """Diagnostic: query the configured MotionSource for a local-time range and
+    print the (optionally clustered) windows. The manual-validation entry point
+    for vendor adapters (WS4.a) — run with VA_NVR_HOST/USER/PASS set and
+    motion_source.model=lnr-eventlog to exercise the real device."""
+    from datetime import datetime
+
+    from va.registry import get_motion_source
+    from va.roles.motion_source import cluster_events
+
+    def to_epoch(s: str) -> float:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s, fmt).astimezone().timestamp()
+            except ValueError:
+                continue
+        raise SystemExit(f"unparseable time {s!r} (expected 'YYYY-MM-DD [HH:MM[:SS]]')")
+
+    src = get_motion_source()
+    events = src.events(to_epoch(args.start), to_epoch(args.end),
+                        camera_ref=args.camera)
+    if args.cluster_gap:
+        events = cluster_events(events, gap_s=args.cluster_gap)
+    for e in events:
+        dur = e.end_epoch - e.start_epoch
+        print(f"cam {e.camera_ref or '?'}: "
+              f"{datetime.fromtimestamp(e.start_epoch).astimezone().isoformat()} "
+              f"+{dur:.0f}s  [{e.kind}]")
+    print(f"{len(events)} window(s)")
+    return 0
+
+
 def _cmd_stale(args: argparse.Namespace) -> int:
     from va.pipeline.stale import stale_report
 
@@ -464,6 +496,17 @@ def build_parser() -> argparse.ArgumentParser:
                      help="only check one role, e.g. speech_to_text "
                           f"(one of: {', '.join(PROVENANCE_ROLES)})")
     psl.set_defaults(func=_cmd_stale)
+
+    pmp = sub.add_parser(
+        "motion-probe",
+        help="query the configured MotionSource for a local-time range (WS-4 diagnostic)")
+    pmp.add_argument("start", help="local time 'YYYY-MM-DD [HH:MM[:SS]]'")
+    pmp.add_argument("end", help="local time 'YYYY-MM-DD [HH:MM[:SS]]'")
+    pmp.add_argument("--camera", default=None,
+                     help="source-native camera ref (NVR display number)")
+    pmp.add_argument("--cluster-gap", type=float, default=30.0,
+                     help="merge same-camera windows with gaps <= this many seconds; 0 = raw")
+    pmp.set_defaults(func=_cmd_motion_probe)
 
     prp = sub.add_parser(
         "reprocess",

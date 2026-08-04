@@ -54,6 +54,9 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
 .venv/bin/va --workdir .va remove "<uuid|source_key|url>"   # delete a video everywhere
 .venv/bin/va --workdir .va reingest "<...>"                 # re-process (model changes)
 .venv/bin/va --workdir .va stale                            # videos on an outdated model/config (§6-b)
+.venv/bin/va motion-probe "2026-08-02" "2026-08-03"         # query the MotionSource (WS-4; sidecar stub by default;
+                                                            #   lnr-eventlog needs VA_NVR_HOST + VA_NVR_USER/PASS env;
+                                                            #   VA_NVR_TZ / role-spec `tz:` if the NVR clock isn't system-local)
 .venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner wired, others → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use
@@ -201,6 +204,11 @@ layer. Instructions decay; hooks don't — if a lesson is a mechanical invariant
   widening `get_ingest_classes()` to take `cfg` broke five zero-arg `lambda:` doubles as
   silent 0-count assertion failures, never a visible TypeError. Before widening an
   internal callable's signature, grep tests/ for lambda doubles of it.
+- 2026-08-03: A batch finalize is not exempt from the digest — a six-item squash's
+  combined message was composed AFTER `.commit-approved` was touched and consumed the
+  sentinel unvetted, letting plan-ID shorthand into shipped history. Present any
+  newly-composed final message in a digest BEFORE consuming the sentinel; wording has
+  no mechanical gate, so digest review is the only check.
 
 ## The two things most likely to trip you up
 

@@ -78,6 +78,13 @@ roles:
     model: motion
     # actions: [eating, running]   # optional ingest vocabulary override
 
+  motion_source:
+    backend: inproc
+    # `sidecar` = deterministic stub reading an events JSON (tests/CI).
+    # `lnr-eventlog` = LNR608 log.cgi poller (host via spec/VA_NVR_HOST;
+    # credentials ONLY via VA_NVR_USER/VA_NVR_PASS - never in config).
+    model: sidecar
+
   ocr:
     backend: inproc
     # `sidecar` = deterministic stub reading a <video>.ocr.json (tests/CI).
