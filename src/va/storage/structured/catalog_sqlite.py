@@ -154,7 +154,21 @@ class Catalog:
         self._conn.commit()
 
     def set_camera(self, video_id: UUID, camera_id: str) -> None:
-        """Attach a chunk to its camera (WS-3; the WS-4 stream source sets it)."""
+        """Attach a chunk to its camera (WS-3; the WS-4 chunk source sets it).
+        Validates the camera row exists (WS3.a review carry-over): the schema's
+        FK is declared but PRAGMA foreign_keys is off, so without this check a
+        typo'd id would silently create a dangling link — and since WS4.b a
+        dangling link degrades motion segmentation (unfiltered MotionSource
+        query). Dangling links can still arise from later camera deletion;
+        ingest warns on those at read time."""
+        row = self._conn.execute(
+            "SELECT 1 FROM cameras WHERE id = ?", (camera_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(
+                f"cannot attach video to unknown camera {camera_id!r} — "
+                "register it first (CameraStore.get_or_create)"
+            )
         self._conn.execute(
             "UPDATE videos SET camera_id = ? WHERE id = ?", (camera_id, str(video_id))
         )

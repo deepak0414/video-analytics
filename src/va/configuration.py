@@ -111,10 +111,11 @@ def _load_footage_overlay(cdir: Path, name: str) -> tuple[dict[str, Any], Footag
     return overlay, settings
 
 
-# Source-derived footage-profile defaults (WS-2). Every current source
-# (youtube/local edited video) maps to the no-op `generic`; future stream/NVR
-# source types will map to their own domain profiles here.
-_SOURCE_PROFILE_DEFAULTS: dict[str, str] = {}
+# Source-derived footage-profile defaults (WS-2). youtube/local (edited video)
+# fall through to the no-op `generic`; an NVR chunk is A-LSSRVF footage by
+# construction, so it defaults to the `security` profile (WS4.c) — an explicit
+# `--profile` still overrides.
+_SOURCE_PROFILE_DEFAULTS: dict[str, str] = {"nvr_recorded": "security"}
 
 # The roles a footage profile may disable (`enabled: false`) — the best-effort
 # set ingest gates. CORE roles (scene detect, visual/text embedders) are the

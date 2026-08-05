@@ -141,7 +141,9 @@ def get_scene_detector(cfg: Optional[Config] = None) -> SceneDetector:
 
             spec = cfg.roles.get("scene_detector") or {}
             kwargs = {
-                k: spec[k] for k in ("pad_s", "gap_s", "min_span_s") if k in spec
+                k: spec[k]
+                for k in ("pad_s", "gap_s", "min_span_s", "query_margin_s")
+                if k in spec
             }
             return MotionEpisodeSceneDetector(get_motion_source(cfg), **kwargs)
         raise ValueError(f"unknown scene_detector model: {model!r}")

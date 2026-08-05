@@ -25,10 +25,16 @@ class VideoSource(Protocol):
 def resolve_source(uri: str) -> VideoSource:
     """Choose a source backend from the URI."""
     from .local import LocalSource
+    from .nvr import NvrRecordedSource
     from .youtube import YoutubeSource, is_youtube_url
 
+    if uri.strip().startswith("nvr://"):
+        return NvrRecordedSource()
     if is_youtube_url(uri):
         return YoutubeSource()
     if Path(uri).exists():
         return LocalSource()
-    raise ValueError(f"unrecognized video source: {uri!r} (not a local file or YouTube URL)")
+    raise ValueError(
+        f"unrecognized video source: {uri!r} "
+        "(not a local file, YouTube URL, or nvr:// window)"
+    )

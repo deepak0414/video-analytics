@@ -11,6 +11,7 @@ sources re-download.
 """
 from __future__ import annotations
 
+import logging
 import shutil
 import sqlite3
 from pathlib import Path
@@ -118,6 +119,18 @@ def reingest_video(workdir: str, ident: str, fps: float = 1.0, profile: str | No
     if video.source_type is SourceType.local:
         # canonical input is a file; the managed copy (if any) was preserved
         src = video.local_path or video.source_uri
+    elif video.source_type is SourceType.nvr_recorded:
+        # The NVR retains only ~days of footage — a re-pull of an older window
+        # finds nothing while a perfectly good preserved clip sits in cache/
+        # (remove_video points local_path at the preserved copy). Park it
+        # where fetch() looks (it reuses an existing cache file), so reingest
+        # re-runs the ROLES without re-pulling.
+        src = video.source_uri
+        if video.local_path:
+            kept = Path(video.local_path)
+            if kept.exists() and ws.cache.resolve() in kept.resolve().parents:
+                dest = ws.cache / (video.source_key.replace(":", "_") + ".mp4")
+                shutil.move(str(kept), str(dest))
     else:
         src = video.source_uri          # e.g. the YouTube URL: re-download
     def _preattach_chunk_metadata() -> None:
@@ -139,10 +152,23 @@ def reingest_video(workdir: str, ident: str, fps: float = 1.0, profile: str | No
         catalog = Catalog(ws.catalog_db)
         try:
             row, _ = catalog.get_or_create(resolved)
-            if existing.camera_id is not None:
-                catalog.set_camera(row.id, existing.camera_id)
+            # Epoch FIRST: it has no precondition, and it is the piece Role 1
+            # cannot run correctly without. The camera attach is best-effort —
+            # set_camera validates the row exists, and a camera deleted out
+            # from under this chunk must degrade the same way ingest's read
+            # path does (warn, unfiltered motion query), not crash the
+            # reingest mid-cycle with all role data already purged.
             if existing.start_epoch is not None:
                 catalog.set_start_epoch(row.id, existing.start_epoch)
+            if existing.camera_id is not None:
+                try:
+                    catalog.set_camera(row.id, existing.camera_id)
+                except ValueError:
+                    logging.getLogger(__name__).warning(
+                        "reingest: camera %r no longer exists — chunk keeps "
+                        "start_epoch but loses its camera link",
+                        existing.camera_id,
+                    )
         finally:
             catalog.close()
 

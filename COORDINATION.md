@@ -484,3 +484,21 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   present-but-unparseable End Time now WARNS before start-anchoring (WS4.a round-8
   carry-over). Tests: `tests/test_motion_scene_detector.py` (known-window ground truth,
   end-to-end ingest oracle), one new lnr regression test.
+- 2026-08-05 (WS4.c, loop session): **nvr_recorded chunk source.** New `SourceType.
+  nvr_recorded` + `sources/nvr.py` (`nvr://<channel>/<start>/<end>`, naive times = NVR tz
+  via VA_NVR_TZ else system-local; source_key `nvr:ch<n>:<start_epoch>-<end_epoch>`;
+  fetch = the §5d verify-and-trim pull — curl (--anyauth; endpoints are Basic-ONLY,
+  never harden to --digest) loadfile in isolated 10 s
+  sessions, dHash-verified per frame against a live snapshot.cgi reference, trimmed to
+  the longest clean run, uniform re-encode + concat; VA_NVR_HOST/USER/PASS env-only).
+  **ResolvedVideo grew optional `start_epoch` + `camera`** (defaults None — placeless
+  sources unaffected): ingest attaches them to the catalog row BEFORE fetch/roles
+  (durable under hard kills; Role 1 sees the placement). `_SOURCE_PROFILE_DEFAULTS` maps
+  nvr_recorded -> security. Carry-over fixes: `Catalog.set_camera` now VALIDATES the
+  camera row exists (raises ValueError; FK pragma stays off), `CameraStore.get_or_create`
+  is atomic (INSERT OR IGNORE + re-SELECT, never clobbers an existing row's name).
+  Motion-episodes backend gained `query_margin_s` (default 60): live WS4.c validation
+  showed the NVR's episode End marker sits at/just beyond the chunk bounds, and an
+  exact-range query collapsed the episode to (0,2); with the margin the live re-run
+  landed (0.0, 31.7). Timeline caveat: verify-and-trim drops stale frames, so media t=0
+  aligns with start_epoch only to ~1 s and clips may be shorter than the window.

@@ -162,6 +162,21 @@ def _ingest_impl(
         try:
             catalog.set_status(video.id, IngestStatus.fetching)
             catalog.set_profile(video.id, footage_profile)
+
+            # Chunk placement (WS4.c): a source that knows the camera + wall
+            # clock declares it on ResolvedVideo; attach it to the row BEFORE
+            # any fetch/role work so (a) Role 1's motion-episodes backend sees
+            # start_epoch mid-ingest and (b) a hard kill leaves a pending row
+            # that already carries its placement — a plain retry completes it.
+            if resolved.camera is not None:
+                cam_store = CameraStore(ws.catalog_db)
+                try:
+                    cam_store.get_or_create(resolved.camera)
+                finally:
+                    cam_store.close()
+                catalog.set_camera(video.id, resolved.camera.id)
+            if resolved.start_epoch is not None:
+                catalog.set_start_epoch(video.id, resolved.start_epoch)
             fetched = source.fetch(resolved, ws.cache)
             catalog.update_metadata(video.id, fetched)
 
