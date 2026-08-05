@@ -256,7 +256,13 @@ reingest purges them). Profiles also override vocab (`classes:`/`actions:`) and 
 `Config.footage` — `retention_days` / `time_model` / `deep_scan` (recorded-but-inert until
 P7.a, WS-3, R11.a consume them; unknown or ill-typed knobs fail at load; quote
 `deep_scan: "off"` — bare `off` is YAML false). `security` (A-LSSRVF) ships: skips speech
-roles 8/9, narrows detector vocab. Core roles (scene detect, embedders) ignore `enabled`.
+roles 8/9, narrows detector vocab, and selects the **motion-episodes** Role-1 backend
+(WS4.b: segments = clustered MotionSource episodes mapped epoch→relative via
+`videos.start_epoch`; knobs `pad_s`/`gap_s`/`min_span_s` on the scene_detector spec;
+`SceneDetector.detect` gained an optional `SceneContext` — chunks with NO `start_epoch`,
+e.g. any plain A-EV ingest, degrade to ONE full-span segment with a warning, and a
+MotionSource failure degrades the same way rather than aborting the ingest).
+Core roles (scene detect, embedders) ignore `enabled`.
 **Caveat: do NOT override embedder models in a footage profile yet** — ingest tags shards
 honestly from the overlay, but the QUERY path is profile-unaware (loads base config), so
 such shards get tag-skipped at query time and the video vanishes from search. Query-side

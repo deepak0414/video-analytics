@@ -39,9 +39,20 @@ def test_sidecar_filters_range_and_camera(tmp_path):
     assert src.events(120, 150)[0].start_epoch == 100.0
 
 
-def test_sidecar_missing_file_is_a_quiet_day(tmp_path):
-    assert SidecarMotionSource(tmp_path / "absent.json").events(0, 100) == []
-    assert SidecarMotionSource(None).events(0, 100) == []
+def test_sidecar_missing_file_is_a_quiet_day(tmp_path, caplog):
+    # CONFIGURED-but-absent file = quiet day, silent by design.
+    with caplog.at_level("WARNING"):
+        assert SidecarMotionSource(tmp_path / "absent.json").events(0, 100) == []
+    assert not caplog.records
+
+
+def test_sidecar_unconfigured_warns(caplog):
+    # WS4.b round-1 review minor: with motion-episodes live, an UNCONFIGURED
+    # sidecar's silent [] means zero segments for an epoch-placed chunk —
+    # indistinguishable from a quiet chunk unless it says something.
+    with caplog.at_level("WARNING"):
+        assert SidecarMotionSource(None).events(0, 100) == []
+    assert any("no events_file configured" in r.message for r in caplog.records)
 
 
 # --- clustering ---------------------------------------------------------------
@@ -318,6 +329,21 @@ items[1].Type=Motion Detect
     # the bad End is skipped; the open Start survives to the range-end flush
     assert [(e.end_epoch - e.start_epoch, e.attributes.get("open")) for e in got] \
         == [(0.0, True)]
+
+
+def test_flat_unparseable_end_time_warns_not_silent(monkeypatch, caplog):
+    # WS4.a review round-8 carry-over: a FLAT-shape entry whose End Time is
+    # present but garbled used to collapse to a zero-length window silently —
+    # unlike the marker-pairing path, which warns. Same fallback, now audible.
+    page = """items[0].Time=2026-07-21 10:31:29
+items[0].Type=Motion Detect
+items[0].Detail=Channel No.: 2 Start Time: 2026-07-21 10:31:29 End Time: garbled
+"""
+    src, _ = _stubbed_source(monkeypatch, [page])
+    with caplog.at_level("WARNING"):
+        got = src.events(_utc(2026, 7, 21, 9), _utc(2026, 7, 21, 12))
+    assert [(e.end_epoch - e.start_epoch) for e in got] == [0.0]
+    assert any("unparseable End Time" in r.message for r in caplog.records)
 
 
 def test_vendor_error_body_raises_not_zero_motion(monkeypatch):

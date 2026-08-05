@@ -120,32 +120,34 @@ def reingest_video(workdir: str, ident: str, fps: float = 1.0, profile: str | No
         src = video.local_path or video.source_uri
     else:
         src = video.source_uri          # e.g. the YouTube URL: re-download
-    def _reattach_chunk_metadata() -> None:
+    def _preattach_chunk_metadata() -> None:
         # Carry the chunk metadata (camera link + wall-clock base) across the
         # remove+ingest cycle, like the profile: reingesting a chunk must not
         # sever it from its camera's collection or drop it from wall-clock
-        # queries. Runs on the FAILURE path too — ingest recreates the row before
-        # it can fail, and a later plain-`va ingest` retry completes that row
-        # as-is, so the metadata must already be on it.
+        # queries. Attached BEFORE ingest runs — WS4.b's motion-episodes Role-1
+        # backend consumes start_epoch DURING ingest, so a post-hoc reattach
+        # would silently degrade an epoch-placed chunk to one full-span segment
+        # and stamp it provenance-current (unreachable by `va stale`). The
+        # pre-created row also covers the failure path: ingest's get_or_create
+        # finds it, and a later plain-`va ingest` retry completes it as-is with
+        # the metadata already on it.
         if existing.camera_id is None and existing.start_epoch is None:
             return
+        from va.sources.base import resolve_source
+
+        resolved = resolve_source(src).resolve(src)  # cheap; no fetch
         catalog = Catalog(ws.catalog_db)
         try:
-            row = catalog.get_by_source_key(existing.source_key)
-            if row is not None:
-                if existing.camera_id is not None:
-                    catalog.set_camera(row.id, existing.camera_id)
-                if existing.start_epoch is not None:
-                    catalog.set_start_epoch(row.id, existing.start_epoch)
+            row, _ = catalog.get_or_create(resolved)
+            if existing.camera_id is not None:
+                catalog.set_camera(row.id, existing.camera_id)
+            if existing.start_epoch is not None:
+                catalog.set_start_epoch(row.id, existing.start_epoch)
         finally:
             catalog.close()
 
-    try:
-        result = ingest(src, workdir=workdir, fps=fps, profile=target_profile)
-    except Exception:
-        _reattach_chunk_metadata()
-        raise
-    _reattach_chunk_metadata()
+    _preattach_chunk_metadata()
+    result = ingest(src, workdir=workdir, fps=fps, profile=target_profile)
     if result is not None:
         result.video = result.video.model_copy(update={
             "camera_id": existing.camera_id or result.video.camera_id,

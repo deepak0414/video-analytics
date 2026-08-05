@@ -82,6 +82,19 @@ def role_fingerprint(role: str, cfg: Optional[Config] = None) -> dict[str, str]:
         if key in ("model", "backend", "classes", "actions") or key in _NON_OUTPUT_KEYS:
             continue
         parts[f"role.{key}"] = cfg.roles[role][key]
+    # Motion-episode segments are a function of WHERE motion windows come from,
+    # so the scene detector's identity folds in the motion_source role: switching
+    # sidecar -> lnr-eventlog (or changing its events_file/host/tz) must read
+    # stale — leaving it out is a missed stale, the direction §6-b forbids
+    # (WS4.c review). Purely visual scene models don't consume it, so they
+    # deliberately keep their fingerprints independent of motion_source.
+    if role == "scene_detector" and model == "motion-episodes":
+        ms_spec = cfg.roles.get("motion_source") or {}
+        parts["motion_source.model"] = ms_spec.get("model") or "sidecar"
+        for key in sorted(ms_spec):
+            if key in ("model", "backend") or key in _NON_OUTPUT_KEYS:
+                continue
+            parts[f"motion_source.{key}"] = ms_spec[key]
     # Scored vocab folds in the DEFAULT_INGEST_* fallbacks, so a default-vocab edit is
     # caught even when the role leaves `classes`/`actions` unset (and even unconfigured).
     if role == "object_detector":

@@ -261,7 +261,17 @@ class LnrEventLogMotionSource:
             return
         if end is None:
             end = self._epoch(end_s) if end_s else start
-            end = end if end is not None else start
+            if end is None:
+                # Present-but-unparseable End Time: keep the start-anchored
+                # instant, but SAY so — a silent zero-length window makes WS4.b
+                # pull a sliver of the episode with nothing in the logs to
+                # explain the truncation (WS4.a review round-8 carry-over;
+                # mirrors the marker-pairing path's warning).
+                logger.warning(
+                    "unparseable End Time %r — emitting zero-length window at start",
+                    end_s,
+                )
+                end = start
         # Client-side overlap filter (the Protocol's contract, like the sidecar):
         # never trust the device's range semantics — quirky inclusive filtering
         # would make WS4.b/c pull footage for windows nobody asked for.

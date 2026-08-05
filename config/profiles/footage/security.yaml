@@ -19,3 +19,14 @@ roles:
     enabled: false
   object_detector:
     classes: [person, car, truck, bicycle, package, dog, cat]
+  # WS4.b: segment by MotionSource episodes instead of visual cuts — a static
+  # camera has no shot boundaries, and per-episode segments give the captioner
+  # transient windows instead of one static-scene keyframe. Chunks without
+  # start_epoch degrade to one full-span segment (warning logged). Measured
+  # 2026-08-05 on the 22 real NVR clips (.va-nvr): pyscenedetect produced 1
+  # segment on 21/22 (2 on one low-res artifact), so for epoch-less chunks the
+  # full-span fallback is behaviorally identical and the NVR golden fixtures
+  # are unaffected. Epoch-PLACED chunks (WS4.c) need a real motion_source —
+  # the sidecar stub warns if queried unconfigured.
+  scene_detector:
+    model: motion-episodes

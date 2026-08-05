@@ -9,14 +9,17 @@ from __future__ import annotations
 from typing import List
 
 from va.media.frames import probe
-from va.roles.scene_detector import SceneSpan
+from va.roles.scene_detector import SceneContext, SceneSpan
 
 
 class PySceneDetectDetector:
     def __init__(self, threshold: float = 27.0):
         self.threshold = threshold
 
-    def detect(self, video_path: str) -> List[SceneSpan]:
+    def detect(
+        self, video_path: str, context: "SceneContext | None" = None
+    ) -> List[SceneSpan]:
+        # context (WS4.b) is for placement-aware backends; pixels don't need it.
         from scenedetect import ContentDetector, detect  # deferred heavy import
 
         scene_list = detect(video_path, ContentDetector(threshold=self.threshold))
