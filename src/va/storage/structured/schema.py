@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS object_tracks (
     track_confidence REAL,
     first_seen    REAL,
     last_seen     REAL,
-    frame_count   INTEGER
+    frame_count   INTEGER,
+    appearance_ref TEXT
 );
 """
 
@@ -200,7 +201,7 @@ ALL_TABLES = [
 # a migrated-in column is safe: apply_schema() builds INDEXES *after* running the
 # migrations, so the column already exists by the time its index is created.
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -247,6 +248,13 @@ def _m5_start_epoch(conn: sqlite3.Connection) -> None:
     add_column(conn, "videos", "start_epoch", "REAL")
 
 
+def _m6_appearance_ref(conn: sqlite3.Connection) -> None:
+    """→ v6: per-track appearance embedding pointer (WS4.d, Role-12 schema
+    insurance). Nullable — resolves in the per-video appearance vector store;
+    NULL = ingested before appearance capture (or captioner-only paths)."""
+    add_column(conn, "object_tracks", "appearance_ref", "TEXT")
+
+
 # Ordered; MIGRATIONS[i] takes the DB from version i to version i+1.
 MIGRATIONS = [
     _m1_last_ingest_run_id,          # -> 1
@@ -254,6 +262,7 @@ MIGRATIONS = [
     _m3_videos_profile,              # -> 3
     _m4_cameras,                     # -> 4
     _m5_start_epoch,                 # -> 5
+    _m6_appearance_ref,              # -> 6
 ]
 assert len(MIGRATIONS) == SCHEMA_VERSION, "SCHEMA_VERSION must equal the migration count"
 

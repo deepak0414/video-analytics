@@ -36,10 +36,11 @@ class TrackStore:
         self._conn.execute("DELETE FROM object_tracks WHERE video_id = ?", (str(video_id),))
         self._conn.executemany(
             "INSERT INTO object_tracks (id, video_id, object_class, track_confidence, "
-            "first_seen, last_seen, frame_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "first_seen, last_seen, frame_count, appearance_ref) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (str(t.id), str(t.video_id), t.object_class, t.track_confidence,
-                 t.first_seen, t.last_seen, t.frame_count)
+                 t.first_seen, t.last_seen, t.frame_count, t.appearance_ref)
                 for t in tracks
             ],
         )
@@ -60,7 +61,7 @@ class TrackStore:
                 id=UUID(r["id"]), video_id=UUID(r["video_id"]),
                 object_class=r["object_class"], track_confidence=r["track_confidence"],
                 first_seen=r["first_seen"], last_seen=r["last_seen"],
-                frame_count=r["frame_count"],
+                frame_count=r["frame_count"], appearance_ref=r["appearance_ref"],
             )
             for r in rows
         ]

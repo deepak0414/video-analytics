@@ -69,6 +69,10 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   seconds shorter than the window, t=0 ≈ start_epoch only
                                                             #   to ~1 s, and a DROPPED chunk shifts later footage up to
                                                             #   10 s early — PTS-accurate alignment is backlog).
+                                                            #   SINGLE-recorder assumption: identity (source_key,
+                                                            #   camera `nvr-ch<n>`) has no recorder id — repointing
+                                                            #   VA_NVR_HOST at another NVR dedups/links wrongly
+                                                            #   (multi-NVR identity is backlog).
                                                             #   Defaults to --profile security;
                                                             #   sets videos.camera_id (`nvr-ch<n>`) + start_epoch BEFORE
                                                             #   roles run, so motion-episodes segments land (needs a real
@@ -336,7 +340,11 @@ Supporting layers:
   all keyed by `video_id`. All tables are created up front; complex queries will correlate roles
   via temporal SQL joins on `video_id` + time. Today `catalog_sqlite.py` (videos) and
   `segments.py` (Role 1) write to it. Vectors live separately in `vector/numpy_flat.py` (brute-force
-  cosine), also keyed by `video_id`. Everything is behind interfaces so Postgres / Milvus swap in later.
+  cosine), also keyed by `video_id` — TWO stores per video since WS4.d: `vectors.npz` (Role-2 frame
+  embeddings, searched by `va query`) and `appearance.npz` (one crop embedding per object track,
+  meta-tagged `space: appearance-crop`; `object_tracks.appearance_ref` points into it — Role-12
+  ReID schema insurance, NOT searched by any query path yet). Everything is behind interfaces so
+  Postgres / Milvus swap in later.
 - **`src/va/contracts/`** — pydantic schemas (`Video`, `ResolvedVideo`, `FrameEmbedding`,
   `SearchHit`, `Segment`, `TranscriptLine`) mirroring the architecture doc's data model, plus
   the **runtime contracts** `QueryPlan`/`Evidence`/`Answer` (`query_plan.py`, `evidence.py`).
