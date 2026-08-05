@@ -1,0 +1,23 @@
+# NVR 2026-08-01 clip 00, cam 1 (driveway) — static-scene baseline.
+# Human truth: "A silver bmw sedan parked in driveway. A green tree and volvo SUV
+# parked on road." (security_footage_golden_truth_august_1_2026_noon_to_2pm #00)
+# Set docs: nvr_2026-08-01_1200-1400.md
+video_id: nvr0801_clip00_cam1
+source_key: "sha256:1de024e527604103c03072e6f37b60e8705268a13cfc7aa4fcf640c668db40ad"
+title: NVR clip 00 cam1 — parked BMW + tree baseline
+default_min_score: 0.10
+
+queries:
+  # Calibration 2026-08-04: "a house with a driveway" measured 0.091 — inside the
+  # ambiguous band between this workdir's true-negatives (<=0.05) and true
+  # positives (>=0.108), so it was dropped as a brittle anchor; pos-01 covers the
+  # static-scene baseline at a clean 0.120.
+  - {id: nvr00-pos-01, query: "a silver sedan parked in a driveway", expect: match,    provenance: human-verified}
+  - {id: nvr00-neg-01, query: "a swimming pool",                     expect: no_match, provenance: human-verified}
+  - {id: nvr00-neg-02, query: "people in an office meeting",         expect: no_match, provenance: human-verified}
+  - {id: nvr00-obj-01, query: "car",  modality: object, expect: match, provenance: human-verified}
+  # Spike scorecard: X-CLIP labels nearly every static driveway clip "driving a car"
+  # (coincidental — the parked BMW). Documented false positive; strict xfail flips
+  # red when an action model stops hallucinating motion from parked cars.
+  - {id: nvr00-act-01, query: "driving", modality: action, expect: no_match, provenance: human-verified,
+     xfail: "X-CLIP fires 'driving a car' on a static parked-car scene (spike scorecard #00)"}

@@ -1,0 +1,19 @@
+# NVR 2026-08-01 clip 19, cam 2 (front entrance) — two-people scene.
+# Human truth: "another lady is seen on the front porch (likely coming out of the
+# house). Second woman is wearing grey t-shirt and light lavendar skort holding a
+# phone and water bottle tucked." (first woman from #16 also in frame)
+# Spike scorecard #19: caption ✅ (correctly sees two people); person 34/52 frames.
+video_id: nvr0801_clip19_cam2
+source_key: "sha256:c46c5c69d1d69a35e7e7f5156e1d1bf24dc81a365bb32276b3e9eeabc8febee3"
+title: NVR clip 19 cam2 — two women near porch/driveway
+default_min_score: 0.10
+
+queries:
+  - {id: nvr19-obj-01, query: "person", modality: object, expect: match, provenance: human-verified}
+  - {id: nvr19-cap-01, query: "two people outside a house", modality: caption, expect: match, provenance: human-verified}
+  # Calibration 2026-08-04: SigLIP 0.084 < 0.10 and VLM scene-presence 0/8 — the
+  # phone is a handful of pixels; neither path can confirm it (unlike clip 16's
+  # pink sweater, which the VLM recovered). Strict xfail documents the attribute
+  # resolution limit; verify stays on so an improved model flips it red.
+  - {id: nvr19-pos-01, query: "a woman holding a phone", expect: match, verify: true, provenance: human-verified,
+     xfail: "phone below attribute resolution: SigLIP 0.084 < 0.10 and VLM scene-presence 0/8 (calibration 2026-08-04)"}
