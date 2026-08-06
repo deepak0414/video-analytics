@@ -39,16 +39,24 @@ class MotionEpisodeSceneDetector:
         pad_s: float = 2.0,
         gap_s: float = 30.0,
         min_span_s: float = 0.5,
+        query_margin_s: float = 60.0,
     ):
         # pad_s: context margin added around each episode (motion logs clip the
         #   moment of first movement); gap_s: cluster gap forwarded to
         #   cluster_events; min_span_s: drop slivers shorter than this after
-        #   clamping (an episode that barely straddles the chunk edge).
+        #   clamping (an episode that barely straddles the chunk edge);
+        #   query_margin_s: how far BEYOND the chunk window to ask the source —
+        #   live-validated (WS4.c): a chunk is usually pulled to cover one
+        #   episode, so the episode's raw Start/End log markers sit AT or just
+        #   outside the chunk bounds; querying exactly the chunk range misses
+        #   the End marker and the episode collapses to an open instant.
+        #   Clamping below confines whatever the margin drags in.
         # Structure/budget knobs, overridable via the role spec in config.
         self.motion_source = motion_source
         self.pad_s = float(pad_s)
         self.gap_s = float(gap_s)
         self.min_span_s = float(min_span_s)
+        self.query_margin_s = float(query_margin_s)
 
     def detect(
         self, video_path: str, context: Optional[SceneContext] = None
@@ -68,8 +76,8 @@ class MotionEpisodeSceneDetector:
 
         try:
             events = self.motion_source.events(
-                context.start_epoch,
-                context.start_epoch + duration,
+                context.start_epoch - self.query_margin_s,
+                context.start_epoch + duration + self.query_margin_s,
                 camera_ref=context.camera_ref,
             )
         except Exception:  # noqa: BLE001 — device I/O; must not abort ingest

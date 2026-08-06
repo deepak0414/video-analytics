@@ -57,6 +57,22 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
 .venv/bin/va motion-probe "2026-08-02" "2026-08-03"         # query the MotionSource (WS-4; sidecar stub by default;
                                                             #   lnr-eventlog needs VA_NVR_HOST + VA_NVR_USER/PASS env;
                                                             #   VA_NVR_TZ / role-spec `tz:` if the NVR clock isn't system-local)
+.venv/bin/va --workdir .va ingest "nvr://1/2026-08-01T12:00:00/2026-08-01T12:00:30"
+                                                            # WS4.c: pull+ingest an NVR window (channel/start/end;
+                                                            #   naive times = NVR clock tz, VA_NVR_TZ or system-local;
+                                                            #   stored URI is canonical UTC; window capped at 120 s —
+                                                            #   pull motion episodes, not raw hours).
+                                                            #   Same env as motion-probe; verify-and-trim per §5d (curl
+                                                            #   + dHash vs LIVE snapshot, so pull while lighting still
+                                                            #   matches the recording — a day window pulled after dark
+                                                            #   rejects every chunk. Stale chunks trimmed: clips can be
+                                                            #   seconds shorter than the window, t=0 ≈ start_epoch only
+                                                            #   to ~1 s, and a DROPPED chunk shifts later footage up to
+                                                            #   10 s early — PTS-accurate alignment is backlog).
+                                                            #   Defaults to --profile security;
+                                                            #   sets videos.camera_id (`nvr-ch<n>`) + start_epoch BEFORE
+                                                            #   roles run, so motion-episodes segments land (needs a real
+                                                            #   motion_source — the unconfigured sidecar warns).
 .venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner wired, others → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use
@@ -209,6 +225,14 @@ layer. Instructions decay; hooks don't — if a lesson is a mechanical invariant
   sentinel unvetted, letting plan-ID shorthand into shipped history. Present any
   newly-composed final message in a digest BEFORE consuming the sentinel; wording has
   no mechanical gate, so digest review is the only check.
+- 2026-08-04: Never launch a full-suite run while another is live — every turn end ALSO
+  spawns a Stop-gate suite, and five piled up: an 87 s suite ground to 46 min, two tests
+  flaked with OSErrors, a push died on a phantom red. `pgrep -f '[p]ytest -q'` first;
+  and `pytest | tail` returns TAIL's exit code — never gate a `&&` chain on a pipeline.
+- 2026-08-05: The bracket trick immunizes only the pgrep PATTERN — a wait-loop chained
+  as `until ! pgrep -f '[p]ytest -q'; …; pytest -q` matches the LITERAL `pytest -q`
+  later in its OWN command line and spins forever (11 h lost overnight). A poll must
+  not share a command line with the thing it polls for: separate calls, or match PIDs.
 
 ## The two things most likely to trip you up
 
@@ -258,7 +282,10 @@ P7.a, WS-3, R11.a consume them; unknown or ill-typed knobs fail at load; quote
 `deep_scan: "off"` — bare `off` is YAML false). `security` (A-LSSRVF) ships: skips speech
 roles 8/9, narrows detector vocab, and selects the **motion-episodes** Role-1 backend
 (WS4.b: segments = clustered MotionSource episodes mapped epoch→relative via
-`videos.start_epoch`; knobs `pad_s`/`gap_s`/`min_span_s` on the scene_detector spec;
+`videos.start_epoch`; knobs `pad_s`/`gap_s`/`min_span_s`/`query_margin_s` on the
+scene_detector spec (the margin widens the MotionSource query past the chunk bounds —
+live-validated: the NVR logs episode End markers at/just past the chunk edge, and an
+exact-range query collapses the episode to an instant);
 `SceneDetector.detect` gained an optional `SceneContext` — chunks with NO `start_epoch`,
 e.g. any plain A-EV ingest, degrade to ONE full-span segment with a warning, and a
 MotionSource failure degrades the same way rather than aborting the ingest).

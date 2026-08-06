@@ -58,9 +58,23 @@ def test_known_windows_become_exactly_those_segments():
 
 
 def test_range_and_camera_are_forwarded_to_the_source():
+    # The queried range is the chunk window WIDENED by query_margin_s: the
+    # WS4.c live pull proved the NVR's episode End marker sits at/just beyond
+    # the chunk bounds, and an exact-range query collapses the episode to an
+    # open instant (segment (0,2) instead of the full clip).
     src = FakeMotionSource([])
-    MotionEpisodeSceneDetector(src).detect("unused.mp4", _ctx(60.0, camera_ref="7"))
-    assert src.calls == [(T0, T0 + 60.0, "7")]
+    det = MotionEpisodeSceneDetector(src, query_margin_s=60.0)
+    det.detect("unused.mp4", _ctx(60.0, camera_ref="7"))
+    assert src.calls == [(T0 - 60.0, T0 + 120.0, "7")]
+
+
+def test_episode_with_end_marker_beyond_chunk_is_clamped_not_collapsed():
+    # The live-repro (WS4.c): chunk covers [0, 31.7] of a 37 s episode whose
+    # End marker lies past the chunk end. With the query margin the full
+    # episode is visible; clamping confines it to the chunk.
+    src = FakeMotionSource([_ev(0, 37)])
+    det = MotionEpisodeSceneDetector(src, pad_s=2.0)
+    assert det.detect("unused.mp4", _ctx(31.7)) == [(0.0, 31.7)]
 
 
 def test_event_straddling_chunk_start_is_clamped_to_zero():
@@ -313,8 +327,19 @@ def test_dangling_camera_id_warns_and_still_ingests(tmp_path, monkeypatch, caplo
     resolved = resolve_source(str(clip)).resolve(str(clip))
     catalog = Catalog(Workspace(str(ws)).catalog_db)
     video, _ = catalog.get_or_create(resolved)
-    catalog.set_camera(video.id, "no-such-camera")   # dangling: no cameras row
+    # set_camera validates (WS4.c), so make the link dangle the way it can in
+    # the wild: attach a real camera, then delete its row out from under it.
+    from va.storage.structured.cameras import CameraStore
+    cams = CameraStore(Workspace(str(ws)).catalog_db)
+    cams.get_or_create(Camera(id="doomed", name="doomed", source_ref="1"))
+    cams.close()
+    catalog.set_camera(video.id, "doomed")
     catalog.set_start_epoch(video.id, T0)
+    import sqlite3 as _sq
+    conn = _sq.connect(ws / "catalog.db")
+    conn.execute("DELETE FROM cameras WHERE id = 'doomed'")
+    conn.commit()
+    conn.close()
     catalog.close()
 
     with caplog.at_level("WARNING"):

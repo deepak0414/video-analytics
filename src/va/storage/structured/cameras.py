@@ -37,18 +37,21 @@ class CameraStore:
 
     def get_or_create(self, camera: Camera) -> tuple[Camera, bool]:
         """Return (camera, created). The id is the idempotency key — re-registering
-        an existing id returns the stored row untouched (rename via `update`)."""
-        existing = self.get(camera.id)
-        if existing is not None:
-            return existing, False
-        self._conn.execute(
-            "INSERT INTO cameras (id, name, source_ref, location, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+        an existing id returns the stored row untouched (rename via `update`).
+        Atomic (WS3.a review carry-over): INSERT OR IGNORE + re-SELECT, so two
+        parallel per-camera ingests racing on the same new id both succeed —
+        SELECT-then-INSERT would crash the loser on the UNIQUE constraint."""
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO cameras (id, name, source_ref, location, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
             (camera.id, camera.name, camera.source_ref, camera.location,
              camera.created_at.isoformat()),
         )
         self._conn.commit()
-        return camera, True
+        created = cur.rowcount == 1
+        stored = self.get(camera.id)
+        assert stored is not None  # just inserted or already present
+        return stored, created
 
     def get(self, camera_id: str) -> Optional[Camera]:
         r = self._conn.execute(

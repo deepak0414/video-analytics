@@ -1,0 +1,55 @@
+# Agent review — approve
+
+date: 2026-08-05T09:46:43.621467
+range: origin/main..HEAD
+branch: loop/ws4c-nvr-chunk-source
+findings: 6
+
+- **minor** `src/va/sources/nvr.py:246` — Dropped chunks and per-chunk trim/keyframe surplus break the linear start_epoch+t mapping far beyond the documented ~1 s, with only a log warning and nothing recorded on the video row.
+  - scenario: A 120 s window loses chunk 3 after 4 retries: all footage after 30 s shifts 10 s early, so motion-episode segments, captions, and va-ask citations reference the wrong moments; the live 30 s validation already produced a 31.7 s clip (+1.7 s), implying ~7 s accumulated drift at the window cap.
+- **minor** `src/va/sources/nvr.py:226` — _frame_hammings omits frames <=500 bytes from the hamming list, shifting the index-to-time mapping used for trim bounds and leaving the omitted frame unverified inside the kept run.
+  - scenario: A truncated or corrupt frame mid-chunk is skipped; every later hamming maps 0.25 s early, the -ss/-to trim cuts at wrong times, and a stale cross-camera frame can survive into the output.
+- **minor** `src/va/sources/nvr.py:244` — Per-pull temp files use fixed shared names (chunk_<k>.*, ref_ch<chan>.jpg) in the common cache dir, and the final mp4 is written in place and trusted by fetch() on the next run.
+  - scenario: Two parallel per-camera ingests (the race CameraStore.get_or_create was made atomic for) overwrite each other's verified chunk_0.ts between verify and concat, putting camera B's footage into camera A's clip; separately, a Ctrl-C during concat leaves a corrupt cache mp4 that every later ingest of that window reuses and fails on.
+- **minor** `src/va/pipeline/manage.py:120` — reingest_video reuses preserved media only for SourceType.local, so an nvr_recorded chunk is re-pulled from the device even though remove_video just preserved its media in cache.
+  - scenario: va reingest on a chunk older than the NVR's ~6-day retention: the row and role data are purged, the re-pull finds no recorded footage and fails, and the valid clip sits ignored at cache/reingest-*.mp4.
+- **minor** `src/va/sources/nvr.py:210` — Verify-and-trim depends on the LIVE snapshot still resembling the recorded window, an undocumented operational constraint of the recorded-pull path.
+  - scenario: Pulling a noon window after dark (IR mode) pushes every frame's hamming past DHASH_THRESH=18, so all chunks are dropped and the ingest fails with 'every chunk was unverifiable'; a marginal day/dusk mismatch instead trims arbitrary valid footage.
+- **minor** `CLAUDE.md:279` — The scene_detector knob list omits the new query_margin_s spec knob (documented only in COORDINATION.md).
+  - scenario: A later session tuning motion segmentation reads CLAUDE.md's pad_s/gap_s/min_span_s list, never finds the margin knob, and cannot explain or adjust why episodes near chunk bounds collapse when it is set to 0.
+
+---
+
+## Full review
+
+I've completed my review of `origin/main..HEAD` (WS4.b motion-episode scene detection + WS4.c NVR chunk source). WS4.b (f811d2b) already went through three review rounds ending in a 0-finding approve, and my independent re-check of it confirmed nothing new, so my findings concentrate on the WS4.c delta (5488a43).
+
+What I verified and found clean:
+
+- **Plan conformance (WS4.c done-when):** end-to-end ingest of a pulled window lands media + segments + `start_epoch` (`test_ingest_of_pulled_window_lands_media_segments_and_epoch`), re-ingest is idempotent (`test_reingest_of_pulled_window_is_idempotent`), and both WS3.a carry-overs are closed exactly as specified (`Catalog.set_camera` now validates existence; `CameraStore.get_or_create` is INSERT OR IGNORE + re-SELECT, with a clobber-proof test).
+- **Contracts:** `ResolvedVideo` grew `start_epoch`/`camera` with None defaults (placeless sources unaffected), logged in COORDINATION.md; `SceneDetector.detect`'s new optional context was already vetted in WS4.b rounds; no test doubles of the detector exist (checked per the 2026-08-03 lambda-double lesson).
+- **Best-effort discipline:** MotionSource failure and missing epoch degrade with warnings; the NVR *fetch* failing hard is correct (fetch is not a best-effort role — it marks the ingest failed).
+- **Time math:** URI parsing is tz-aware and DST-correct (tested for UTC and America/Los_Angeles), clamp/pad/merge edges each have literal-ground-truth tests, `longest_clean_run` is correct on the hand-traced edges including ties and longest-not-first.
+- **Docs:** `nvr://` form, env vars, security-profile default, and the verify-and-trim caveat are all in CLAUDE.md; COORDINATION.md carries the interface log.
+
+Findings — all minor, none blocks:
+
+1. **Timeline drift is unbounded, not the documented ~1 s** (`src/va/sources/nvr.py:246`). The epoch→relative mapping (`motion-episodes`, `timeline.py`) assumes gapless media, but a mid-window dropped chunk shifts everything after it by 10 s with only a log line — nothing on the row records the gap — and the one live validation already shows +1.7 s on a 30 s window (clip 31.7 s), suggesting per-chunk surplus that would scale to ~7 s at the 120 s cap. Safe path: record drop/offset metadata on the row (or compare final duration vs window and flag when |Δ| > `pad_s`), and measure drift on a max-length window against ground truth per the determinism-≠-correctness rule.
+2. **Undersized frames are skipped, corrupting the trim index math** (`src/va/sources/nvr.py:226`). `_frame_hammings` appends only frames >500 bytes, so a skipped mid-sequence frame shifts every later index; trim bounds `run/FPS_SAMPLE` then cut at the wrong times and the skipped frame rides along unverified. Safe path: append a sentinel above-threshold hamming for undersized frames instead of omitting them.
+3. **Shared fixed temp names defeat the parallel-ingest hardening this commit itself does** (`src/va/sources/nvr.py:244`). `ref_ch<chan>.jpg` and `chunk_<k>.*` live in the shared cache dir with no window/channel/process uniqueness; two parallel per-camera pulls (the exact race `CameraStore.get_or_create` was made atomic for) can overwrite a verified `chunk_k.ts` between verify and concat — cross-camera footage in the final clip, the precise contamination the recipe exists to prevent. Also `fetch()` trusts any existing cache mp4, so a kill during concat leaves a corrupt file reused forever. Safe path: unique per-pull tempdir + write-then-rename for the final mp4.
+4. **Reingest of an NVR chunk re-pulls from the device instead of reusing preserved media** (`src/va/pipeline/manage.py:120`). `remove_video(keep_media=True)` strands the good copy at `cache/reingest-*.mp4` while `src = source_uri` forces a live re-pull; past the NVR's ~6-day retention cliff (named in the plan), the model-upgrade path permanently fails with valid media sitting ignored. Safe path: treat `nvr_recorded` like `local` here — identity is the stable source_key, not the fetch.
+5. **Live-reference verification silently assumes the live scene still resembles the recorded window** (`src/va/sources/nvr.py:210`). Pulling daytime footage after dark (or after the camera moved) can push every frame past `DHASH_THRESH` → all chunks unverifiable → ingest impossible; a marginal mismatch is worse, trimming arbitrary footage. Fail-closed, but the constraint is documented nowhere. Safe path: document the pull-while-scene-matches constraint and measure day/night hamming distances; consider intra-clip self-consistency as a secondary reference.
+6. **Doc parity: `query_margin_s` missing from CLAUDE.md's knob list** (`CLAUDE.md:279`). The line still reads "knobs `pad_s`/`gap_s`/`min_span_s`"; the fourth knob exists only in COORDINATION.md, so the next session tuning the backend won't find it. Safe path: add it to that sentence.
+
+Both commit subjects are provisional `need_agent_review:` — exempt from the clarity rule. The diff touches critical paths, so the WT.7 label will be mechanically required at PR time; that attestation is the human's to give.
+
+```json
+{"verdict": "approve", "findings": [
+{"severity": "minor", "file": "src/va/sources/nvr.py", "line": 246, "issue": "Dropped chunks and per-chunk trim/keyframe surplus break the linear start_epoch+t mapping far beyond the documented ~1 s, with only a log warning and nothing recorded on the video row.", "scenario": "A 120 s window loses chunk 3 after 4 retries: all footage after 30 s shifts 10 s early, so motion-episode segments, captions, and va-ask citations reference the wrong moments; the live 30 s validation already produced a 31.7 s clip (+1.7 s), implying ~7 s accumulated drift at the window cap."},
+{"severity": "minor", "file": "src/va/sources/nvr.py", "line": 226, "issue": "_frame_hammings omits frames <=500 bytes from the hamming list, shifting the index-to-time mapping used for trim bounds and leaving the omitted frame unverified inside the kept run.", "scenario": "A truncated or corrupt frame mid-chunk is skipped; every later hamming maps 0.25 s early, the -ss/-to trim cuts at wrong times, and a stale cross-camera frame can survive into the output."},
+{"severity": "minor", "file": "src/va/sources/nvr.py", "line": 244, "issue": "Per-pull temp files use fixed shared names (chunk_<k>.*, ref_ch<chan>.jpg) in the common cache dir, and the final mp4 is written in place and trusted by fetch() on the next run.", "scenario": "Two parallel per-camera ingests (the race CameraStore.get_or_create was made atomic for) overwrite each other's verified chunk_0.ts between verify and concat, putting camera B's footage into camera A's clip; separately, a Ctrl-C during concat leaves a corrupt cache mp4 that every later ingest of that window reuses and fails on."},
+{"severity": "minor", "file": "src/va/pipeline/manage.py", "line": 120, "issue": "reingest_video reuses preserved media only for SourceType.local, so an nvr_recorded chunk is re-pulled from the device even though remove_video just preserved its media in cache.", "scenario": "va reingest on a chunk older than the NVR's ~6-day retention: the row and role data are purged, the re-pull finds no recorded footage and fails, and the valid clip sits ignored at cache/reingest-*.mp4."},
+{"severity": "minor", "file": "src/va/sources/nvr.py", "line": 210, "issue": "Verify-and-trim depends on the LIVE snapshot still resembling the recorded window, an undocumented operational constraint of the recorded-pull path.", "scenario": "Pulling a noon window after dark (IR mode) pushes every frame's hamming past DHASH_THRESH=18, so all chunks are dropped and the ingest fails with 'every chunk was unverifiable'; a marginal day/dusk mismatch instead trims arbitrary valid footage."},
+{"severity": "minor", "file": "CLAUDE.md", "line": 279, "issue": "The scene_detector knob list omits the new query_margin_s spec knob (documented only in COORDINATION.md).", "scenario": "A later session tuning motion segmentation reads CLAUDE.md's pad_s/gap_s/min_span_s list, never finds the margin knob, and cannot explain or adjust why episodes near chunk bounds collapse when it is set to 0."}
+]}
+```

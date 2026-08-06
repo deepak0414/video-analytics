@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 class SourceType(str, enum.Enum):
     youtube = "youtube"
     local = "local"
+    nvr_recorded = "nvr_recorded"  # a wall-clock window pulled from an NVR (WS4.c)
     # extensible later: url, s3, …
 
 
@@ -39,13 +40,23 @@ class VideoMetadata(BaseModel):
 
 
 class ResolvedVideo(BaseModel):
-    """What a VideoSource returns: enough to dedup + locate the file locally."""
+    """What a VideoSource returns: enough to dedup + locate the file locally.
+
+    Chunk placement (WS4.c): a source that knows WHERE the footage sits on the
+    wall clock and WHICH camera recorded it (the NVR chunk source) declares it
+    here, and ingest attaches both to the catalog row BEFORE any role runs —
+    Role 1's motion-episodes backend consumes `start_epoch` mid-ingest, and the
+    row must survive a hard kill with its placement already recorded. None for
+    placeless sources (YouTube, plain files).
+    """
 
     source_type: SourceType
     source_uri: str  # canonical input (full URL or original path)
     source_key: str  # dedup key: youtube video_id, or sha256 for local
     local_path: Optional[str] = None  # set once fetched/copied to disk
     metadata: VideoMetadata = Field(default_factory=VideoMetadata)
+    start_epoch: Optional[float] = None    # UTC epoch of the chunk's t=0
+    camera: Optional["Camera"] = None      # the recording camera (row ensured at ingest)
 
 
 class Camera(BaseModel):
@@ -104,3 +115,7 @@ class Video(BaseModel):
             resolution=m.resolution,
             has_audio=m.has_audio,
         )
+
+
+# ResolvedVideo references Camera (defined later in this module) by forward ref.
+ResolvedVideo.model_rebuild()
