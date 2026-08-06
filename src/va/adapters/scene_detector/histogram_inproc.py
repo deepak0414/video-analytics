@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 
 from va.media.frames import probe, sample_frames
-from va.roles.scene_detector import SceneSpan
+from va.roles.scene_detector import SceneContext, SceneSpan
 
 _BINS = 16
 
@@ -41,7 +41,10 @@ class HistogramSceneDetector:
         self.threshold = threshold
         self.min_scene_len = min_scene_len
 
-    def detect(self, video_path: str) -> List[SceneSpan]:
+    def detect(
+        self, video_path: str, context: "SceneContext | None" = None
+    ) -> List[SceneSpan]:
+        # context (WS4.b) is for placement-aware backends; pixels don't need it.
         frames = list(sample_frames(video_path, fps=self.sample_fps))
         meta = probe(video_path)
         duration = meta.duration_seconds

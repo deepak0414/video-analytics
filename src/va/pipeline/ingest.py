@@ -6,6 +6,7 @@ source moment.
 """
 from __future__ import annotations
 
+import logging
 import shutil
 import traceback
 from dataclasses import dataclass
@@ -36,7 +37,9 @@ from va.registry import (
     get_vlm_captioner,
 )
 from va.provenance import PROVENANCE_ROLES
+from va.roles.scene_detector import SceneContext
 from va.sources.base import resolve_source
+from va.storage.structured.cameras import CameraStore
 from va.storage.structured.catalog_sqlite import Catalog
 from va.storage.structured.actions import ActionStore
 from va.storage.structured.detections import DetectionStore
@@ -237,7 +240,35 @@ def _ingest_impl(
                 return False
 
             # Role 1: scene boundaries -> the segments table (temporal backbone).
-            spans = get_scene_detector(cfg).detect(fetched.local_path)
+            # Context (WS4.b): the chunk's wall-clock placement + camera ref, for
+            # placement-aware backends (motion-episodes). Re-read the row — the
+            # A-MCLSSRVF pull path attaches camera metadata to a pending row
+            # before processing, and `video` predates fetch/metadata updates.
+            ctx_row = catalog.get(video.id) or video
+            camera_ref = None
+            if ctx_row.camera_id:
+                cam_store = CameraStore(ws.catalog_db)
+                try:
+                    cam = cam_store.get(ctx_row.camera_id)
+                finally:
+                    cam_store.close()
+                camera_ref = cam.source_ref if cam else None
+                if cam is None:
+                    # FK is declared but unenforced (WS4.c gap): a dangling
+                    # camera_id would otherwise SILENTLY widen the MotionSource
+                    # query to all cameras (camera_ref=None) — warn like every
+                    # other degraded mode in this path.
+                    logging.getLogger(__name__).warning(
+                        "video %s references missing camera %r — motion query "
+                        "will not be camera-filtered",
+                        video.id, ctx_row.camera_id,
+                    )
+            scene_ctx = SceneContext(
+                start_epoch=ctx_row.start_epoch,
+                camera_ref=camera_ref,
+                duration_seconds=fetched.metadata.duration_seconds,
+            )
+            spans = get_scene_detector(cfg).detect(fetched.local_path, scene_ctx)
             segments = [
                 Segment(video_id=video.id, segment_index=i, start_time=s, end_time=e)
                 for i, (s, e) in enumerate(spans)

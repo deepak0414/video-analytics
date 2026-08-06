@@ -468,3 +468,19 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   logs each episode as separate Start/End marker entries — the adapter parses continuations and
   pairs markers per channel (verbatim live fixture in tests). Ground-truth window check: 25 probe
   windows vs 22 golden clips for Aug 1 noon-2pm, consistent. Full suite 610 passed / 2 skipped.
+- 2026-08-04 (WS4.b, loop session): **SceneDetector interface extended + motion-episodes
+  backend.** `roles/scene_detector.py`: `detect(video_path)` is now
+  `detect(video_path, context: SceneContext | None = None)` — `SceneContext(start_epoch,
+  camera_ref, duration_seconds)`, all defaults None, so existing backends/callers are
+  source-compatible (histogram + pyscenedetect accept-and-ignore it). New adapter
+  `scene_detector/motion_episodes_inproc.py`: asks the configured MotionSource for events
+  in the chunk's wall-clock range (epoch→relative via start_epoch), clusters
+  (`cluster_events`), pads/clamps/merges; degraded modes = full-span single segment
+  (missing start_epoch, or MotionSource failure — warns, never aborts ingest); epoch
+  present + zero events = zero segments. Registry: `scene_detector.model:
+  motion-episodes` (knobs `pad_s`/`gap_s`/`min_span_s` on the spec). All four
+  `security.yaml` footage profiles now select it. `ingest.py` builds the context from the
+  catalog row (re-read at Role-1 time) + `cameras.source_ref`. lnr adapter: flat-shape
+  present-but-unparseable End Time now WARNS before start-anchoring (WS4.a round-8
+  carry-over). Tests: `tests/test_motion_scene_detector.py` (known-window ground truth,
+  end-to-end ingest oracle), one new lnr regression test.

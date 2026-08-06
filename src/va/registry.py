@@ -130,6 +130,20 @@ def get_scene_detector(cfg: Optional[Config] = None) -> SceneDetector:
             from va.adapters.scene_detector.pyscenedetect_inproc import PySceneDetectDetector
 
             return PySceneDetectDetector()
+        if model == "motion-episodes":
+            # WS4.b (plan §3.2 row 1): segments = clustered MotionSource episodes.
+            # Reuses the configured motion_source role (sidecar stub by default),
+            # so the same profile that picks this backend controls where motion
+            # windows come from. Knobs ride on the scene_detector spec.
+            from va.adapters.scene_detector.motion_episodes_inproc import (
+                MotionEpisodeSceneDetector,
+            )
+
+            spec = cfg.roles.get("scene_detector") or {}
+            kwargs = {
+                k: spec[k] for k in ("pad_s", "gap_s", "min_span_s") if k in spec
+            }
+            return MotionEpisodeSceneDetector(get_motion_source(cfg), **kwargs)
         raise ValueError(f"unknown scene_detector model: {model!r}")
 
     raise NotImplementedError(f"scene_detector backend not yet wired: {backend!r}")
