@@ -74,6 +74,71 @@ def _batched(it: Iterable, n: int) -> Iterator[list]:
         yield batch
 
 
+def _crop_key(ts: float, det) -> tuple:
+    """Identity of a detection's geometry at a moment. Valid because BOTH
+    tracker adapters return the ORIGINAL detections via model_copy — the iou
+    tracker naturally, bytetrack via a supervision `data` index round-trip —
+    so geometry is bit-identical by construction (invariant pinned by
+    tests/test_tracker_passthrough.py; a tracker that reconstructs boxes
+    breaks this join and silently drops appearance refs)."""
+    return (round(ts, 3), round(det.bbox_x, 5), round(det.bbox_y, 5),
+            round(det.bbox_w, 5), round(det.bbox_h, 5))
+
+
+def _capture_appearance(tracks, detections, det_crops, embedder, cfg, video_dir):
+    """WS4.d: one appearance embedding per track (its highest-confidence
+    detection's crop, embedded with the Role-2 embedder) into the per-video
+    `appearance` vector store — a SEPARATE file from the frame store, so scene
+    search is untouched. Returns the tracks with `appearance_ref` set where a
+    crop was available. Role-12 (cross-camera ReID) will replace the embedder
+    with a purpose-trained one; this slice locks the schema + plumbing.
+    """
+    from va.registry import embedder_id
+
+    if not tracks:
+        return tracks
+    by_track: dict = {}
+    for d in detections:
+        if d.track_id is None:
+            continue
+        best = by_track.get(d.track_id)
+        if best is None or d.confidence > best.confidence:
+            by_track[d.track_id] = d
+    from PIL import Image
+
+    todo, ref_by_track = [], {}
+    for t in tracks:
+        d = by_track.get(t.id)
+        path = det_crops.get(_crop_key(d.timestamp, d)) if d is not None else None
+        if path is None:
+            continue
+        ref = f"track:{t.id}"
+        todo.append((path, {
+            "appearance_ref": ref, "video_id": str(t.video_id),
+            "track_id": str(t.id), "timestamp": d.timestamp,
+            "object_class": t.object_class,
+        }))
+        ref_by_track[t.id] = ref
+    if not todo:
+        return tracks
+    store = NumpyFlatVectorStore(video_dir / "appearance")
+    # Batched like the frame path: an iou over-count on a long video can mean
+    # hundreds of tracks, and a single forward pass over all crops would spike
+    # VRAM on the already-OOM-prone box (§8.1). Crops are opened per batch.
+    for chunk in _batched(todo, _BATCH):
+        images = [Image.open(p).convert("RGB") for p, _ in chunk]
+        store.add(embedder.embed_image(images), [pl for _, pl in chunk])
+    store.set_meta({"embedder": embedder_id("visual_embedder", cfg),
+                    "space": "appearance-crop"})
+    store.persist()
+    trace("appearance", "done", f"{len(todo)}/{len(tracks)} tracks embedded")
+    return [
+        t.model_copy(update={"appearance_ref": ref_by_track[t.id]})
+        if t.id in ref_by_track else t
+        for t in tracks
+    ]
+
+
 def _trace_fail(role: str, exc: Exception) -> None:
     """Surface a swallowed best-effort role failure in the trace (a warn, not an
     abort — ingest continues). No-op when tracing is off. Before TR.2 these
@@ -420,6 +485,17 @@ def _ingest_impl(
                 _purge("object_tracker", TrackStore, "replace_tracks")
             det_ok = detector is not None
             frames_dets: list[tuple[float, list]] = []
+            # WS4.d: detection crops harvested DURING the single decode pass
+            # (frames aren't retained, so cropping later would mean a second
+            # decode). Keyed by (timestamp, bbox) — both trackers return the
+            # ORIGINAL detections (model_copy; bytetrack routes them through
+            # supervision's `data` index), so geometry is identical by
+            # construction and the key survives into Role 6's output. Crops
+            # SPILL TO DISK (transient cache dir, downscaled JPEGs): an
+            # hour-long many-object video would otherwise hold GBs of PIL
+            # images in RAM next to the resident models (§8.1).
+            det_crops: dict[tuple, Path] = {}
+            crops_dir = ws.cache / f"crops-{video.id}"
 
             n = 0
             for batch in _batched(sample_frames(fetched.local_path, fps=fps), _BATCH):
@@ -439,11 +515,24 @@ def _ingest_impl(
                 if det_ok:
                     try:
                         per_image = detector.detect(images, classes)
-                        for ts, dets in zip(timestamps, per_image):
+                        for (ts, img), dets in zip(batch, per_image):
                             frames_dets.append((ts, dets))
+                            for d in dets:
+                                w, h = img.size
+                                box = (int(d.bbox_x * w), int(d.bbox_y * h),
+                                       int((d.bbox_x + d.bbox_w) * w),
+                                       int((d.bbox_y + d.bbox_h) * h))
+                                if box[2] > box[0] and box[3] > box[1]:
+                                    crop = img.crop(box)
+                                    crop.thumbnail((512, 512))  # embedders resize anyway
+                                    crops_dir.mkdir(parents=True, exist_ok=True)
+                                    p = crops_dir / f"c{len(det_crops)}.jpg"
+                                    crop.convert("RGB").save(p, "JPEG", quality=90)
+                                    det_crops[_crop_key(ts, d)] = p
                     except Exception as e:
                         det_ok = False
                         frames_dets = []
+                        det_crops = {}
                         failed.update({"object_detector", "object_tracker"})
                         _trace_fail("detect", e)
             store.set_meta({"embedder": embedder_id("visual_embedder", cfg)})
@@ -489,8 +578,20 @@ def _ingest_impl(
                     det_store = DetectionStore(ws.catalog_db)
                     det_store.replace_detections(video.id, result.detections)
                     det_store.close()
+                    # WS4.d (Role-12 schema insurance): embed each track's
+                    # best-detection crop into a SECOND per-video vector store
+                    # and point the track row at it. Best-effort — appearance
+                    # capture failing must cost the refs, never the tracks.
+                    tracks = result.tracks
+                    try:
+                        tracks = _capture_appearance(
+                            tracks, result.detections, det_crops,
+                            embedder, cfg, video_dir,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        _trace_fail("appearance", e)
                     track_store = TrackStore(ws.catalog_db)
-                    track_store.replace_tracks(video.id, result.tracks)
+                    track_store.replace_tracks(video.id, tracks)
                     track_store.close()
                     n_detections = len(result.detections)
                     n_tracks = len(result.tracks)
@@ -500,6 +601,8 @@ def _ingest_impl(
                     n_tracks = 0
                     failed.update({"object_detector", "object_tracker"})
                     _trace_fail("track", e)
+            # The spilled crops are consumed (or moot) once Role 6 is done.
+            shutil.rmtree(crops_dir, ignore_errors=True)
 
             # Retrieval Layer (SR.2): semantic text index over the caption /
             # transcript / OCR / action text (best-effort — needs those rows

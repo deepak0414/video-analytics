@@ -6,7 +6,7 @@ appearances).
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -22,6 +22,10 @@ class ObjectTrack(BaseModel):
     first_seen: float = 0.0
     last_seen: float = 0.0
     frame_count: int = 0
+    # WS4.d (Role-12 schema insurance): pointer into the per-video APPEARANCE
+    # vector store (a crop embedding of the track's best detection). NULL =
+    # no appearance captured (pre-WS4.d ingest, or the capture step failed).
+    appearance_ref: Optional[str] = None
 
 
 class TrackingResult(BaseModel):

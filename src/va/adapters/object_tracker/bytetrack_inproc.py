@@ -51,20 +51,24 @@ class ByteTrackTracker:
                 xyxy=xyxy,
                 confidence=np.array([d.confidence for d in dets], dtype=np.float32),
                 class_id=np.array([class_idx[d.object_class] for d in dets]),
+                # Index back to the ORIGINAL Detection: supervision filters
+                # `data` alongside the boxes, so each tracked row can return
+                # the input detection verbatim instead of a reconstruction.
+                # The float32(x1000) round-trip + clamping otherwise perturbs
+                # geometry, breaking WS4.d's crop-to-track join (which keys on
+                # exact bbox values) and any other geometry-identity consumer.
+                data={"det_idx": np.arange(len(dets))},
             )
             tracked = tracker.update_with_detections(sv_dets)
             for i in range(len(tracked)):
                 tid = int(tracked.tracker_id[i])
                 uid = ext_ids.setdefault(tid, uuid4())
-                cls = classes[int(tracked.class_id[i])]
-                conf = float(tracked.confidence[i])
-                x0, y0, x1, y1 = (float(v) / _NOMINAL for v in tracked.xyxy[i])
-                out_dets.append(Detection(
-                    video_id=video_id, timestamp=ts, object_class=cls,
-                    confidence=min(1.0, max(0.0, conf)), track_id=uid,
-                    bbox_x=min(max(x0, 0.0), 1.0), bbox_y=min(max(y0, 0.0), 1.0),
-                    bbox_w=min(max(x1 - x0, 0.0), 1.0), bbox_h=min(max(y1 - y0, 0.0), 1.0),
-                ))
+                orig = dets[int(tracked.data["det_idx"][i])]
+                cls = orig.object_class
+                conf = float(orig.confidence)
+                out_dets.append(orig.model_copy(update={
+                    "video_id": video_id, "timestamp": ts, "track_id": uid,
+                }))
                 a = agg.setdefault(uid, {
                     "cls": cls, "first": ts, "last": ts, "frames": 0, "conf": 0.0,
                     "seen": set(),

@@ -502,3 +502,16 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   exact-range query collapsed the episode to (0,2); with the margin the live re-run
   landed (0.0, 31.7). Timeline caveat: verify-and-trim drops stale frames, so media t=0
   aligns with start_epoch only to ~1 s and clips may be shorter than the window.
+- 2026-08-05 (WS4.d, loop session): **per-track appearance embeddings.** Schema v6:
+  `object_tracks.appearance_ref TEXT` (nullable; migration `_m6_appearance_ref`);
+  `ObjectTrack` contract grew the matching optional field. Ingest: detection crops are
+  harvested during the existing single decode pass, spilled to a transient cache dir
+  as downscaled JPEGs (RAM stays O(1); §8.1), keyed by timestamp+bbox — VALID because
+  both tracker adapters now return the ORIGINAL detections via model_copy (bytetrack
+  routes them through supervision's `data` index instead of reconstructing boxes from
+  its float32 round-trip; invariant pinned by tests/test_tracker_passthrough.py) —
+  then after Role 6 each track's highest-confidence detection crop is embedded with the Role-2 visual embedder into a SECOND per-video
+  vector store `appearance.npz` (meta `{embedder, space: appearance-crop}`), refs
+  written onto the track rows. Best-effort: appearance failure costs refs, never
+  tracks. Frame store untouched (separate file, no query-path change). Role 12 swaps
+  in a purpose-trained ReID embedder later — this locks schema + plumbing.
