@@ -515,3 +515,18 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   written onto the track rows. Best-effort: appearance failure costs refs, never
   tracks. Frame store untouched (separate file, no query-path change). Role 12 swaps
   in a purpose-trained ReID embedder later — this locks schema + plumbing.
+- 2026-08-05 (WS4.e, loop session): **staged model execution.** The hardware profile's
+  `residency:` knob (documented since the profile existed, consumed by nothing) is now
+  honored by ingest: `unload-after-use` clears the ModelManager at role-GROUP boundaries
+  (captioner / speech / ocr / actions / embed+detect+track+appearance — SigLIP and YOLO
+  share one group; appearance reuses SigLIP inside it). `keep` (shipped default) is a
+  no-op — byte-identical behavior. Measured on the §8.1 repro (single-process 22-clip
+  real-model batch, security profile): keep-resident starved YOLO to detections on 1/22
+  clips; staged = 22/22 (16-61 det/clip), cost ~90 s/clip in reloads. Batch ingest
+  workloads should set unload-after-use; interactive single-video ingests keep the
+  default. NB (round-1 review): clearing the MANAGER cache is not enough — the
+  ingest-local adapter references (captioner/embedder/detector) pin the weights, so
+  the boundaries also RELEASE those locals; any new role wired into ingest must do
+  the same or its group's unload is cosmetic. Unknown residency values fail at
+  config load; a failed ingest stages on its way out. tests/test_staged_models.py
+  pins no-op-on-keep, output-invariance, load-validation, and the failure path.
