@@ -199,7 +199,13 @@ def test_malformed_row_costs_one_job_not_the_server(tmp_path):
 
     aq = AskQueue(str(ws))
     aq.start()                                                 # must not raise
-    aq.stop()
+    try:
+        # Round-2 (WS6.b branch) review: even an unrecoverable ask row must be
+        # POLLABLE as failed, mirroring the ingest side — never a 404.
+        bad_ask = aq.get("bad-ask")
+        assert bad_ask is not None and bad_ask.state.value == "failed"
+    finally:
+        aq.stop()
 
     # Terminal, not skip-forever: the malformed row must be FAILED in the
     # table, or every future boot re-warns about it for eternity.
@@ -398,3 +404,27 @@ def test_no_workdir_store_failure_degrades_to_memory(tmp_path, monkeypatch):
         assert _wait(lambda: job.state.value == "done")
     finally:
         q.stop()
+
+
+def test_resumed_row_reverts_to_queued_before_running(tmp_path):
+    """Round-3 (WS6.b branch) review: a resumed `running` row must revert to
+    `queued` at resume time — restarts while it WAITS in queue must not bump
+    it toward the poison cap; only a job that actually starts re-marks itself
+    running."""
+    clip = _clip(tmp_path)
+    ws = tmp_path / ".va"
+    store = JobStore(Workspace(str(ws)).catalog_db)
+    store.record("j", "ingest", {"uri": str(clip), "fps": 1.0})
+    store.update("j", "running")           # crash artifact
+    store.close()
+
+    q = IngestQueue(str(ws))
+    q._resume()                            # resume WITHOUT starting the worker
+    row = _job_rows(ws)[0]
+    assert row["state"] == "queued"        # reverted: waiting, not running
+    assert row["attempts"] == 1            # exactly one bump for this restart
+
+    q2 = IngestQueue(str(ws))
+    q2._resume()                           # another flap while still waiting
+    row = _job_rows(ws)[0]
+    assert row["attempts"] == 1            # queued rows accrue no further guilt

@@ -208,6 +208,13 @@ class IngestQueue(SerialQueue):
                 # job through many restarts) and must not accrue guilt.
                 attempts = (self._persist("bump_attempts", r["id"])
                             if r["state"] == "running" else None)
+                if attempts is not None and attempts <= MAX_RESUME_ATTEMPTS:
+                    # Revert the bumped row to `queued` NOW: while it waits in
+                    # the resume queue, unrelated server flaps must not re-bump
+                    # it toward the cap — only a job that actually STARTS
+                    # re-marks itself running, preserving poison detection
+                    # (round-3 review).
+                    self._persist("update", r["id"], "queued")
                 if attempts is not None and attempts > MAX_RESUME_ATTEMPTS:
                     msg = (f"gave up after {MAX_RESUME_ATTEMPTS} resume "
                            "attempts — this job repeatedly died mid-run")
@@ -317,7 +324,13 @@ class AskQueue(SerialQueue):
                 job.error = msg
                 self._jobs[job.id] = job
             except Exception:  # noqa: BLE001
-                log.warning("could not rebuild ask row %r — skipped",
+                # Still pollable: mirror the ingest side — a browser watching
+                # this ask_id must see the failure, not a 404 (round-2 review).
+                job = AskJob(question="<unrecoverable>", id=r["id"])
+                job.state = JobState.failed
+                job.error = "unresumable ask row (malformed payload)"
+                self._jobs[job.id] = job
+                log.warning("could not rebuild ask row %r — marked failed",
                             r.get("id"), exc_info=True)
 
     def _process(self, job: AskJob) -> None:

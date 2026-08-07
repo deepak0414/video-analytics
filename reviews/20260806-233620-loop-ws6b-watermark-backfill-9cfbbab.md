@@ -1,0 +1,34 @@
+# Agent review — approve
+
+date: 2026-08-06T23:42:38.562695
+range: origin/main..HEAD
+branch: loop/ws6b-watermark-backfill
+findings: 2
+
+- **minor** `src/va/pipeline/watch.py:64` — _iso_utc truncates fractional seconds, so a MotionSource emitting fractional epochs (Protocol-typed float; the default sidecar stub passes JSON floats through) can produce a window whose start and end truncate to the same second — parse_nvr_uri rejects it, and the failed-window path holds the watermark and retries the identical failure every pass, wedging the camera permanently with no age-out.
+  - scenario: A sidecar (or future ONVIF/own-detection) source emits a closed event [T+10.4, T+10.9]; the URI becomes nvr://1/...:10/...:10, ingest raises 'end not after start' on every pass, the watermark never advances, and all later episodes on that camera are lost when they age off the ~6-day ring. Fix: floor start / ceil end when formatting, or widen-and-warn on degenerate windows.
+- **minor** `src/va/pipeline/watch.py:126` — The max(1, ...) per-camera budget floor lets one pass pull up to len(cameras) windows when registered cameras exceed max_windows, contradicting the CLI help's claim (cli.py:549) that --max-windows caps windows 'per pass across all cameras'.
+  - scenario: 100 registered cameras with --max-windows 50 pull up to 100 windows in a single pass — double the device-load bound the operator set. Fix: document the per-camera floor in the --max-windows help text, or cap the number of cameras serviced per pass and rotate the start position.
+
+---
+
+## Full review
+
+Review complete. This branch (WS6.a durable job queue + WS6.b catch-up watcher) has been through 13 prior review rounds, and I verified the previously-flagged issues are genuinely fixed at HEAD rather than taking the comments' word for it: the per-camera budget split now exists with a no-starvation test, `--cluster-gap`/`--open-instant-age` are documented in both CLAUDE.md and COORDINATION.md, the open-instant deferral runs on raw events before clustering (with the round-3 critical's exact repro as a test), resumed rows revert to `queued` before re-running, the partial-shard deletion nulls prior-attempt `appearance_ref`s, and the graceful-stop requeue is guarded against the terminal-write race. Both plan "Done when" oracles exist (`test_crashed_running_job_resumes_exactly_once`, `test_outage_backfills_exactly_the_gap_once`) and the ~6-day ring SLA is documented in three places. Schema goes v6→v8 through ordered migrations; both COORDINATION.md entries are logged, including the web-owned-file warning for `jobs.py`.
+
+Things I probed that dissolved: the quiet-advance guard comparing against the stale `cam.last_processed_epoch` is safe because `set_watermark`'s SQL is itself monotonic and the horizon target always ≥ any per-episode advance; deduped replay windows correctly don't consume budget (pinned by `len(pulls) == 5`); `update(..., "queued")` wiping error/result is correct for a re-run; the sidecar motion source does filter by `camera_ref`; `schema.connect()` creates parent dirs so `catch_up` on a fresh workdir can't crash on a missing path; and a corrupt `result` blob on a pending row is unreachable through any normal state transition.
+
+Two minor findings remain, both robustness/accuracy edges rather than reachable-today defects:
+
+**1. Minor — `src/va/pipeline/watch.py:64` — whole-second URI truncation can build a degenerate nvr window from a fractional-epoch motion source, permanently wedging that camera.** `_iso_utc` formats with `%H:%M:%S`, dropping fractional seconds. A `MotionSource` emitting fractional epochs (the Protocol types are `float`, and the default sidecar stub passes JSON floats straight through) can yield a closed episode whose span truncates to zero — e.g. start `T+10.4`, end `T+10.9` becomes `nvr://1/…T…10/…T…10` — and `parse_nvr_uri` raises "end not after start". The watch loop treats that as a failed window: watermark held, retry next pass, identical failure forever — the same wedge class the `--open-instant-age` bound was built to escape, but with no age-out, and it blocks every later episode on that camera until the footage ages off the ring. Unreachable via the shipped lnr backend (integer-second log timestamps; its zero-span events take the open-instant path), which is why this is minor, not major. Safe path: floor the start and ceil the end when formatting the window (or detect `int(end) <= int(start)` and widen/skip with a warning) so a Protocol-conformant fractional source can't produce an unpullable window.
+
+**2. Minor — `src/va/pipeline/watch.py:126` — the min-1 budget floor lets a pass exceed the stated global window cap when cameras outnumber `max_windows`.** `per_camera_budget = max(1, max_windows // len(cameras))` means 100 registered cameras with `--max-windows 50` pull up to 100 windows in one pass, but the CLI help (`src/va/cli.py:549`) promises "max windows pulled per pass across all cameras". COORDINATION.md documents the split-with-floor accurately; the help text doesn't. At the productization scale (~10 cameras) this never binds, so it's a doc-accuracy fix: state the per-camera floor in the help text, or cap the cameras serviced per pass and rotate.
+
+No critical or major findings.
+
+```json
+{"verdict": "approve", "findings": [
+{"severity": "minor", "file": "src/va/pipeline/watch.py", "line": 64, "issue": "_iso_utc truncates fractional seconds, so a MotionSource emitting fractional epochs (Protocol-typed float; the default sidecar stub passes JSON floats through) can produce a window whose start and end truncate to the same second — parse_nvr_uri rejects it, and the failed-window path holds the watermark and retries the identical failure every pass, wedging the camera permanently with no age-out.", "scenario": "A sidecar (or future ONVIF/own-detection) source emits a closed event [T+10.4, T+10.9]; the URI becomes nvr://1/...:10/...:10, ingest raises 'end not after start' on every pass, the watermark never advances, and all later episodes on that camera are lost when they age off the ~6-day ring. Fix: floor start / ceil end when formatting, or widen-and-warn on degenerate windows."},
+{"severity": "minor", "file": "src/va/pipeline/watch.py", "line": 126, "issue": "The max(1, ...) per-camera budget floor lets one pass pull up to len(cameras) windows when registered cameras exceed max_windows, contradicting the CLI help's claim (cli.py:549) that --max-windows caps windows 'per pass across all cameras'.", "scenario": "100 registered cameras with --max-windows 50 pull up to 100 windows in a single pass — double the device-load bound the operator set. Fix: document the per-camera floor in the --max-windows help text, or cap the number of cameras serviced per pass and rotate the start position."}
+]}
+```
