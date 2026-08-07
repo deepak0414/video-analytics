@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sqlite3
 import traceback
 from dataclasses import dataclass
 from itertools import islice
@@ -493,6 +494,31 @@ def _ingest_impl(
             # (object detection, best-effort) — previously two separate full decode
             # passes over the identical frames. Streaming per batch keeps memory to
             # one batch, not the whole video.
+            #
+            # Resume safety (WS6.a review): a prior attempt may have PERSISTED a
+            # partial shard (killed between store.persist() and `done`). The
+            # vector stores load-and-APPEND, so re-running on the leftovers
+            # would duplicate every frame/appearance vector. This row is not
+            # `done` (the dedup return above filters those), so any existing
+            # shard content is by definition a partial prior attempt — start
+            # clean. Role tables don't need this: they use replace_* semantics.
+            for stale in ("vectors", "appearance"):
+                (video_dir / f"{stale}.npz").unlink(missing_ok=True)
+                (video_dir / f"{stale}.json").unlink(missing_ok=True)
+            # The deleted appearance shard may still be referenced by
+            # prior-attempt track rows — and if the tracker fails on THIS run
+            # (best-effort: old rows survive), those refs would dangle into a
+            # nonexistent store, breaking the WS4.d invariant (round-7
+            # review). Null them; a successful tracker run rewrites them.
+            try:
+                conn = sqlite3.connect(ws.catalog_db)
+                conn.execute(
+                    "UPDATE object_tracks SET appearance_ref = NULL "
+                    "WHERE video_id = ?", (str(video.id),))
+                conn.commit()
+                conn.close()
+            except Exception as e:  # noqa: BLE001 — bookkeeping, never fatal
+                _trace_fail("appearance-ref-reset", e)
             embedder = get_visual_embedder(cfg)
             # per-video vector shard (layout v2): removal = delete the video dir
             store = NumpyFlatVectorStore(video_dir / "vectors")

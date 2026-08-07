@@ -87,6 +87,10 @@ VA_CONFIG_DIR=run-siglip/config .venv/bin/va --workdir .va transcript "<text>" -
 # web UI (browser on the LAN: ingest, play, search-with-click-to-seek; see web-frontend-plan.md)
 .venv/bin/pip install -e '.[web,dev]'
 VA_CONFIG_DIR=run-siglip/config .venv/bin/va --workdir .va serve --port 8080
+                                                            # WS6.a: job queue is DURABLE (jobs table, schema v7) —
+                                                            #   a restart RESUMES queued/running ingest jobs exactly
+                                                            #   once; pending asks are failed ("resubmit"), never
+                                                            #   silently re-run.
 ```
 
 `run-siglip/config` selects the real backends per role (visual_embedder=siglip,

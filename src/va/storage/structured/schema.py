@@ -151,6 +151,25 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 """
 
+# WS6.a: durable job queue — the web layer's in-memory queues persist here so a
+# restart resumes queued/running INGEST jobs exactly once (ask jobs keep their
+# history but are failed on restart — re-running a stale question would burn
+# LLM time unasked). payload/result are JSON blobs (kind-specific shape).
+JOBS = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    state         TEXT NOT NULL DEFAULT 'queued',
+    payload       TEXT NOT NULL,
+    video_id      TEXT,
+    error         TEXT,
+    result        TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
 # §6-b: per-(video, role) provenance — the model/config fingerprint that produced each
 # role's rows (see va.provenance.role_fingerprint), plus run args not in (role, cfg) like
 # `fps`. Read by `va stale` (PROV-4) and the selective reprocess (B).
@@ -182,7 +201,7 @@ INDEXES = [
 ALL_TABLES = [
     CAMERAS,  # before VIDEOS: videos.camera_id REFERENCES cameras(id)
     VIDEOS, SEGMENTS, OBJECT_TRACKS, OBJECT_DETECTIONS,
-    ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS, ROLE_PROVENANCE,
+    ACTION_EVENTS, TRANSCRIPTS, OCR_RESULTS, OBSERVATIONS, ROLE_PROVENANCE, JOBS,
 ]
 
 # --- schema versioning + migrations -------------------------------------------
@@ -201,7 +220,7 @@ ALL_TABLES = [
 # a migrated-in column is safe: apply_schema() builds INDEXES *after* running the
 # migrations, so the column already exists by the time its index is created.
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -255,6 +274,11 @@ def _m6_appearance_ref(conn: sqlite3.Connection) -> None:
     add_column(conn, "object_tracks", "appearance_ref", "TEXT")
 
 
+def _m7_jobs(conn: sqlite3.Connection) -> None:
+    """→ v7: durable job queue (WS6.a) — restart resumes ingest jobs."""
+    conn.execute(JOBS)
+
+
 # Ordered; MIGRATIONS[i] takes the DB from version i to version i+1.
 MIGRATIONS = [
     _m1_last_ingest_run_id,          # -> 1
@@ -263,6 +287,7 @@ MIGRATIONS = [
     _m4_cameras,                     # -> 4
     _m5_start_epoch,                 # -> 5
     _m6_appearance_ref,              # -> 6
+    _m7_jobs,                        # -> 7
 ]
 assert len(MIGRATIONS) == SCHEMA_VERSION, "SCHEMA_VERSION must equal the migration count"
 
