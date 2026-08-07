@@ -17,12 +17,15 @@ The honest answer is the bounded count [low, high].
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 from uuid import UUID
 
 from va.contracts.evidence import Evidence, EvidenceItem
+
+logger = logging.getLogger(__name__)
 
 MODALITY_OBSERVATION = "observation"
 MODALITY_DEEP_SCAN_COUNT = "deep_scan_count"
@@ -46,8 +49,6 @@ _MICRO_PROMPT = (
     "dress'). Use identical wording for the same item every time. "
     "If it is not visible in this frame, reply exactly: none"
 )
-DEFAULT_TARGET = "the main person's outfit"
-
 # Observations meaning "subject not visible" — excluded from the timeline
 # (an off-camera cut is not a state change).
 _NONE = re.compile(r"^\s*(none|n/?a|other|not visible|no \w+)\s*\.?\s*$", re.I)
@@ -69,7 +70,17 @@ def canonical_key(scan_target: str) -> str:
     raw = re.sub(r"[^a-z0-9]+", " ", scan_target.lower()).split()
     noise = {w.rstrip("s") for w in _KEY_NOISE}
     tokens = sorted({w.rstrip("s") for w in raw} - noise)
-    return "-".join(t for t in tokens if t) or "default"
+    key = "-".join(t for t in tokens if t)
+    if key:
+        return key
+    # ALL tokens were noise ("the color", "the wearing"). A shared literal
+    # bucket here silently MERGES distinct scan intents: the second question
+    # reads the first's cached observations and reports them as its own
+    # CODE-COUNTED fact (round-5 review, verified live). Hash the normalized
+    # target instead — distinct intents can then only MISS the cache, which
+    # costs a sweep; merging costs correctness.
+    normalized = " ".join(sorted({w.rstrip("s") for w in raw}))
+    return "t" + hashlib.sha1(normalized.encode()).hexdigest()[:12]
 
 
 @dataclass
@@ -372,9 +383,12 @@ def deep_scan_video(
 
 def run_deep_scan(
     evidence: Evidence, plan, workdir: str, reasoner=None
-) -> Optional[DeepScanResult]:
+) -> Tuple[Optional[DeepScanResult], Optional[str]]:
     """Pick the target video (majority vote over evidence; else the only video
-    in the catalog) and sweep it."""
+    in the catalog) and sweep it. Returns (result, skip_reason): exactly one is
+    non-None — the caller's evidence note must say WHICH cause skipped the
+    sweep (round-1 review: three causes behind one None were indistinguishable
+    to the reasoner and untestable individually)."""
     from collections import Counter
 
     from va.pipeline.paths import Workspace
@@ -393,10 +407,33 @@ def run_deep_scan(
             videos = catalog.list(limit=2)
             video = videos[0] if len(videos) == 1 else None
         if video is None or not video.local_path:
-            return None
-        target = (plan.params or {}).get("scan_target") or DEFAULT_TARGET
+            return None, "no target video resolvable"
+        # R11.a: the video's RECORDED footage profile gates deep scans — the
+        # security profile sets `deep_scan: "off"` (a static camera's outfit/
+        # state sweeps are the A-EV heuristics that hijacked surveillance
+        # questions, plan §8.1). record==reality, like stale/reprocess.
+        from va.configuration import config_for
+
+        prof_cfg = config_for(video.profile, video.source_type.value)
+        if prof_cfg.footage.deep_scan == "off":
+            logger.info("deep-scan gated off by footage profile %r for %s",
+                        video.profile, video.id)
+            return None, (f"the video's footage profile "
+                          f"({video.profile or 'source default'}) gates deep "
+                          "scans off")
+        # R11.a: NO canned fallback target. The scan subject comes from the
+        # query (rule planner) or the LLM plan; if neither produced one,
+        # honestly skip the sweep — scanning "the main person's outfit"
+        # regardless of the question was the hardcoded-content bias the
+        # CLAUDE.md scan_target lesson records.
+        target = (plan.params or {}).get("scan_target")
+        if not target:
+            logger.info("deep-scan skipped: no scan target derivable from the "
+                        "query/plan (no canned fallback)")
+            return None, "no scan target derivable from the query"
         return deep_scan_video(
-            video.id, video.local_path, target, workdir=workdir, reasoner=reasoner
-        )
+            video.id, video.local_path, target, workdir=workdir,
+            reasoner=reasoner
+        ), None
     finally:
         catalog.close()

@@ -57,6 +57,30 @@ _SCAN_NOISE = _STOP | {
 }
 
 
+# Subject nouns that _SCAN_NOISE absorbs for counting-query purposes but which
+# ARE the subject when nothing else survives ("how many times does the COLOR
+# change?"). Kept explicit and tiny — a whitelist of words we know double as
+# both, not a general vocabulary.
+_SUBJECT_NOUNS = {"color", "colour", "number"}
+
+
+def derive_scan_target(query: str) -> "str | None":
+    """The query's own subject for a per-frame sweep — NEVER canned content
+    (R11.a; the CLAUDE.md scan_target lesson). Content words minus scan-noise,
+    except that a few nouns double as both (_SUBJECT_NOUNS) and survive. A
+    query whose only referent is a pronoun ("how many times did it change?")
+    yields None: no derivable subject means no sweep, never a canned one."""
+    words = re.findall(r"[a-z0-9']+", query.lower())
+    subject = [w for w in words if w not in _SCAN_NOISE]
+    if not subject:
+        # ONLY when the plain filter empties: an unconditional keep-set would
+        # inject counting words into ordinary phrasings ("count the number of
+        # visits" -> "the number visits" instead of "the visits" — round-5
+        # review). Pronoun-only queries still yield None.
+        subject = [w for w in words if w in _SUBJECT_NOUNS]
+    return ("the " + " ".join(subject)) if subject else None
+
+
 class RuleReasoner:
     def plan(self, query: str) -> QueryPlan:
         plan = QueryPlan(query=query)
@@ -74,11 +98,9 @@ class RuleReasoner:
         if _DEEP_SCAN.search(query):
             plan.needs_deep_scan = True
             plan.needs_vlm_reasoning = True
-            # Scan target = the query's own content words (e.g. "the girl dress"),
-            # never canned content. Weak grammar is fine — the micro-prompt wraps it.
-            subject = [w for w in re.findall(r"[a-z0-9']+", query.lower())
-                       if w not in _SCAN_NOISE]
-            plan.params["scan_target"] = ("the " + " ".join(subject)) if subject else None
+            # Scan target = the query's own content words (e.g. "the girl
+            # dress"), never canned content — see derive_scan_target (R11.a).
+            plan.params["scan_target"] = derive_scan_target(query)
         words = [w for w in re.findall(r"[a-z0-9']+", query.lower()) if w not in _STOP]
         plan.search_terms = " ".join(words) or query
         return plan

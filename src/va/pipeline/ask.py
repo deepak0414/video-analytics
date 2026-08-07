@@ -68,7 +68,8 @@ def _deep_scan_into(evidence: Evidence, plan: QueryPlan, workdir: str, reasoner)
     from va.pipeline.deep_scan import run_deep_scan
 
     try:
-        ds = run_deep_scan(evidence, plan, workdir, reasoner=reasoner)
+        ds, skip_reason = run_deep_scan(evidence, plan, workdir,
+                                        reasoner=reasoner)
         if ds is not None:
             evidence.items.extend(ds.evidence_items)
             evidence.notes.append(
@@ -77,7 +78,7 @@ def _deep_scan_into(evidence: Evidence, plan: QueryPlan, workdir: str, reasoner)
                 f"code-counted changes: {ds.changes_low}-{ds.changes_high}"
             )
         else:
-            evidence.notes.append("deep-scan requested but no target video resolvable")
+            evidence.notes.append(f"deep-scan requested but skipped: {skip_reason}")
     except Exception as e:  # noqa: BLE001 — degrade, don't fail the ask
         evidence.notes.append(f"deep-scan failed: {e}")
 
@@ -208,19 +209,27 @@ def ask(
 
         # Backfill scan_target for ANY deep-scan plan that lacks one — e.g. an LLM
         # planner set needs_deep_scan but emitted malformed params that JSON-salvage
-        # dropped. Without this, run_deep_scan falls back to the outfit-biased
-        # DEFAULT_TARGET and scans the wrong subject (measured: bird-ask-01 -> 0
-        # episodes with the Qwen3-VL planner). The rule reasoner derives the target
-        # from the query, so this is planner-agnostic.
+        # dropped, or a self-escalation forcing a sweep on a query that never
+        # matched the rule trigger (so its plan carries no target). Derivation is
+        # always FROM THE QUERY — since R11.a there is no canned fallback, and a
+        # deep-scan plan without a target skips the sweep entirely.
         if plan.needs_deep_scan and not plan.params.get("scan_target"):
-            plan.params["scan_target"] = rule_plan.params.get("scan_target")
+            from va.adapters.reasoner.rule_inproc import derive_scan_target
+
+            plan.params["scan_target"] = (rule_plan.params.get("scan_target")
+                                          or derive_scan_target(question))
 
         evidence = retrieve(plan, workdir=workdir, k=k)          # SR.4: fused, ranked
         trace_ingest_links(workdir, {it.video_id for it in evidence.items})
 
         if plan.needs_deep_scan:                                 # Tier 5b
             _deep_scan_into(evidence, plan, workdir, reasoner)
-            trace("deep_scan", "ran",
+            # The trace step name must reflect the OUTCOME: since R11.a a
+            # requested scan can be vetoed (profile) or have no derivable
+            # target, and a ledger reading "ran" would send a QA session
+            # hunting bugs inside a sweep that never happened (round-6 review).
+            ran = any(i.modality == "deep_scan_count" for i in evidence.items)
+            trace("deep_scan", "ran" if ran else "skipped",
                   next((n for n in evidence.notes if "deep-scan" in n), "deep scan"))
 
         keyframes = _collect_keyframes(evidence, workdir, max_keyframes)
@@ -241,16 +250,29 @@ def ask(
                   "sparse answer insufficient -> deep scan", level="warn")
             plan.needs_deep_scan = True
             if not (plan.params or {}).get("scan_target"):
-                from va.adapters.reasoner.rule_inproc import RuleReasoner
+                # Derive directly from the query: the rule PLAN only carries a
+                # target when its own trigger matched, but a self-escalated
+                # sweep needs one regardless (no canned fallback since R11.a).
+                from va.adapters.reasoner.rule_inproc import derive_scan_target
 
-                plan.params["scan_target"] = RuleReasoner().plan(question).params.get("scan_target")
+                plan.params["scan_target"] = derive_scan_target(question)
             evidence.notes.append("self-escalation: sparse answer insufficient -> deep scan")
             _deep_scan_into(evidence, plan, workdir, reasoner)
-            keyframes = _collect_keyframes(evidence, workdir, max_keyframes)
-            _trace_reasoner_input(evidence, keyframes)
-            answer = reasoner.reason(question, evidence, keyframes)
-            trace("reasoner", "output", "answer (post-escalation)",
-                  reasoner_output=answer.text, citations=len(answer.citations))
+            # Re-reason ONLY if the sweep actually added evidence. A scan the
+            # profile vetoed (security) or that had no derivable target leaves
+            # the evidence identical, and a second reasoner pass over it costs
+            # another 100-330 s of LLM time for literally no new information
+            # (review round 4).
+            if any(i.modality == "deep_scan_count" for i in evidence.items):
+                keyframes = _collect_keyframes(evidence, workdir, max_keyframes)
+                _trace_reasoner_input(evidence, keyframes)
+                answer = reasoner.reason(question, evidence, keyframes)
+                trace("reasoner", "output", "answer (post-escalation)",
+                      reasoner_output=answer.text, citations=len(answer.citations))
+            else:
+                trace("reasoner", "self_escalation_noop",
+                      "escalated deep scan added no evidence — keeping the "
+                      "first answer instead of re-reasoning", level="warn")
 
         rendered = render_answer(answer, workdir)
 

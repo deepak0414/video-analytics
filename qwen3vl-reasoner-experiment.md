@@ -131,8 +131,11 @@ paths from the same footgun and cannot regress `dresses-ask-01` (that plan alrea
 **Follow-ups (not done):** (1) the rule-derived target is clunkier than an LLM's clean phrasing (54
 vs ~100–110 non-`none` frames for `claude-code`'s "the bird at the feeder") — enough to count right
 here, but a neater backfill (or trusting Qwen3-VL's own target when it parses) would improve
-sensitivity. (2) Secondary hardening: change `DEFAULT_TARGET` from the outfit-specific string to a
-neutral `"the main subject"` so a total miss fails visibly instead of silently scanning for outfits.
+sensitivity. (2) ~~Secondary hardening: change `DEFAULT_TARGET` from the outfit-specific string to a
+neutral `"the main subject"` so a total miss fails visibly instead of silently scanning for
+outfits.~~ **SUPERSEDED by R11.a (2026-08-07): `DEFAULT_TARGET` is deleted outright — there is
+no canned fallback of any kind. A query with no derivable subject skips the sweep and says so,
+and the recorded footage profile can veto sweeps entirely. Do not reintroduce a neutral default.**
 
 *(Flagged per repo convention: this changes shared `ask()` behavior. Applied and validated; still
 uncommitted, pending the session checkpoint.)*

@@ -299,9 +299,12 @@ are not provenance-stamped, and `va stale` EXCLUDES them (with the same dependen
 closure) while the profile disables them AND they are unstamped; a role that RAN before
 the profile was edited to disable it reads stale (its rows contradict the profile —
 reingest purges them). Profiles also override vocab (`classes:`/`actions:`) and carry profile-wide knobs on
-`Config.footage` — `retention_days` / `time_model` / `deep_scan` (recorded-but-inert until
-P7.a, WS-3, R11.a consume them; unknown or ill-typed knobs fail at load; quote
-`deep_scan: "off"` — bare `off` is YAML false). `security` (A-LSSRVF) ships: skips speech
+`Config.footage` — `retention_days` / `time_model` (recorded-but-inert until P7.a and
+WS-3 presentation work consume them) and `deep_scan` (**consumed since R11.a**: the
+dominant video's RECORDED profile gates `va ask` deep scans — security sets "off";
+also R11.a removed the hardcoded outfit fallback target entirely: no derivable
+query subject = no sweep, never canned content). Unknown or ill-typed knobs fail at
+load; quote `deep_scan: "off"` — bare `off` is YAML false. `security` (A-LSSRVF) ships: skips speech
 roles 8/9, narrows detector vocab, and selects the **motion-episodes** Role-1 backend
 (WS4.b: segments = clustered MotionSource episodes mapped epoch→relative via
 `videos.start_epoch`; knobs `pad_s`/`gap_s`/`min_span_s`/`query_margin_s` on the
