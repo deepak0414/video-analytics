@@ -1,10 +1,16 @@
 """Single-worker job queues for the web server.
 
 GPU-heavy work is serialized: each queue processes jobs strictly one at a time
-on its own daemon thread. Job records live in memory only — for ingest the
-durable record is the catalog's `ingest_status`; jobs exist so the browser has
-something to poll between submit and done, and to carry the error message of a
-failed run back to the UI.
+on its own daemon thread. Since WS6.a job records are DURABLE (the `jobs`
+table in the catalog DB): every submit and state transition persists, and a
+restarted server resumes queued/running INGEST jobs exactly once — ingest()
+is the idempotency point, so a job that died mid-run re-runs against the same
+catalog row and either completes it or dedups on `done`. Ask jobs persist for
+history but are failed on restart (re-running a stale question would burn
+minutes of LLM time nobody asked for); their failed records are rebuilt into
+memory so a polling browser sees the failure instead of a 404. Persistence is
+best-effort by design: a broken jobs table degrades to the old memory-only
+behavior with a warning, never a dead queue.
 
 Asks get the same treatment as ingests because `ask()` can legitimately take
 minutes (deep-scan sweeps, including self-escalation re-runs) — far too long
@@ -19,10 +25,16 @@ import queue
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
 log = logging.getLogger("va.web")
+
+# Resume-attempt cap (poison-job guard): a job whose run KILLS the process can
+# never persist its own `failed` state, so the cap is the only terminal exit.
+# Structure/budget knob, not content.
+MAX_RESUME_ATTEMPTS = 3
 
 
 class JobState(str, Enum):
@@ -76,30 +88,78 @@ class SerialQueue:
     """One daemon thread; subclasses implement `_process(job)`."""
 
     name = "va-queue"
+    kind = "job"
 
-    def __init__(self) -> None:
+    def __init__(self, workdir: Optional[str] = None) -> None:
         self._jobs: dict[str, Any] = {}
         self._q: "queue.Queue[Optional[str]]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
+        self.workdir = workdir
+
+    # --- durability (WS6.a) -------------------------------------------------
+    def _store(self):
+        """A fresh short-lived JobStore, or None when there is no workdir (the
+        queue then behaves exactly as the pre-WS6.a memory-only version)."""
+        if self.workdir is None:
+            return None
+        from va.pipeline.paths import Workspace
+        from va.storage.structured.jobs_store import JobStore
+
+        db = Workspace(self.workdir).catalog_db
+        Path(db).parent.mkdir(parents=True, exist_ok=True)
+        return JobStore(db)
+
+    def _persist(self, action, *args, **kwargs) -> Any:
+        """Best-effort store call: durability must never kill the worker —
+        a broken jobs table degrades to memory-only with a warning."""
+        try:
+            store = self._store()
+            if store is None:
+                return None
+            try:
+                return getattr(store, action)(*args, **kwargs)
+            finally:
+                store.close()
+        except Exception:  # noqa: BLE001
+            log.warning("job persistence failed (%s) — continuing in-memory",
+                        action, exc_info=True)
+            return None
+
+    def _resume(self) -> None:  # pragma: no cover - overridden
+        """Restart policy hook, run once before the worker starts."""
 
     def start(self) -> None:
         if self._thread is not None:
             return
+        self._resume()
         self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
         self._thread.start()
+
+    JOIN_TIMEOUT = 5.0
 
     def stop(self) -> None:
         if self._thread is None:
             return
         self._q.put(None)  # sentinel: drain then exit
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=self.JOIN_TIMEOUT)
         self._thread = None
+        # Graceful shutdown is NOT crash evidence: if a job is still in flight
+        # when we give up joining, knock its row back to `queued` so deliberate
+        # restarts don't march attempts toward the poison cap (round-6 review).
+        # A daemon thread that later finishes anyway overwrites this with its
+        # terminal state — last write wins either way.
+        current = self._current
+        if current is not None:
+            self._persist("requeue_if_running", current)
+
+    _current: Optional[str] = None
 
     def get(self, job_id: str) -> Optional[Any]:
         return self._jobs.get(job_id)
 
-    def _submit(self, job: Any) -> Any:
+    def _submit(self, job: Any, payload: dict[str, Any]) -> Any:
         self._jobs[job.id] = job
+        self._persist("record", job.id, self.kind, payload)
         self._q.put(job.id)
         return job
 
@@ -108,7 +168,11 @@ class SerialQueue:
             job_id = self._q.get()
             if job_id is None:
                 return
-            self._process(self._jobs[job_id])
+            self._current = job_id
+            try:
+                self._process(self._jobs[job_id])
+            finally:
+                self._current = None
 
     def _process(self, job: Any) -> None:  # pragma: no cover - abstract
         raise NotImplementedError
@@ -116,16 +180,75 @@ class SerialQueue:
 
 class IngestQueue(SerialQueue):
     name = "va-ingest"
+    kind = "ingest"
 
     def __init__(self, workdir: str):
-        super().__init__()
-        self.workdir = workdir
+        super().__init__(workdir)
 
     def submit(self, uri: str, fps: float = 1.0) -> IngestJob:
-        return self._submit(IngestJob(uri=uri, fps=fps))
+        job = IngestJob(uri=uri, fps=fps)
+        return self._submit(job, {"uri": job.uri, "fps": job.fps})
+
+    def _resume(self) -> None:
+        # Crash artifacts: `queued` never ran; `running` died mid-job. Both
+        # re-enqueue — ingest() is idempotent (same catalog row; dedup on
+        # done), so a resumed job runs to completion exactly once.
+        rows = self._persist("pending", self.kind) or []
+        resumed = 0
+        for r in rows:
+            # One malformed row (hand-edited payload, future-build shape) must
+            # cost one job, not the server: this runs inside the FastAPI
+            # lifespan, where an escape would kill startup (round-2 review).
+            try:
+                # Poison-job guard (round-4/5 review): a job that KILLS the
+                # process (OOM, native segfault) leaves `running` behind and
+                # would otherwise resume-and-recrash on every restart forever.
+                # ONLY `running` rows bump — that state is the crash evidence;
+                # `queued` rows never executed (they may sit behind the poison
+                # job through many restarts) and must not accrue guilt.
+                attempts = (self._persist("bump_attempts", r["id"])
+                            if r["state"] == "running" else None)
+                if attempts is not None and attempts > MAX_RESUME_ATTEMPTS:
+                    msg = (f"gave up after {MAX_RESUME_ATTEMPTS} resume "
+                           "attempts — this job repeatedly died mid-run")
+                    self._persist("update", r["id"], "failed", error=msg)
+                    self._fail_in_memory(r, msg)
+                    log.warning("jobs row %r exceeded %d resume attempts — "
+                                "marked failed", r["id"], MAX_RESUME_ATTEMPTS)
+                    continue
+                job = IngestJob(uri=r["payload"]["uri"],
+                                fps=r["payload"].get("fps", 1.0), id=r["id"])
+                job.video_id = r["video_id"]
+                self._jobs[job.id] = job
+                self._q.put(job.id)
+                resumed += 1
+            except Exception:  # noqa: BLE001
+                # Terminal, not skip-forever: an unresumable row left pending
+                # would be re-warned on every boot for eternity.
+                msg = "unresumable jobs row (malformed payload)"
+                self._persist("update", r["id"], "failed", error=msg)
+                self._fail_in_memory(r, msg)
+                log.warning("could not resume jobs row %r — marked failed",
+                            r.get("id"), exc_info=True)
+        if resumed:
+            log.info("resumed %d pending ingest job(s) from the jobs table",
+                     resumed)
+
+    def _fail_in_memory(self, r: dict[str, Any], msg: str) -> None:
+        """Rebuild a terminally-failed row as a pollable in-memory job — the
+        browser watching this job_id must see state=failed + the failure
+        string, not a 404 (round-6 review; mirrors AskQueue._resume)."""
+        payload = r.get("payload") or {}
+        job = IngestJob(uri=payload.get("uri", "<unknown>"),
+                        fps=payload.get("fps", 1.0), id=r["id"])
+        job.state = JobState.failed
+        job.error = msg
+        job.video_id = r.get("video_id")
+        self._jobs[job.id] = job
 
     def _process(self, job: IngestJob) -> None:
         job.state = JobState.running
+        self._persist("update", job.id, "running")
         try:
             # Cheap pre-resolve so the UI can show the catalog row while the
             # heavy fetch/embed work is still running. Failures here are
@@ -158,23 +281,48 @@ class IngestQueue(SerialQueue):
                 "detections": res.detections,
             }
             job.state = JobState.done
+            self._persist("update", job.id, "done", video_id=job.video_id,
+                          result=job.result)
         except Exception as e:  # noqa: BLE001 - any ingest failure ends the job
             job.error = str(e) or e.__class__.__name__
             job.state = JobState.failed
+            self._persist("update", job.id, "failed", video_id=job.video_id,
+                          error=job.error)
 
 
 class AskQueue(SerialQueue):
     name = "va-ask"
+    kind = "ask"
 
     def __init__(self, workdir: str):
-        super().__init__()
-        self.workdir = workdir
+        super().__init__(workdir)
 
     def submit(self, question: str, k: int = 5) -> AskJob:
-        return self._submit(AskJob(question=question, k=k))
+        job = AskJob(question=question, k=k)
+        return self._submit(job, {"question": job.question, "k": job.k})
+
+    def _resume(self) -> None:
+        # Restart policy for asks: FAIL, don't re-run — a stale question would
+        # silently burn minutes of LLM/GPU time nobody is waiting for. The
+        # failed records are rebuilt in memory so a polling browser sees the
+        # failure rather than a 404.
+        msg = "server restarted before this ask completed — resubmit it"
+        rows = self._persist("pending", self.kind) or []
+        self._persist("fail_pending", self.kind, msg)
+        for r in rows:
+            try:
+                job = AskJob(question=r["payload"]["question"],
+                             k=r["payload"].get("k", 5), id=r["id"])
+                job.state = JobState.failed
+                job.error = msg
+                self._jobs[job.id] = job
+            except Exception:  # noqa: BLE001
+                log.warning("could not rebuild ask row %r — skipped",
+                            r.get("id"), exc_info=True)
 
     def _process(self, job: AskJob) -> None:
         job.state = JobState.running
+        self._persist("update", job.id, "running")
         try:
             from va.pipeline.ask import ask
 
@@ -195,7 +343,9 @@ class AskQueue(SerialQueue):
                 "notes": list(res.evidence.notes),
             }
             job.state = JobState.done
+            self._persist("update", job.id, "done", result=job.result)
         except Exception as e:  # noqa: BLE001 - any ask failure ends the job
             log.exception("ask failed: %s", job.question)
             job.error = f"{e.__class__.__name__}: {e}"
             job.state = JobState.failed
+            self._persist("update", job.id, "failed", error=job.error)

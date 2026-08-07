@@ -530,3 +530,26 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   the same or its group's unload is cosmetic. Unknown residency values fail at
   config load; a failed ingest stages on its way out. tests/test_staged_models.py
   pins no-op-on-keep, output-invariance, load-validation, and the failure path.
+- 2026-08-06 (WS6.a, loop session — ⚠ ROLES AGENT EDITING WEB-OWNED src/va/web/jobs.py):
+  **durable job queue.** Schema v7 adds a `jobs` table (id/kind/state/payload/video_id/
+  error/result JSON blobs); new `storage/structured/jobs_store.py` (JobStore: record/
+  update/get/pending/fail_pending). `SerialQueue` persists every submit + state
+  transition (best-effort: a broken jobs table degrades to the old memory-only behavior
+  with a warning, never a dead queue). RESTART SEMANTICS (new): `IngestQueue.start()`
+  re-enqueues queued/running ingest jobs from the table — a `running` row is a crash
+  artifact; ingest()'s idempotency makes the resume exactly-once. `AskQueue.start()`
+  FAILS pending asks ("server restarted — resubmit") and rebuilds their failed records
+  in memory so a polling browser sees the failure, not a 404. Web-facing API surface
+  (submit/get/to_dict, endpoint shapes) is UNCHANGED. Precisely: pending INGEST jobs
+  survive a restart (resumed + pollable), pending ASKS surface as failed; done/failed
+  HISTORY rows persist in the table but get() still reads memory only — a
+  /api/jobs listing over the table is future web-agent work if wanted.
+  AMENDED (round-4/5 review): the jobs table also carries `attempts` — a RUNNING row
+  bumps it on each resume (crash evidence; QUEUED rows never bump), and past
+  MAX_RESUME_ATTEMPTS=3 the job goes terminal-failed ('gave up after 3 resume
+  attempts — this job repeatedly died mid-run'): a job that kills the process can
+  never persist its own failure, so the cap is the only exit from a systemd crash
+  loop. Unresumable (malformed) rows are terminal-failed, not skipped forever. The
+  web UI should expect both new failure strings on polled jobs.
+  tests/test_jobs_durable.py covers the oracle
+  (kill-mid-job -> resume exactly once), the ask policy, and the degraded mode.
