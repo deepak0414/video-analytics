@@ -110,8 +110,10 @@ ingested workdir); individual questions skip if their video isn't in the workdir
   `xfail`s sourced from the `security-footage-spike-findings.md` scorecard. Runs against
   its own workdir: `GOLDEN_WORKDIR=.va-nvr` (clips ingested with `--profile security`,
   so object queries use the narrowed vocabulary). NB: batch-ingesting all 22 in ONE
-  process silently starves YOLO after the first clip (spike infra finding, reproduced) —
-  ingest each clip in its own `va ingest` process.
+  process with all models resident silently starves YOLO after the first clip (spike
+  infra finding, reproduced; measured 1/22). Either ingest each clip in its own
+  `va ingest` process, or set `residency: unload-after-use` in the hardware profile
+  (WS4.e staged execution — measured 22/22 on this exact batch).
 - ⏳ The diarization block is checked by reading the existing transcripts table's distinct
   speaker count; a *re-ingest-with-hint* harness (auto-4 vs `num_speakers=5`) is not built.
 - Each video keeps its `future_queries` so the test set grows as Roles 1/4/5/7/8/10 land.

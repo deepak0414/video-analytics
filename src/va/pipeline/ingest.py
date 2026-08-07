@@ -139,6 +139,25 @@ def _capture_appearance(tracks, detections, det_crops, embedder, cfg, video_dir)
     ]
 
 
+def _stage_models(cfg) -> None:
+    """Staged model execution (WS4.e, the §8.1 fix): on a constrained profile
+    (`residency: unload-after-use` in the hardware profile) drop the finished
+    role group's models before the next group loads. Holding every real model
+    resident at once silently starves late roles — measured on the Spark:
+    YOLO produced detections on 1/22 clips in a single-process batch ingest,
+    with no error anywhere. `residency: keep` (the default) is a no-op, so the
+    resident-friendly path is byte-identical. Group boundaries are placed so
+    models that must coexist (SigLIP + YOLO share the decode pass; the
+    appearance step reuses SigLIP) sit inside one group."""
+    if (cfg.profile.get("residency") or "keep") == "unload-after-use":
+        from va.runtime.manager import MANAGER
+
+        n = len(MANAGER.loaded())
+        MANAGER.clear()
+        if n:
+            trace("runtime", "staged", f"unloaded {n} model(s) at group boundary")
+
+
 def _trace_fail(role: str, exc: Exception) -> None:
     """Surface a swallowed best-effort role failure in the trace (a warn, not an
     abort — ingest continues). No-op when tracing is off. Before TR.2 these
@@ -372,7 +391,15 @@ def _ingest_impl(
                     captioned = 0
                     failed.add("vlm_captioner")
                     _trace_fail("caption", e)
+                finally:
+                    # The locals pin the weights: MANAGER.clear() alone would
+                    # only drop the cache entry while `captioner` keeps the
+                    # ~GBs alive for the rest of the ingest (review round 1).
+                    captioner = None
+                    keyframes = None
+                    del captioner, keyframes
             seg_store.close()
+            _stage_models(cfg)   # captioner group done
 
             # Role 8: speech-to-text -> transcripts (recommended, best-effort:
             # a transcription failure must not abort the whole ingest).
@@ -416,6 +443,7 @@ def _ingest_impl(
                 # (e.g. "0 transcript rows under security") is broken by a retry.
                 _purge("speech_to_text", TranscriptStore, "replace_transcripts")
 
+            _stage_models(cfg)   # speech group done
             # Role 10: on-screen text -> ocr_results (optional, best-effort).
             ocr_lines = 0
             if not _enabled("ocr"):
@@ -433,6 +461,7 @@ def _ingest_impl(
                     failed.add("ocr")
                     _trace_fail("ocr", e)
 
+            _stage_models(cfg)   # ocr group done
             # Role 7: action recognition per Role-1 segment (optional, best-effort).
             n_actions = 0
             if not _enabled("action_recognizer"):
@@ -458,6 +487,7 @@ def _ingest_impl(
                     failed.add("action_recognizer")
                     _trace_fail("action", exc)
 
+            _stage_models(cfg)   # action group done; SigLIP+YOLO group next
             # Decode the file ONCE at the target fps and fan the single frame
             # stream out to BOTH Role 2 (visual embedding, critical) and Role 5
             # (object detection, best-effort) — previously two separate full decode
@@ -603,6 +633,12 @@ def _ingest_impl(
                     _trace_fail("track", e)
             # The spilled crops are consumed (or moot) once Role 6 is done.
             shutil.rmtree(crops_dir, ignore_errors=True)
+            # Same local-reference rule as the captioner: release the adapters
+            # or the boundary below frees nothing.
+            embedder = None
+            detector = None
+            del embedder, detector
+            _stage_models(cfg)   # embed/detect/track/appearance group done
 
             # Retrieval Layer (SR.2): semantic text index over the caption /
             # transcript / OCR / action text (best-effort — needs those rows
@@ -615,6 +651,7 @@ def _ingest_impl(
                 n_text = 0
                 failed.add("text_embedder")
                 _trace_fail("text_index", e)
+            _stage_models(cfg)   # text-index group done (last model group)
 
             # §6-b (PROV-3): record which model/config produced each role's rows so a
             # later `va stale` can find videos on an outdated model after an upgrade.
@@ -654,6 +691,13 @@ def _ingest_impl(
             )
         except Exception as e:  # noqa: BLE001 - record failure, then re-raise
             catalog.set_status(video.id, IngestStatus.failed, error=str(e))
+            # A failed ingest must not leave every model resident into the next
+            # clip of a single-process batch (review round 1). Best-effort: the
+            # original exception is what matters.
+            try:
+                _stage_models(cfg)
+            except Exception:  # noqa: BLE001
+                pass
             raise
     finally:
         catalog.close()

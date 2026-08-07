@@ -3,7 +3,11 @@
 
 device: cuda
 dtype: float16
-residency: keep   # keep | unload-after-use (24GB profile would use unload-after-use)
+residency: keep   # keep | unload-after-use — CONSUMED at ingest role-group
+                  # boundaries (WS4.e): unload-after-use drops each finished
+                  # group's models. Use it for BATCH ingests — keep-resident
+                  # starved YOLO to 1/22 clips in a single-process 22-clip
+                  # batch; staged measured 22/22 (~90 s/clip reload cost).
 
 models:
   siglip:

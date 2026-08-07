@@ -201,6 +201,16 @@ def load_config(
     roles_doc = yaml.safe_load((cdir / "roles.yaml").read_text())
     active = roles_doc.get("active_profile", "dgx-spark")
     profile = yaml.safe_load((cdir / "profiles" / f"{active}.yaml").read_text()) or {}
+    # WS4.e: `residency` gates real model unloads at ingest — an unrecognized
+    # value silently keeping every model resident would reproduce the exact
+    # starvation the knob exists to fix, so it fails at load like the footage
+    # knobs do (e.g. the underscore typo `unload_after_use`).
+    residency = profile.get("residency")
+    if residency not in (None, "keep", "unload-after-use"):
+        raise ValueError(
+            f"hardware profile '{active}': residency must be 'keep' or "
+            f"'unload-after-use' (got {residency!r})"
+        )
     footage = footage_profile or roles_doc.get("active_footage_profile") or "generic"
     roles: dict[str, dict[str, Any]] = roles_doc.get("roles", {})
     overlay, settings = _load_footage_overlay(cdir, footage)
