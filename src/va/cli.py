@@ -225,6 +225,34 @@ def _active_config_line() -> str:
             f"(profile={cfg.active_profile}, visual_embedder={embedder})")
 
 
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """The A-LSSRVF orchestrator (WS6.b): catch up each registered camera from
+    its durable watermark — query the MotionSource, pull each new motion
+    episode as an nvr:// window, ingest it, advance the watermark. `--interval
+    0` = one pass (cron-friendly); otherwise loops forever."""
+    from va.pipeline.watch import catch_up, run_watch
+
+    kwargs = dict(
+        camera_ids=args.camera or None,
+        lookback_s=args.lookback_hours * 3600.0,
+        settle_s=args.settle,
+        max_windows=args.max_windows,
+        gap_s=args.cluster_gap,
+        open_instant_max_age_s=args.open_instant_age,
+    )
+    if args.interval <= 0:
+        report = catch_up(args.workdir, **kwargs)
+        for c in report.cameras:
+            print(f"{c.camera_id}: +{c.windows_ingested} window(s)"
+                  f"{f', {c.windows_failed} failed' if c.windows_failed else ''}"
+                  f"{' (truncated — more next pass)' if c.truncated else ''} "
+                  f"watermark -> {c.watermark_after}")
+        print(f"{report.windows_ingested} window(s) ingested")
+        return 0
+    run_watch(args.workdir, interval_s=args.interval, **kwargs)
+    return 0
+
+
 def _cmd_motion_probe(args: argparse.Namespace) -> int:
     """Diagnostic: query the configured MotionSource for a local-time range and
     print the (optionally clustered) windows. The manual-validation entry point
@@ -507,6 +535,30 @@ def build_parser() -> argparse.ArgumentParser:
     pmp.add_argument("--cluster-gap", type=float, default=30.0,
                      help="merge same-camera windows with gaps <= this many seconds; 0 = raw")
     pmp.set_defaults(func=_cmd_motion_probe)
+
+    pw = sub.add_parser(
+        "watch",
+        help="catch up cameras from their watermarks: motion episodes -> nvr:// ingests (WS6.b)")
+    pw.add_argument("--camera", action="append", default=None,
+                    help="camera id (e.g. nvr-ch1); repeatable; default = all registered")
+    pw.add_argument("--lookback-hours", type=float, default=1.0,
+                    help="how far a NEVER-watched camera reaches back (default 1h; "
+                         "the NVR ring keeps ~6 days)")
+    pw.add_argument("--settle", type=float, default=120.0,
+                    help="stay this many seconds behind now (open episodes settle)")
+    pw.add_argument("--max-windows", type=int, default=50,
+                    help="window budget per pass, split per camera (each camera "
+                         "gets at least 1 — with more cameras than this, a pass "
+                         "may pull up to one window per camera)")
+    pw.add_argument("--interval", type=float, default=0.0,
+                    help="seconds between passes; 0 = one pass and exit (cron-friendly)")
+    pw.add_argument("--cluster-gap", type=float, default=30.0,
+                    help="merge motion events with gaps <= this into one pull episode "
+                         "(independent of the scene_detector gap_s)")
+    pw.add_argument("--open-instant-age", type=float, default=600.0,
+                    help="an open (lost-End) motion instant older than this is recovered "
+                         "as one padded window instead of deferring the watermark")
+    pw.set_defaults(func=_cmd_watch)
 
     prp = sub.add_parser(
         "reprocess",

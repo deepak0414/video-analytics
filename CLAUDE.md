@@ -77,6 +77,20 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   sets videos.camera_id (`nvr-ch<n>`) + start_epoch BEFORE
                                                             #   roles run, so motion-episodes segments land (needs a real
                                                             #   motion_source — the unconfigured sidecar warns).
+.venv/bin/va --workdir .va watch --interval 60             # WS6.b: THE A-LSSRVF orchestrator — per registered
+                                                            #   camera, catch up from its durable watermark
+                                                            #   (cameras.last_processed_epoch): query the MotionSource,
+                                                            #   pull each new motion episode as an nvr:// window,
+                                                            #   ingest, advance. --interval 0 = one pass (cron).
+                                                            #   Idempotent (source_key dedup + monotonic watermark);
+                                                            #   bounded: --lookback-hours (never-watched cameras),
+                                                            #   --max-windows/pass (split per camera), --settle lag,
+                                                            #   --cluster-gap (pull-episode merge — NOT the
+                                                            #   scene_detector gap_s), --open-instant-age (lost-End
+                                                            #   recovery bound).
+                                                            #   SLA: the NVR ring keeps ~6 days — outages longer than
+                                                            #   that are unrecoverable (watcher pulls what remains).
+                                                            #   Cameras register on first nvr:// ingest of a channel.
 .venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner wired, others → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use

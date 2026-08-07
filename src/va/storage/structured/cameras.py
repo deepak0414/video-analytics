@@ -28,6 +28,7 @@ class CameraStore:
         return Camera(
             id=r["id"], name=r["name"], source_ref=r["source_ref"],
             location=r["location"],
+            last_processed_epoch=r["last_processed_epoch"],
             created_at=datetime.fromisoformat(r["created_at"])
             if "T" in r["created_at"]
             # SQLite's datetime('now') default writes "YYYY-MM-DD HH:MM:SS" (UTC)
@@ -52,6 +53,17 @@ class CameraStore:
         stored = self.get(camera.id)
         assert stored is not None  # just inserted or already present
         return stored, created
+
+    def set_watermark(self, camera_id: str, epoch: float) -> None:
+        """Advance the catch-up watermark (WS6.b). Monotonic by contract: the
+        watcher only moves it forward, so a concurrent older write cannot
+        rewind progress."""
+        self._conn.execute(
+            "UPDATE cameras SET last_processed_epoch = ? WHERE id = ? AND "
+            "(last_processed_epoch IS NULL OR last_processed_epoch < ?)",
+            (epoch, camera_id, epoch),
+        )
+        self._conn.commit()
 
     def get(self, camera_id: str) -> Optional[Camera]:
         r = self._conn.execute(

@@ -553,3 +553,23 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   web UI should expect both new failure strings on polled jobs.
   tests/test_jobs_durable.py covers the oracle
   (kill-mid-job -> resume exactly once), the ask policy, and the degraded mode.
+- 2026-08-06 (WS6.b, loop session): **catch-up watcher — the A-LSSRVF orchestrator.**
+  Schema v8: `cameras.last_processed_epoch` (durable per-camera watermark; NULL =
+  never watched); `Camera` contract + `CameraStore.set_watermark` (monotonic — the SQL
+  refuses to rewind). New `pipeline/watch.py`: `catch_up()` = one pass (per registered
+  camera: MotionSource query [watermark, now-settle], cluster, pull each episode as an
+  nvr:// window, ingest, advance watermark per completed episode; quiet ranges advance
+  to the horizon); `run_watch()` = the loop. New CLI `va watch [--camera ...]
+  [--lookback-hours] [--settle] [--max-windows] [--interval] [--cluster-gap]
+  [--open-instant-age]` (interval 0 = one pass, cron-friendly). NB --cluster-gap
+  merges raw motion events into PULL episodes — a DIFFERENT knob from the
+  scene_detector spec's same-named gap_s, which segments WITHIN a chunk at ingest;
+  --open-instant-age bounds how long a lost-End open instant defers the watermark
+  before the recovery pull. max_windows is split per camera (each gets
+  max_windows//n, min 1) so one backlogged camera cannot starve the rest. Semantics: idempotent (nvr source_key dedup + monotonic watermark);
+  straddling episodes are not re-pulled (only starts >= watermark count); episodes
+  longer than the nvr 120 s cap split into back-to-back windows; a failed window HOLDS
+  the watermark at the last complete episode and retries next pass; max_windows
+  truncation resumes next pass. SLA (§8.2): the LNR608 ring keeps ~6 days — longer
+  outages are unrecoverable and the watcher pulls what remains. tests/test_watch.py
+  holds the simulated-outage oracle (exact gap windows, exactly once) + bounds.

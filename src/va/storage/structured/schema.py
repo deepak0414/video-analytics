@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS cameras (
     name          TEXT NOT NULL,
     source_ref    TEXT,
     location      TEXT,
+    last_processed_epoch REAL,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -220,7 +221,7 @@ ALL_TABLES = [
 # a migrated-in column is safe: apply_schema() builds INDEXES *after* running the
 # migrations, so the column already exists by the time its index is created.
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -279,6 +280,12 @@ def _m7_jobs(conn: sqlite3.Connection) -> None:
     conn.execute(JOBS)
 
 
+def _m8_camera_watermark(conn: sqlite3.Connection) -> None:
+    """→ v8: per-camera catch-up watermark (WS6.b) — the epoch up to which this
+    camera's motion windows have been pulled+ingested. NULL = never watched."""
+    add_column(conn, "cameras", "last_processed_epoch", "REAL")
+
+
 # Ordered; MIGRATIONS[i] takes the DB from version i to version i+1.
 MIGRATIONS = [
     _m1_last_ingest_run_id,          # -> 1
@@ -288,6 +295,7 @@ MIGRATIONS = [
     _m5_start_epoch,                 # -> 5
     _m6_appearance_ref,              # -> 6
     _m7_jobs,                        # -> 7
+    _m8_camera_watermark,            # -> 8
 ]
 assert len(MIGRATIONS) == SCHEMA_VERSION, "SCHEMA_VERSION must equal the migration count"
 

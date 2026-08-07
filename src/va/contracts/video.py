@@ -67,6 +67,9 @@ class Camera(BaseModel):
     name: str
     source_ref: Optional[str] = None   # how to reach the feed (RTSP URL / NVR channel)
     location: Optional[str] = None     # human spatial hint ("front door"); WS-5 topology input
+    # WS6.b: catch-up watermark — UTC epoch up to which this camera's motion
+    # windows have been pulled+ingested. NULL = never watched.
+    last_processed_epoch: Optional[float] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
