@@ -401,3 +401,103 @@ def test_ask_uses_deep_scan_end_to_end(tmp_path, monkeypatch):
     assert any("deep-scan" in n for n in res.evidence.notes)
     # the rule reasoner surfaces the code-counted statement first
     assert "CODE-COUNTED" in res.rendered
+
+
+# --- R11.a: the outfit hijack is dead ---------------------------------------
+
+def test_vetoed_escalation_does_not_re_reason(tmp_path, monkeypatch):
+    """Round-4 review: a self-escalation whose sweep is vetoed (profile gate /
+    no target) leaves evidence identical — a second reasoner pass over it buys
+    nothing and costs another full LLM round trip."""
+    import va.pipeline.ask as ask_mod
+    from va.contracts.query_plan import Answer, QueryPlan
+
+    calls = {"reason": 0}
+
+    class Humble:
+        def plan(self, query):
+            return QueryPlan(query=query, needs_caption_search=True)
+
+        def reason(self, query, evidence, keyframes=()):
+            calls["reason"] += 1
+            return Answer(text="I cannot tell from the available evidence.",
+                          attributes={"items": []})
+
+    monkeypatch.setattr(ask_mod, "get_reasoner", lambda: Humble())
+    video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
+    wd = str(tmp_path / ".va")
+    ingest(str(video), workdir=wd, fps=1.0, profile="security")   # scans vetoed
+
+    res = ask("what colors appear at the end of the video?", workdir=wd)
+    assert any("self-escalation" in n for n in res.evidence.notes)
+    assert not any(i.modality == "deep_scan_count" for i in res.evidence.items)
+    assert calls["reason"] == 1        # NOT re-reasoned over identical evidence
+
+
+def test_security_profile_gates_deep_scan_off(tmp_path, monkeypatch):
+    """R11.a done-when: under the security profile the sweep can no longer
+    fire — the video's RECORDED profile carries deep_scan: "off"."""
+    steps = []
+    import va.pipeline.ask as ask_mod
+    real_trace = ask_mod.trace
+    monkeypatch.setattr(ask_mod, "trace",
+                        lambda step, action, *a, **k: (
+                            steps.append((step, action)), real_trace(step, action, *a, **k))[1])
+
+    video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
+    wd = str(tmp_path / ".va")
+    ingest(str(video), workdir=wd, fps=1.0, profile="security")
+
+    res = ask("how many times does the color change in the video?", workdir=wd)
+    # the traceability ledger must not claim a vetoed sweep "ran" (round-6)
+    assert ("deep_scan", "skipped") in steps
+    assert ("deep_scan", "ran") not in steps
+    assert res.plan.needs_deep_scan is True          # the plan still asks
+    assert not any(i.modality == "deep_scan_count" for i in res.evidence.items)
+    assert any("footage profile" in n and "gates deep scans off" in n
+               for n in res.evidence.notes)   # THE profile cause, specifically
+
+
+def test_no_scan_target_means_no_sweep_not_canned_content(tmp_path):
+    """R11.a: a deep-scan plan with NO derivable target skips the sweep — the
+    hardcoded 'main person's outfit' fallback is gone."""
+    from va.contracts.evidence import Evidence
+    from va.contracts.query_plan import QueryPlan
+    from va.pipeline.deep_scan import run_deep_scan
+
+    video = write_color_video(tmp_path / "clip.mp4", SEGMENTS, fps=10)
+    wd = str(tmp_path / ".va")
+    ingest(str(video), workdir=wd, fps=1.0)
+
+    plan = QueryPlan(query="?", needs_deep_scan=True)   # no scan_target param
+    ds, reason = run_deep_scan(Evidence(), plan, wd)
+    assert ds is None and "no scan target" in reason
+
+
+def test_all_noise_targets_do_not_share_a_sweep_cache():
+    """Round-5 review MAJOR (verified live before the fix): distinct targets
+    whose tokens are all cache-noise ('the color' vs 'the wearing') used to
+    collapse into one 'default' bucket, so the second question read the
+    first's observations and reported them as its own CODE-COUNTED fact."""
+    from va.pipeline.deep_scan import canonical_key
+
+    assert canonical_key("the color") != canonical_key("the wearing")
+    # …while wording drift for ONE intent still shares its bucket
+    assert canonical_key("the girl dress") == canonical_key("dress the girl")
+
+
+def test_derive_scan_target_is_query_content_only():
+    from va.adapters.reasoner.rule_inproc import derive_scan_target
+
+    t = derive_scan_target("How many birds come and feed on the feeder?")
+    assert "bird" in t and "outfit" not in t
+    # a subject noun survives ONLY when nothing else does (round-5 review:
+    # an unconditional keep-set injected counting words into ordinary phrasing)
+    assert derive_scan_target(
+        "how many times does the color change in the video?") == "the color"
+    assert derive_scan_target("count the number of visits") == "the visits"
+    # words all filtered + nothing left -> None, never canned content
+    assert derive_scan_target("how many?") is None
+    # pronoun-only referent: pure counting-noise is NOT a subject (round-2
+    # review) — honest None, no subject-free sweep
+    assert derive_scan_target("how many times did it change?") is None

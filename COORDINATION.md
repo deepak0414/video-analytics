@@ -573,3 +573,20 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   truncation resumes next pass. SLA (§8.2): the LNR608 ring keeps ~6 days — longer
   outages are unrecoverable and the watcher pulls what remains. tests/test_watch.py
   holds the simulated-outage oracle (exact gap windows, exactly once) + bounds.
+- 2026-08-07 (R11.a, loop session): **deep-scan outfit hijack removed + profile gate.**
+  `deep_scan.DEFAULT_TARGET` ("the main person's outfit" — the scan_target lesson's
+  hardcoded content) is DELETED: a deep-scan plan with no derivable target skips the
+  sweep with an honest evidence note. Target derivation is centralized in
+  `rule_inproc.derive_scan_target(query)` — content words minus the scan-noise set,
+  EXCEPT a tiny `_SUBJECT_NOUNS` whitelist ({color, colour, number}) whose members are
+  noise for counting purposes but ARE the subject when nothing else survives; a
+  pronoun-only query yields None (no sweep). NB it is NOT the search `_STOP` set —
+  reintroducing that would strip exactly those subject nouns. Used by the rule planner,
+  the LLM-plan backfill, and self-escalation — always FROM THE QUERY. The WS2.d `deep_scan` footage knob is now
+  CONSUMED: run_deep_scan resolves the dominant video's recorded profile
+  (config_for — record==reality) and skips when it says "off" (security does); skip
+  causes are per-cause evidence notes. Done-when evidence (recorded here so the
+  branch carries it): A-EV golden-ask harness run 2026-08-07 on this change,
+  RUN_GOLDEN=1 run-claude/config .va-shots — dresses-ask-01 passed (330 s run),
+  bird-ask-01 passed on retry 103 s (first attempt died on a claude-CLI 240 s
+  subprocess timeout, an environmental flake — same class as the PR #31-era one).
