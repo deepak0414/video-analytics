@@ -107,3 +107,7 @@ roles:
   # retriever:
   #   min_rerank: -3.0   # cross-encoder logit floor (language items)
   #   min_cosine: 0.05   # SigLIP cosine floor (visual frames)
+  # If you DO enable it, also add `retriever: {min_cosine: 0.0}` to
+  # profiles/footage/security.yaml in the same edit — floors are calibrated per
+  # footage domain (R11.b), and a bare floor here would apply the A-EV number to
+  # static-camera footage, which measurably empties its evidence.

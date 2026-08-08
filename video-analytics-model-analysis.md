@@ -72,6 +72,60 @@ This document catalogs AI models organized by the **role** they play in the vide
 
 **Recommendation:** SigLIP SO400M as primary. Add DINOv2 only if visual similarity search is a priority.
 
+### Decision (as built) — the relevance floor is calibrated per FOOTAGE DOMAIN, not once — *Status: Accepted 2026-08-07 (R11.b)*
+
+SigLIP cosines are not comparable across footage types, so one absolute floor cannot
+serve both. On A-EV (edited video, subject fills the frame) a relevant frame scores
+0.11–0.18 and an irrelevant one ~0, which is what `min_cosine: 0.10` was measured
+against. On A-LSSRVF (fixed camera) every frame shares ~95% of its content, so each
+cosine is dominated by an invariant background term: the whole distribution shifts down
+**and compresses**.
+
+Measured 2026-08-07 on the 22 real NVR clips (`.va-nvr`, real SigLIP + bge-reranker),
+9 queries transcribed from the human's ground-truth
+notes for that window (kept OUTSIDE the repo — they describe the household in
+detail; the derived, publishable per-clip assertions are tracked in
+`tests/golden_queries/nvr0801_clip*.yaml`, and the measurement re-runs against the
+`.va-nvr` workdir):
+
+**Two measurements, two denominators — they are not comparable, so read them apart:**
+
+*(A) Gate level* — 9 targeted queries scored against every clip (per-clip max cosine over
+all 553 frame vectors), giving **26** ground-truth (query, clip) pairs:
+
+- per-query spread across all 22 clips: **0.020–0.077**; best-true minus best-false
+  **+0.003…+0.042** — so no absolute floor separates true from false;
+- rank, however, *is* informative: the ground-truth clip took #1–#2 in 5 of 9 queries;
+- the A-EV floor retained **6/26** of those pairs; `min_cosine: 0.0` retains 26/26.
+
+*(B) End to end* — 8 natural questions through `retrieve()` at k=8, a different query set
+giving **25** ground-truth (question, clip) pairs. Its counts are bounded by the k-capped
+gather as well as the floor, so they are strictly lower than (A)'s gate-level recall:
+
+- the A-EV floor put **7/25** pairs in the final evidence and emptied 3 of 8 questions to
+  "no candidate cleared the floor — no match" while the real events sat in the ungated
+  pool.
+
+Rules evaluated and **rejected**: median+margin (69% recall / 29% admitted), max−margin
+(77%/27%), p75 (58%/17%) — each buys precision by discarding 30–50% of the real events,
+and all collapse on low-spread queries ("a vehicle driving past" — every clip contains
+the road). Precision is not the failure mode on this footage; starvation is.
+
+**Chosen:** `security` sets `min_cosine: 0.0` — only the SIGN of a cosine transfers
+across footage domains, so the floor drops anti-correlated frames and nothing else
+(26/26 ground-truth clips kept). `min_rerank` is inherited unchanged at −3.0: the
+cross-encoder's scale DOES transfer (measured true captions +2.58/+1.67/+0.38 vs
+irrelevant −3 to −11). End to end: ground-truth clips in the final evidence **7/25 →
+13/25 at k=8, 9/25 → 16/25 at k=20**; questions emptied to "no match" **3/8 → 0/8**.
+
+**Revisit when:** (a) the visual embedder changes — every number here is SigLIP-specific
+and the floors must be re-measured, not carried over; (b) a crop/ROI or
+motion-region embedding lands (embedding the moving region instead of the whole frame
+should restore real separation and make an absolute floor meaningful again); (c) SR.6
+VLM verification becomes profile-aware — verification, not thresholding, is the
+precision mechanism this footage needs; (d) a second camera install shows a materially
+different spread, which would argue for per-camera rather than per-profile calibration.
+
 ---
 
 ## Role 3: Cross-Modal Embedding Model
