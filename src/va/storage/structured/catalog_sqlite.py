@@ -110,6 +110,22 @@ class Catalog:
         ).fetchall()
         return {r["id"]: self._from_row(r) for r in rows}
 
+    def footage_domains(self) -> set[tuple[Optional[str], str]]:
+        """The distinct (profile, source_type) pairs among SEARCHABLE videos.
+
+        R11.b needs the whole workdir rather than a query's candidate pool,
+        because the condition it warns about (retrieval scores that don't compare
+        across footage domains) is what REMOVES the weaker domain from a pool:
+        asking the pool goes silent in exactly the total-burial case.
+
+        Restricted to `done` because a row is created BEFORE fetch: one failed
+        `va ingest "nvr://..."` would otherwise register a footage domain that
+        indexed no frames, and permanently attach a mixed-domain warning to every
+        answer in that workdir."""
+        return {(r["profile"], r["source_type"]) for r in self._conn.execute(
+            "SELECT DISTINCT profile, source_type FROM videos "
+            "WHERE ingest_status = 'done'")}
+
     def list(self, limit: Optional[int] = None) -> list[Video]:
         """All videos, newest first. (Consumed by the web layer's GET /api/videos.)"""
         sql = "SELECT * FROM videos ORDER BY created_at DESC"

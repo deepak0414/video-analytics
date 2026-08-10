@@ -30,3 +30,16 @@ roles:
   # the sidecar stub warns if queried unconfigured.
   scene_detector:
     model: motion-episodes
+  # NB: the run-*/config copies of this profile carry a `retriever: min_cosine`
+  # override (R11.b) that is deliberately ABSENT here, because base roles.yaml
+  # omits the `retriever` role entirely: stub scores are uncalibrated, so this
+  # config dir does no thresholding at all, and a footage profile may only
+  # override a role that exists (declaring it here today fails config load).
+  #
+  # **If you enable the commented `retriever:` recipe in ../../roles.yaml, add
+  # `min_cosine: 0.0` here in the same edit.** Otherwise this profile becomes
+  # legal but floorless and A-LSSRVF footage inherits the A-EV cosine floor —
+  # which is exactly the starvation R11.b fixed (measured: 3 of 8 questions
+  # answered "no candidate cleared the floor — no match" while the real events
+  # sat in the ungated pool). Copy the value, not the SigLIP-measured rationale:
+  # a floor belongs next to the model it was measured against.

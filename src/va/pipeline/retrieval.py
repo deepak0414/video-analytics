@@ -103,6 +103,9 @@ class RelevanceGate:
     backends, whose floors live in run-*/config next to the model they were
     measured against. The numeric floors are FLAGGED magic values — calibration
     targets for the golden-query harness, not settled constants.
+
+    R11.b: floors are calibrated PER FOOTAGE DOMAIN, because the same cosine
+    means different things on different footage — see `gates_by_video`.
     """
 
     min_rerank: float = -math.inf
@@ -123,19 +126,124 @@ class RelevanceGate:
         return rr >= self.min_rerank
 
 
-def get_relevance_gate(workdir: Optional[str] = None) -> RelevanceGate:
-    """Build the gate from the active config's optional `retriever:` block.
-    Absent/empty -> permissive (no behavior change for the stub pipeline)."""
-    from va.configuration import load_config
+def get_relevance_gate(
+    workdir: Optional[str] = None,
+    *,
+    profile: Optional[str] = None,
+    source_type: Optional[str] = None,
+) -> RelevanceGate:
+    """Build the gate from a config's optional `retriever:` block. Absent/empty
+    -> permissive (no behavior change for the stub pipeline).
+
+    With `source_type`, the block is read from the config that video's own
+    FOOTAGE PROFILE selects (WS2.c record==reality) instead of the base config,
+    so a domain can carry its own calibrated floors. Without it, the base config.
+    """
+    from va.configuration import config_for, load_config
 
     try:
-        spec = load_config().roles.get("retriever") or {}
-    except Exception:  # noqa: BLE001 — never let config issues break retrieval
+        cfg = (config_for(profile, source_type) if source_type is not None
+               else load_config())
+        spec = cfg.roles.get("retriever") or {}
+    except Exception as e:  # noqa: BLE001 — never let config issues break retrieval
+        if source_type is not None:
+            # A profile that won't resolve (recorded in one config dir, absent
+            # from the active one) must fall back to the BASE floors, never to a
+            # permissive gate: silently ungating one video while its neighbours
+            # stay gated is worse than either floor.
+            trace("retriever", "gate:profile",
+                  f"footage profile {profile!r} unresolvable ({e}) — base floors",
+                  level="warn")
+            return get_relevance_gate()
         spec = {}
     return RelevanceGate(
         min_rerank=float(spec.get("min_rerank", -math.inf)),
         min_cosine=float(spec.get("min_cosine", -math.inf)),
     )
+
+
+@dataclass(frozen=True)
+class GateMap:
+    """Per-video gates, plus the footage domains the WORKDIR spans (not the pool)."""
+
+    gates: dict[Optional[str], RelevanceGate]
+    # Resolved FOOTAGE PROFILE names present in the WORKDIR (searchable videos) —
+    # deliberately NOT the candidate pool: cross-domain burial is what keeps the
+    # weaker domain out of the pool, so a pool-derived set goes silent in exactly
+    # the total-burial case. Do not "simplify" this to frozenset(by_domain).
+    # Names, not (profile, source_type) pairs: a local and a youtube video both
+    # resolve to `generic`, so they are ONE domain.
+    domains: frozenset[str] = frozenset()
+
+
+def gates_by_video(items: Sequence[EvidenceItem], workdir: str) -> GateMap:
+    """Map each candidate's video to the gate its OWN footage profile calibrates,
+    plus a `None` entry for the base gate (items with no video, and the fallback).
+
+    Why per video and not one gate per query (R11.b): an absolute score floor is
+    only meaningful against the footage it was measured on. Measured on the 22
+    real NVR clips: the A-EV floor (min_cosine 0.10, calibrated on edited video
+    where the subject fills the frame) retains 6 of 26 ground-truth clips, and on
+    6 of 9 queries not ONE of the 22 clips clears it — because a fixed camera's
+    frames share ~95% of their content, so every cosine is dominated by an
+    invariant background term and the whole distribution shifts down and
+    compresses (per-query spread across all 22 clips: 0.020-0.077). End to end
+    that emptied 3 of 8 questions to "no match".
+
+    LIMIT — per-video gating is NECESSARY BUT NOT SUFFICIENT for a workdir that
+    mixes domains. `_gather` still takes ONE global top-k and `_fuse` still
+    min-maxes cosines across the whole visual lane, both on the very scale this
+    proves is domain-incomparable: A-EV frames (relevant 0.11-0.18) outrank every
+    A-LSSRVF frame (0.020-0.077), so in a mixed workdir the static-camera clips
+    are buried BEFORE the gate and never reach their own floor. Domain-aware
+    gather/fusion is backlogged; until then keep A-LSSRVF chunks in their own
+    workdir. `retrieve` flags a mixed WORKDIR in the evidence notes — deliberately
+    the workdir and not the surfaced pool, since total burial would otherwise
+    silence the warning in the one case that needs it most.
+
+    Any lookup failure degrades to the base gate rather than breaking retrieval.
+    """
+    gates: dict[Optional[str], RelevanceGate] = {None: get_relevance_gate()}
+    vids = {str(it.video_id) for it in items if it.video_id is not None}
+    if not vids:
+        return GateMap(gates)
+    try:
+        from uuid import UUID
+
+        from va.pipeline.paths import Workspace
+        from va.storage.structured.catalog_sqlite import Catalog
+
+        catalog = Catalog(Workspace(workdir).catalog_db)
+        try:
+            videos = catalog.get_many([UUID(v) for v in vids])
+            workdir_domains = catalog.footage_domains()
+        finally:
+            catalog.close()
+    except Exception as e:  # noqa: BLE001 — retrieval must survive a bad catalog
+        trace("retriever", "gate:profile", f"per-video gates unavailable: {e}",
+              level="warn")
+        return GateMap(gates)
+
+    from va.configuration import default_footage_profile
+
+    by_domain: dict[str, RelevanceGate] = {}
+    for vid, v in videos.items():
+        profile = getattr(v, "profile", None)
+        stype = getattr(getattr(v, "source_type", None), "value", None)
+        if stype is None:
+            continue  # unresolvable domain -> base gate
+        # The domain is the profile a video's roles RAN under, which is what
+        # calibrates its scores — NULL rows derive it from the source, exactly as
+        # config_for does.
+        domain = profile or default_footage_profile(stype)
+        if domain not in by_domain:
+            by_domain[domain] = get_relevance_gate(profile=profile,
+                                                   source_type=stype)
+        gates[str(vid)] = by_domain[domain]
+    # domains comes from the WHOLE workdir, not `by_domain` (the pool), so total
+    # burial of one domain still reports the mix.
+    return GateMap(gates, frozenset(
+        p or default_footage_profile(s) for p, s in workdir_domains if s))
 
 
 def _minmax(values: Sequence[float]) -> List[float]:
@@ -205,6 +313,14 @@ def _gather(plan: QueryPlan, workdir: str, k: int) -> Evidence:
     if verified:
         from va.pipeline.verify import verify_visual_hits
 
+        # KNOWN GAP (R11.b backlog): this floor stays BASE-config, because the
+        # candidates' videos aren't resolved until the gate stage. On A-LSSRVF
+        # footage every hit then sits below the A-EV 0.10 and passes through
+        # unchecked, i.e. verification silently no-ops — the opposite of what
+        # that footage needs, since VLM verification is the precision mechanism
+        # thresholding a cosine cannot provide there. Making it profile-aware
+        # turns verification ON for security footage (a real VLM-cost change),
+        # so it is its own item, not a rider on the gate fix.
         gate = get_relevance_gate()
         floor = gate.min_cosine if gate.min_cosine > -math.inf else 0.10
         vhits = verify_visual_hits(vhits, plan.query, workdir=workdir,
@@ -410,28 +526,65 @@ def retrieve(
 
     # SR.5 — relevance gate. Applied after fusion (so the raw signals exist) and
     # before the size cap. Transparent: records what it dropped; never silently
-    # empties everything.
-    gate = gate if gate is not None else get_relevance_gate()
-    if gate.active and ev.items:
-        kept = [it for it in ev.items if gate.keeps(it)]
+    # empties everything. R11.b: an explicit `gate` still applies to everything
+    # (the override contract), otherwise each item is gated by the floors its own
+    # video's footage profile calibrates — see `gates_by_video`.
+    gmap = (GateMap({None: gate}) if gate is not None
+            else gates_by_video(ev.items, workdir))
+    gates, base = gmap.gates, gmap.gates[None]
+
+    # A WORKDIR spanning footage domains is ranked on a scale that does not
+    # compare across them (see `gates_by_video`'s LIMIT): the higher-scoring
+    # domain takes every top-k slot, so the other is buried before its own floor
+    # applies. Keyed on the workdir, not the surfaced pool — total burial would
+    # otherwise silence the warning in the very case it exists for.
+    if len(gmap.domains) > 1:
+        named = ", ".join(sorted(gmap.domains))
+        ev.notes.append(
+            f"workdir spans {len(gmap.domains)} footage profiles ({named}); "
+            "visual scores are not comparable across them, so lower-scoring "
+            "footage may be under-represented or absent — keep domains in "
+            "separate workdirs")
+        trace("retriever", "gate:mixed-domain",
+              f"workdir spans {len(gmap.domains)} footage profiles ({named})",
+              level="warn", domains=sorted(gmap.domains))
+
+    def gate_for(it: EvidenceItem) -> RelevanceGate:
+        key = str(it.video_id) if it.video_id is not None else None
+        return gates.get(key, base)
+
+    # Only the gates that actually cover a candidate count — reporting the base
+    # gate's floors when every item came from one profile would name a threshold
+    # nothing was measured against.
+    applied_gates = [gate_for(it) for it in ev.items]
+    if any(g.active for g in applied_gates):
+        kept = [it for it in ev.items if gate_for(it).keeps(it)]
         dropped = len(ev.items) - len(kept)
+        floors = sorted({(g.min_rerank, g.min_cosine) for g in applied_gates})
+        shown = "; ".join(f"min_rerank={r}, min_cosine={c}" for r, c in floors)
         if dropped:
             ev.notes.append(
                 f"relevance gate dropped {dropped}/{len(ev.items)} below floor "
-                f"(min_rerank={gate.min_rerank}, min_cosine={gate.min_cosine})"
+                f"({shown})"
                 + ("; no candidate cleared the floor — no match" if not kept else "")
             )
         trace("retriever", "gate", f"kept {len(kept)}, dropped {dropped}",
               level=("warn" if not kept else "info"), kept=len(kept), dropped=dropped,
-              min_rerank=gate.min_rerank, min_cosine=gate.min_cosine)
+              floors=[{"min_rerank": r, "min_cosine": c} for r, c in floors])
         ev.items = kept
 
     if len(ev.items) > MAX_ITEMS:
         ev.notes.append(f"retriever: kept top {MAX_ITEMS} of {len(ev.items)} ranked items")
         ev.items = ev.items[:MAX_ITEMS]
+    # One dict when a single set of floors applied (the common case), a list when
+    # the pool spanned footage domains with different calibrations. An empty pool
+    # was gated by nothing, so report the base gate rather than an empty list.
+    applied = [{"min_rerank": r, "min_cosine": c}
+               for r, c in sorted({(g.min_rerank, g.min_cosine)
+                                   for g in (applied_gates or [base])})]
     ev.attributes["fusion"] = {
         "method": "rerank+native min-max blend",
         "rerank_weight": RERANK_WEIGHT,
-        "gate": {"min_rerank": gate.min_rerank, "min_cosine": gate.min_cosine},
+        "gate": applied[0] if len(applied) == 1 else applied,
     }
     return ev

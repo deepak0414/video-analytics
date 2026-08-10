@@ -30,3 +30,29 @@ roles:
   # the sidecar stub warns if queried unconfigured.
   scene_detector:
     model: motion-episodes
+  # R11.b: the relevance floor, recalibrated for THIS footage domain. The base
+  # 0.10 cosine floor was measured on A-EV (edited video — the subject fills the
+  # frame). A fixed camera's frames share ~95% of their content, so every cosine
+  # is dominated by an invariant background term: the whole distribution shifts
+  # down and compresses. Measured 2026-08-07 on the 22 real NVR clips (.va-nvr)
+  # against the human's ground-truth notes for that window (kept OUTSIDE the repo
+  # — they describe the household; the derived, publishable assertions live in
+  # tests/golden_queries/nvr0801_clip*.yaml). 9 targeted queries = 26 ground-truth
+  # (query, clip) pairs at the GATE level: the 0.10 floor retained 6/26, and on 6
+  # of the 9 queries not ONE of the 22 clips cleared it. A SEPARATE end-to-end run
+  # (8 natural questions = 25 pairs, also bounded by the k-capped gather — a
+  # different denominator, don't compare it to 26) emptied 3 of 8 questions to "no
+  # candidate cleared the floor — no match" while the real events sat in the
+  # ungated pool. Per-query spread across all 22 clips was only
+  # 0.020-0.077 and best-true minus best-false +0.003..+0.042, so NO absolute
+  # floor separates; relative rules (median+margin, max-margin, p75) were
+  # evaluated and rejected — they buy precision by losing 30-50% of the real
+  # events. FLAGGED magic value: only the SIGN of the cosine transfers across
+  # footage domains, not the magnitude, so this floor drops anti-correlated
+  # frames and nothing else (26/26 ground-truth clips kept). Precision on this
+  # footage has to come from the language lane and SR.6 verification, not from
+  # thresholding a cosine. min_rerank is INHERITED (-3.0): the cross-encoder's
+  # scale DOES transfer — measured true captions +2.58/+1.67/+0.38 vs
+  # irrelevant -3 to -11.
+  retriever:
+    min_cosine: 0.0

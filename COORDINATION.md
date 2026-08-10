@@ -590,3 +590,59 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   RUN_GOLDEN=1 run-claude/config .va-shots — dresses-ask-01 passed (330 s run),
   bird-ask-01 passed on retry 103 s (first attempt died on a claude-CLI 240 s
   subprocess timeout, an environmental flake — same class as the PR #31-era one).
+- 2026-08-07 (R11.b, loop session): **the relevance floor is now per-footage-domain.**
+  Shared-interface change in `pipeline/retrieval.py`: `get_relevance_gate()` gained
+  optional `profile=`/`source_type=` (base config when omitted — no behavior change for
+  existing callers), and a new `gates_by_video(items, workdir)` maps each candidate to
+  the gate its OWN video's recorded footage profile calibrates (`config_for` —
+  record==reality, the same resolution R11.a's deep-scan veto uses). `retrieve()` applies
+  those per item; an explicit `gate=` still overrides everything, and any catalog failure
+  degrades to the base gate. Two consumer-visible shape changes: the "relevance gate
+  dropped N/M" note now lists every floor that COVERED a candidate (only those — naming
+  the base gate when nothing used it would report an unmeasured threshold), and
+  `Evidence.attributes["fusion"]["gate"]` is a LIST of floor dicts when the pool spanned
+  domains, still a single dict otherwise.
+  Why: an absolute score floor only means something against the footage it was measured
+  on. Measured 2026-08-07 on the 22 real NVR clips (.va-nvr, real SigLIP + bge) against
+  the human's ground-truth notes for that window (kept outside the repo — they
+  describe the household; tracked derivatives live in tests/golden_queries/
+  nvr0801_clip*.yaml). Two query sets, two denominators — 9 targeted queries = 26
+  ground-truth (query, clip) pairs at the GATE level (0.10 retained 6/26, 0.0 retains
+  26/26); 8 natural questions = 25 pairs END TO END through retrieve(), also bounded
+  by the k-capped gather. End to end: the A-EV floor (min_cosine 0.10) put 7/25 in
+  the final evidence and emptied 3 of 8 questions to "no candidate cleared the floor — no
+  match" while the real events sat in the ungated pool; per-video resolution with
+  `security: min_cosine 0.0` gives 13/25 and 0 of 8 emptied (at k=20: 9/25 -> 16/25).
+  The floors themselves live in run-*/config/profiles/footage/security.yaml, NOT in
+  config/ — base roles.yaml omits the `retriever` role on purpose (stub scores are
+  uncalibrated), so that file carries a note telling you not to "sync" it in.
+  New storage method (logging it per this file's convention for Catalog additions):
+  `Catalog.footage_domains() -> set[(profile, source_type)]`, the distinct footage
+  domains among `ingest_status='done'` videos. The `done` restriction is load-bearing:
+  a catalog row exists BEFORE fetch, so counting all rows would let one failed
+  `va ingest "nvr://..."` attach a permanent mixed-domain warning to every answer in
+  that workdir. Reuse this rather than writing a second definition of "footage domain".
+  Combination attestation (the gate resolution changed for EVERY video, not just
+  A-LSSRVF ones, so both real-model combinations were re-run on this change):
+  A-EV `RUN_GOLDEN=1 VA_CONFIG_DIR=run-claude/config GOLDEN_WORKDIR=.va-shots pytest -m
+  golden` = 85 passed / 25 skipped / 1 xfailed, baseline-identical (both `va ask`
+  questions included); A-LSSRVF the same command with GOLDEN_WORKDIR=.va-nvr -k nvr =
+  17 passed / 8 xfailed, baseline-identical — but note what that does NOT prove:
+  `test_golden_queries` calls `visual_query()` directly and never reaches
+  `retrieve()`, and no NVR fixture carries an `ask_questions:` block, so NO golden
+  test exercises the gate on security footage. `test_shipped_real_model_configs_
+  carry_the_security_floor` is what guards the shipped override; an NVR golden ask
+  fixture is backlogged. A-EV retrieval was additionally probed
+  item-by-item (old single gate vs new per-video resolution): byte-identical, and the
+  resolved gate for a NULL-profile local/youtube video is the base (-3.0, 0.10) —
+  `default_footage_profile` maps only `nvr_recorded` to `security`. Stub combinations
+  are unaffected by construction: base roles.yaml declares no `retriever` role, so the
+  gate stays permissive there (tests/test_relevance_gate_profile.py builds its own
+  config dir to exercise the mechanism offline).
+  KNOWN GAPS left deliberately (backlogged in the untracked loop state file
+  architecture-evolution-loop.md, and summarized here so a clone sees them), each with
+  its measurement): the SR.6 verifier floor is still base-config and no-ops on A-LSSRVF;
+  `_minmax`'s 1e-9 degeneracy guard amplifies ~1e-3 score noise into full 0-1 spread; the
+  action lane floods the pool with one repeated X-CLIP label; and `query_objects` matches
+  query WORDS against class names, so "vehicles"/"children" reach none of the 918
+  car/person detections.

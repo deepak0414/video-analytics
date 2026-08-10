@@ -255,6 +255,11 @@ layer. Instructions decay; hooks don't — if a lesson is a mechanical invariant
   as `until ! pgrep -f '[p]ytest -q'; …; pytest -q` matches the LITERAL `pytest -q`
   later in its OWN command line and spins forever (11 h lost overnight). A poll must
   not share a command line with the thing it polls for: separate calls, or match PIDs.
+- 2026-08-08: A test that never CONSTRUCTS its scenario is decoration even when
+  green — three in one branch: a catalog-failure test whose missing workdir was
+  silently created empty, a two-source-type test that ingested one video, and a
+  floor pin whose thresholds didn't bracket the stub's real scores (1.0/-0.1).
+  Assert observable BEHAVIOR; run it against the broken code before believing it.
 
 ## The two things most likely to trip you up
 
@@ -315,10 +320,24 @@ exact-range query collapses the episode to an instant);
 e.g. any plain A-EV ingest, degrade to ONE full-span segment with a warning, and a
 MotionSource failure degrades the same way rather than aborting the ingest).
 Core roles (scene detect, embedders) ignore `enabled`.
+Since R11.a the profile also gates deep scans, and since **R11.b the retrieval relevance
+floor** (`retriever:` block) is resolved PER VIDEO from that video's recorded profile, so
+each video is judged on floors calibrated for its own footage. In the **run-\*/config**
+dirs `security` sets `min_cosine: 0.0` (measured — see the profile comment); the default
+`config/` dir declares no `retriever` role at all, so it does no thresholding anywhere.
+**Per-video floors do not make a MIXED workdir safe**: gather and fusion still rank every
+video's frames against each other on a cosine that does not compare across domains, so
+A-EV frames (relevant 0.11–0.18) bury A-LSSRVF ones (0.020–0.077) before the gate is
+reached. Keep A-LSSRVF chunks in their own workdir. `retrieve` flags a mixed **workdir**
+in the evidence notes — deliberately the workdir and not the surfaced candidate pool,
+because total burial keeps the weaker domain OUT of the pool and would silence the
+warning exactly when it matters; don't "simplify" it back. Domain-aware gather/fusion
+(per-domain top-k + per-domain normalization) is loop backlog.
 **Caveat: do NOT override embedder models in a footage profile yet** — ingest tags shards
-honestly from the overlay, but the QUERY path is profile-unaware (loads base config), so
-such shards get tag-skipped at query time and the video vanishes from search. Query-side
-profile awareness is future work (loop backlog). `VA_CONFIG_DIR` overrides the config
+honestly from the overlay, but the query path is profile-unaware EVERYWHERE ELSE (it loads
+base config), so such shards get tag-skipped at query time and the video vanishes from
+search. Query-side profile awareness beyond the gate is future work (loop backlog) — the
+SR.6 VLM-verifier floor is the next known gap. `VA_CONFIG_DIR` overrides the config
 directory.
 
 ## Architecture: two pipelines over shared stores
