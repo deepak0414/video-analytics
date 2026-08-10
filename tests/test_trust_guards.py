@@ -530,16 +530,31 @@ def cp_repo(tmp_path):
     branch whose diff the checker inspects."""
     work = tmp_path / "cp"
     work.mkdir()
+    # LC_ALL=C: these tests assert on git's own wording ("fatal:", "warning:"),
+    # which git localizes — without it a flake-fix test is itself locale-flaky.
     env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
-           "GIT_CONFIG_SYSTEM": "/dev/null"}
+           "GIT_CONFIG_SYSTEM": "/dev/null", "LC_ALL": "C", "LANGUAGE": ""}
 
     def git(*args):
-        return subprocess.run(["git", *args], cwd=work, capture_output=True,
-                              text=True, env=env)
+        """Every setup command must SUCCEED. Silently ignoring git failures here
+        turned a CI flake into three rounds of guesswork: the fixture carried on
+        after a failed command and the test blew up later somewhere unrelated."""
+        res = subprocess.run(["git", *args], cwd=work, capture_output=True,
+                             text=True, env=env)
+        assert res.returncode == 0, (
+            f"fixture git {' '.join(args)!r} failed ({res.returncode}): "
+            f"{res.stderr.strip()}")
+        return res
 
     git("init", "-b", "main")
     git("config", "user.email", "t@example.com")
     git("config", "user.name", "T")
+    # test_large_changeset_does_not_fail_open makes ~900 commits in a few
+    # seconds, which lands near git's gc.auto loose-object threshold (6700).
+    # A DETACHED background `gc --auto` mutating the object store while the
+    # checker's `git diff` reads it is a real source of nondeterminism, and this
+    # fixture is the only one in the suite that gets anywhere near it.
+    git("config", "gc.auto", "0")
     (work / "scripts").mkdir()
     for name in ("critical_paths.txt", "check_critical_paths.sh"):
         shutil.copy(REPO_ROOT / "scripts" / name, work / "scripts" / name)
@@ -549,11 +564,19 @@ def cp_repo(tmp_path):
     git("commit", "-m", "seed")
     base = git("rev-parse", "HEAD").stdout.strip()
 
-    def check(labels=""):
-        return subprocess.run(
-            ["bash", "scripts/check_critical_paths.sh", base, labels],
+    def check(labels="", base_sha=None):
+        res = subprocess.run(
+            ["bash", "scripts/check_critical_paths.sh", base_sha or base, labels],
             cwd=work, capture_output=True, text=True, env=env,
         )
+        # Fixture-level, so EVERY cp_repo assertion inherits it: capture_output
+        # is where three CI diagnoses of this gate were lost — git's real message
+        # sat unread in res.stderr while the assertion showed only stdout.
+        # pytest prints captured stdout only when the test fails, so this costs
+        # nothing on green and hands the next failure its own evidence.
+        if res.stderr:
+            print(f"[check_critical_paths.sh stderr]\n{res.stderr}")
+        return res
 
     def change(rel, content="x = 1\n"):
         p = work / rel
@@ -576,6 +599,10 @@ def cp_repo(tmp_path):
         nonlocal base
         base = git("rev-parse", "HEAD").stdout.strip()
 
+    def set_config(key, value):
+        git("config", key, value)
+
+    CpRepo.set_config = staticmethod(set_config)
     CpRepo.git_mv = staticmethod(git_mv)
     CpRepo.mark_base = staticmethod(mark_base)
     CpRepo.check = staticmethod(check)
@@ -633,6 +660,192 @@ def test_prefix_match_is_anchored_not_substring(cp_repo):
     assert cp_repo.check("").returncode == 0
 
 
+def test_unreachable_base_reports_gits_own_error(cp_repo):
+    """A diff failure must print what GIT said, not a presumed cause.
+
+    The message used to assert one explanation ("fetch-depth: 0 required in
+    CI"), so three consecutive CI failures were diagnosed by guesswork and the
+    actual reason was never recorded anywhere. Whatever git's wording is on a
+    given version, its `fatal:` line has to reach the operator.
+    """
+    res = cp_repo.check("", base_sha="deadbeef" * 5)
+
+    assert res.returncode == 1
+    assert "git said" in res.stdout
+    assert "fatal:" in res.stdout, (
+        f"git's own error was swallowed; operator sees only a guess:\n{res.stdout}")
+    # ...and no eliminated hypothesis alongside it. The critical-paths job
+    # already checks out with fetch-depth: 0, so that hint sent three diagnoses
+    # to a cause that cannot apply.
+    assert "fetch-depth" not in res.stdout, (
+        f"a ruled-out cause is being suggested again:\n{res.stdout}")
+    # ...and the conditional hint's TRUE arm: git's words DO implicate the
+    # revision here, so the checker must say what it actually needs. Only the
+    # negative arm was pinned, so narrowing the match pattern would have gone
+    # unnoticed until an operator hit a force-pushed base with no pointer.
+    assert "exist in this checkout" in res.stdout, (
+        f"the base-sha requirement was not stated:\n{res.stdout}")
+
+
+def test_a_silent_git_death_is_not_blamed_on_the_base_sha(cp_repo):
+    """The scenario that most likely IS the open flake: git dies without saying
+    anything (OOM-killed on a loaded runner — status 137 — is the usual way).
+
+    Printing the shallow-clone/force-push explanation unconditionally would put a
+    confident cause under an empty message, which is precisely the misattribution
+    this change exists to remove. The exit status is the diagnosis here.
+    """
+    fake_bin = cp_repo / "fakebin"
+    fake_bin.mkdir()
+    real_git = shutil.which("git")
+    (fake_bin / "git").write_text(
+        f'#!/usr/bin/env bash\n'
+        f'for a in "$@"; do [ "$a" = diff ] && exit 137; done\n'
+        f'exec {real_git} "$@"\n'
+    )
+    (fake_bin / "git").chmod(0o755)
+
+    res = subprocess.run(
+        ["bash", "scripts/check_critical_paths.sh", "HEAD", ""],
+        cwd=cp_repo.root, capture_output=True, text=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+             "GIT_CONFIG_SYSTEM": "/dev/null", "LC_ALL": "C",
+             "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    detail = f"\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    assert res.returncode == 1, detail
+    assert "git exited 137" in res.stdout, f"the status is the diagnosis:{detail}"
+    assert "KILLED by signal" in res.stdout, detail
+    assert "shallow" not in res.stdout, (
+        f"a cause was presumed under an empty git message:{detail}")
+
+
+def test_a_non_signal_death_invents_neither_a_signal_nor_a_cause(cp_repo):
+    """The other two failure arms: exit <=128, and stderr that says something
+    unrelated to the revision.
+
+    Both were added to stop the checker inventing causes, and both were
+    uncovered. Dropping the `rc > 128` guard would print "KILLED by signal 0"
+    for a disk-full exit 128; widening the hint's match would blame the base sha
+    for an unrelated error. Green suites hid each of those once already.
+    """
+    fake_bin = cp_repo / "fakebin2"
+    fake_bin.mkdir()
+    real_git = shutil.which("git")
+    (fake_bin / "git").write_text(
+        f'#!/usr/bin/env bash\n'
+        f'for a in "$@"; do\n'
+        f'  if [ "$a" = diff ]; then echo "error: unable to write file" >&2; exit 128; fi\n'
+        f'done\n'
+        f'exec {real_git} "$@"\n'
+    )
+    (fake_bin / "git").chmod(0o755)
+
+    res = subprocess.run(
+        ["bash", "scripts/check_critical_paths.sh", "HEAD", ""],
+        cwd=cp_repo.root, capture_output=True, text=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+             "GIT_CONFIG_SYSTEM": "/dev/null", "LC_ALL": "C",
+             "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    detail = f"\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    assert res.returncode == 1, detail
+    assert "git exited 128" in res.stdout, detail
+    assert "unable to write file" in res.stdout, f"git's words dropped:{detail}"
+    assert "exist in this checkout" not in res.stdout, (
+        f"an unrelated error was blamed on the base sha:{detail}")
+
+    # SECOND case, and it is the one that guards `rc > 128`: the signal wording
+    # lives in the EMPTY-stderr branch, so a fake git that writes to stderr (as
+    # above) never reaches it. Written the obvious way, this test passed with the
+    # guard replaced by `if true` — it has to be exit<=128 AND silent.
+    silent = cp_repo / "fakebin3"
+    silent.mkdir()
+    (silent / "git").write_text(
+        f'#!/usr/bin/env bash\n'
+        f'for a in "$@"; do [ "$a" = diff ] && exit 128; done\n'
+        f'exec {real_git} "$@"\n'
+    )
+    (silent / "git").chmod(0o755)
+
+    res2 = subprocess.run(
+        ["bash", "scripts/check_critical_paths.sh", "HEAD", ""],
+        cwd=cp_repo.root, capture_output=True, text=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+             "GIT_CONFIG_SYSTEM": "/dev/null", "LC_ALL": "C",
+             "PATH": f"{silent}:{os.environ['PATH']}"},
+    )
+
+    detail2 = f"\nstdout:\n{res2.stdout}\nstderr:\n{res2.stderr}"
+    assert res2.returncode == 1, detail2
+    assert "printed nothing and exited 128" in res2.stdout, detail2
+    assert "KILLED by signal" not in res2.stdout, (
+        f"a signal was invented for a non-signal exit:{detail2}")
+
+
+def test_a_temp_file_failure_is_named_and_fails_closed(cp_repo):
+    """The mktemp branch, in a change whose premise is that this gate's failure
+    messages must be accurate.
+
+    Two things matter and neither is free: the message must name the real
+    problem (unchecked, a full /tmp gets reported as a base-sha failure), and it
+    must exit NON-zero — a refactor dropping the `|| { … exit 1; }` would let the
+    gate scan nothing and pass, which is fail-open on every critical path.
+    """
+    res = subprocess.run(
+        ["bash", "scripts/check_critical_paths.sh", "HEAD", ""],
+        cwd=cp_repo.root, capture_output=True, text=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null",
+             "GIT_CONFIG_SYSTEM": "/dev/null", "LC_ALL": "C",
+             "TMPDIR": str(cp_repo / "no-such-dir")},
+    )
+
+    detail = f"\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    assert res.returncode == 1, f"a temp-file failure must fail CLOSED:{detail}"
+    assert "temp file" in res.stdout, f"the real cause is not named:{detail}"
+    assert "cannot diff against" not in res.stdout, (
+        f"a disk problem is being reported as a base-sha problem:{detail}")
+
+
+def test_git_warnings_reach_the_log_without_entering_the_path_list(cp_repo):
+    """The success-path stderr replay: git's warning reaches the log, and does
+    not appear in the gate's own report.
+
+    A critical path is touched (with its label) so the checker actually WRITES a
+    report line: without that, stdout is empty in this scenario and the "stays
+    out of the report" assertion is vacuous — it would pass even if the replay
+    were moved to stdout.
+
+    (A skipped rename detection is not itself a gate hole: --name-status reports
+    an undetected rename as D <old> + A <new>, so the old path is scanned anyway.)
+    """
+    for i in range(40):
+        (cp_repo / f"f{i}.txt").write_text(f"line{i}\nbody {i}\ncommon tail\n")
+    cp_repo.change("seed.txt")          # commits the 40 files too
+    cp_repo.mark_base()
+    for i in range(40):                 # rename AND edit -> inexact detection
+        cp_repo.git_mv(f"f{i}.txt", f"g{i}.txt")
+        (cp_repo / f"g{i}.txt").write_text(f"line{i}\nbody {i} CHANGED\ntail\n")
+    cp_repo.change("g0.txt", "line0\nbody 0 CHANGED\ntail\n")
+    cp_repo.change("src/va/cli.py")     # so stdout carries a real report line
+    cp_repo.set_config("diff.renameLimit", "1")
+
+    res = cp_repo.check("human-reviewed")
+
+    detail = f"\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    # The verdict itself: a warning must not make the gate fail closed (it would
+    # if the line ever survived into the scanned list and prefix-matched a
+    # pattern — spurious red on every rename-heavy PR).
+    assert res.returncode == 0, detail
+    assert "src/va/cli.py" in res.stdout, f"report line missing:{detail}"
+    assert "warning:" in res.stderr, f"git's warning never reached the log:{detail}"
+    assert res.stderr.count("git: ") >= 1, f"replay prefix missing:{detail}"
+    assert "warning:" not in res.stdout, (
+        f"a git warning leaked into the scanned output:{detail}")
+
+
 def test_large_changeset_does_not_fail_open(cp_repo):
     """SIGPIPE regression. The list must EXCEED the 64 KB pipe buffer: the first
     version of this test wrote ~14 KB, which FITS, so the buggy piped
@@ -642,8 +855,12 @@ def test_large_changeset_does_not_fail_open(cp_repo):
         cp_repo.change(f"src/va/{long_seg}/mod_{i}.py", "x = 1\n")
     cp_repo.change("src/va/cli.py")
     res = cp_repo.check("")
-    assert res.returncode == 1
-    assert "src/va/cli.py" in res.stdout
+    # git's stderr goes in the failure message on purpose: capture_output hides
+    # it, and THAT — not the checker — is where the evidence for three CI
+    # failures of this very test was lost (the assertion only showed stdout).
+    detail = f"\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    assert res.returncode == 1, detail
+    assert "src/va/cli.py" in res.stdout, detail
 
 
 def test_non_ascii_and_spaced_paths_are_matched(cp_repo):

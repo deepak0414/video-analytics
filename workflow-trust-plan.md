@@ -1793,15 +1793,21 @@ provably" (P5).
 **Deliverable:** `scripts/critical_paths.txt`, `scripts/check_critical_paths.sh`,
 the `critical-paths` CI job (WT.6), and a CLAUDE.md note.
 **Done when:** a PR touching `schema.py` without the `human-reviewed` label fails CI;
-adding the label (a human act in the GitHub UI — `bash_guard.py` blocks the agent
-doing it via `gh`) turns it green without new commits.
+adding the label (a human act in the GitHub UI) turns it green without new commits.
+NB per D9 the `gh`/`curl` guards are a speed bump against ACCIDENT, not a guarantee:
+agent sessions share the human's credential, so the label's value rests on the human
+actually applying it.
 **Depends on:** WT.5, WT.6
 
 `scripts/critical_paths.txt` (initial set — reviewed quarterly, kept SHORT on
 purpose; a long list collapses back into "review everything" which means nothing):
 
 ```text
+# MIRROR of scripts/critical_paths.txt — that FILE is the source of truth.
+# Kept byte-identical below; if they ever disagree, the file wins.
 # Bounded human review (workflow-trust-plan.md WT.7 / P5).
+# NB WT.7 embeds a byte-identical MIRROR of this table. Editing here without
+# re-copying into that block fails test_wt7_embedded_mirror_matches_the_shipped_checker.
 #
 # PRs touching these paths require the named label before CI goes green. The
 # list is deliberately SHORT: a long list collapses back into "review
@@ -1811,8 +1817,9 @@ purpose; a long list collapses back into "review everything" which means nothing
 #   golden-verified  = the golden gate was run on the Spark and its output is
 #                      pasted in the PR's Evidence section.
 #
-# Labels are applied by the human in the GitHub UI; bash_guard.py blocks agents
-# from setting them via gh (matrix row 70).
+# The label is the human's ATTESTATION, not proof (D9): agent sessions share the
+# human's credential, so the guards that stop agents applying labels via gh/curl
+# are a speed bump against accident, not a guarantee. Apply them in the GitHub UI.
 #
 # pattern (path prefix)                       required-label
 
@@ -1841,6 +1848,7 @@ src/va/pipeline/                              golden-verified
 config/                                       golden-verified
 run-siglip/config/                            golden-verified
 run-claude/config/                            golden-verified
+run-qwen3vl/config/                           golden-verified
 ```
 
 Rationale for the set: deletion paths (`remove` lives in cli/catalog), the one shared
@@ -1852,8 +1860,13 @@ output is in the PR Evidence section."
 `scripts/check_critical_paths.sh`:
 
 ```bash
+# MIRROR of scripts/check_critical_paths.sh — that FILE is the source of
+# truth. Kept byte-identical below; if they ever disagree, the file wins
+# (a stale mirror here sent one diagnosis back to an eliminated cause).
 #!/usr/bin/env bash
 # Bounded human review (workflow-trust-plan.md WT.7).
+# NB WT.7 embeds a byte-identical MIRROR of this file. Editing here without
+# re-copying into that block fails test_wt7_embedded_mirror_matches_the_shipped_checker.
 # Usage: check_critical_paths.sh <base-sha> "<space-separated PR labels>"
 # Exit 0 = every touched critical path carries its required label; 1 = missing.
 #
@@ -1875,8 +1888,56 @@ table="scripts/critical_paths.txt"
 # core.quotepath=off: git C-quotes non-ASCII paths by default ("sch\303\251ma.py"),
 # which never matches a literal prefix — fail-open on exactly the files this gate
 # exists to catch. -z + NUL parsing also keeps paths with spaces intact.
-raw=$(git -c core.quotepath=off diff -M --name-status "$base"...HEAD) || {
-  echo "FAIL: cannot diff against '$base' (fetch-depth: 0 required in CI)"; exit 1; }
+# git's OWN stderr goes to a file, never into $raw via 2>&1: a warning on the
+# SUCCESS path (e.g. "inexact rename detection was skipped due to too many
+# files") would otherwise be parsed as a changed path and could mask a real one.
+# It is REPLAYED either way, because discarding git's own words is what turned
+# three CI failures into guesswork. Report what git said; presume nothing.
+# On success the replay goes to stderr purely so it reaches the log WITHOUT
+# entering $raw: a warning line has no TAB, so `cut -f2-` would pass it through
+# whole and it would be prefix-matched as if it were a path — which can only ADD
+# a spurious match, never hide a real one. (NB a skipped rename detection is not
+# itself a gate hole: --name-status still reports the undetected rename as
+# D <old> + A <new>, so the old path is scanned either way. -M only merges the
+# pair into one R record.)
+# mktemp's status is checked: unchecked, a full or read-only /tmp makes the
+# redirect below fail before git ever runs, and the || branch would then blame
+# the base sha for a disk problem — "git said:" followed by nothing. That is the
+# misattribution this whole change exists to remove; do not reintroduce it here.
+_cp_err=$(mktemp) || {
+  echo "FAIL: cannot create a temp file for git's stderr (is /tmp full or read-only?)"
+  exit 1; }
+trap 'rm -f "$_cp_err"' EXIT
+raw=$(git -c core.quotepath=off diff -M --name-status "$base"...HEAD 2>"$_cp_err") || {
+  rc=$?      # FIRST statement — any command here would overwrite it.
+  echo "FAIL: cannot diff against '$base' — git exited $rc"
+  if [ -s "$_cp_err" ]; then
+    echo "       git said:"
+    sed 's/^/       /' "$_cp_err"
+  else
+    # A silent death is itself the diagnosis — but only a status >128 means a
+    # signal. Decoding one unconditionally would print "KILLED by signal 0" for,
+    # say, a disk-full exit 128: a fabricated cause under an empty message, the
+    # very thing this change removes.
+    if [ "$rc" -gt 128 ]; then
+      echo "       git printed nothing and was KILLED by signal $((rc - 128))"
+      echo "       (137 = the OOM killer, 141 = SIGPIPE)."
+    else
+      echo "       git printed nothing and exited $rc."
+    fi
+  fi
+  # The base-sha explanation is printed ONLY when git's own words implicate the
+  # revision. Printing it unconditionally is how this gate misattributed three
+  # failures: a hypothesis under a silent or unrelated error reads as a finding.
+  if grep -qE "unknown revision|bad object|Invalid symmetric difference|ambiguous argument|no merge base" \
+       "$_cp_err" 2>/dev/null; then
+    echo "       (the checker needs '$base' to exist in this checkout: a shallow"
+    echo "        clone or a force-pushed base branch removes it)"
+  fi
+  exit 1; }
+# if-form, not `[ -s … ] && …`: the && form yields exit 1 when the file is empty,
+# which would become the script's status if this ever ended up as the last command.
+if [ -s "$_cp_err" ]; then sed 's/^/git: /' "$_cp_err" >&2; fi
 # Lines are TAB-delimited: "STATUS<TAB>path" (or "R100<TAB>old<TAB>new").
 # cut -f2- keeps every path field, tr splits renames onto their own lines —
 # TAB-splitting (not whitespace) so paths containing SPACES survive intact.
@@ -1913,8 +1974,10 @@ done < "$table"
 if [ "$missing" -ne 0 ]; then
   echo
   echo "Critical paths need a human in the loop (P5). The user applies the label"
-  echo "in the GitHub UI after reading the diff; agents are guard-blocked from"
-  echo "setting it. Re-runs on 'labeled' — no new commit needed."
+  echo "in the GitHub UI after reading the diff. Re-runs on 'labeled' — no new"
+  echo "commit needed. NB the gh/curl guards that stop an agent applying it are a"
+  echo "speed bump against ACCIDENT, not a guarantee (D9): agent sessions share"
+  echo "the human's credential, so this label is worth only the reading behind it."
 fi
 exit "$missing"
 ```
@@ -1933,6 +1996,53 @@ needed / comments ignored / two labels on one PR / missing table).
 NB: the table lists `scripts/` and `.claude/` under `human-reviewed`, so every trust PR —
 including the one that introduces this gate — requires the human label. That is the
 intended behavior.
+
+**As-built (2026-08-10, the recurring CI flake — root cause STILL OPEN).**
+`test_large_changeset_does_not_fail_open` has failed in CI three times (PRs 28, 31, 36)
+with `cannot diff against '<sha>'`, cleared by a rerun each time.
+
+**Where the evidence was actually lost** (corrected in review — the first version of this
+note blamed the wrong component): NOT the checker. Command substitution captures stdout
+only, so git's `fatal:` always flowed through to the log in the `critical-paths` job. The
+three lost diagnoses were all in the **offline-tests** job, where this test drives the
+checker through a pytest fixture with `capture_output=True` and asserts only on
+`res.stdout` — git's real message sat unread in `res.stderr`. Anything that hides
+`res.stderr` reintroduces the blindness, wherever the checker's own output goes.
+
+The message that WAS shown named one presumed cause, "fetch-depth: 0 required in CI".
+**That hypothesis is eliminated** — the `critical-paths` job already checks out with
+`fetch-depth: 0`, so it could never have applied to the only automated caller.
+
+What changed: the failure branch now inlines git's own words into the FAIL message (which
+is what the test asserts on), the fixture prints `res.stderr` (pytest shows captured output on failure only), so every cp_repo assertion inherits the evidence, and
+git's stderr is REPLAYED on the success path (to stderr, so a
+warning can never enter `$raw`: a warning line has no TAB, so it would be prefix-matched
+as though it were a path — which can only ADD a spurious match, never hide a real one).
+NB a skipped rename detection is NOT a gate hole, contrary to this note's first version:
+`--name-status` reports an undetected rename as `D <old>` + `A <new>`, so the old path is
+scanned either way; `-M` only merges the pair into one `R` record. Both WT.7 listings (`check_critical_paths.sh` and `critical_paths.txt`) are now
+kept byte-identical to their files and `test_wt7_embedded_mirror_matches_the_shipped_checker`
+fails if either drifts — the table listing had already gone stale, omitting
+`run-qwen3vl/config/`. Both source files carry a header pointing back at that rule.
+
+The fixture also sets `gc.auto=0`, because ~900 commits
+in a few seconds lands near git's 6700 loose-object threshold and a detached background
+`gc` mutating the object store while the checker's `git diff` reads it is a plausible
+race that would only bite on a loaded runner; and its `git()` helper now asserts success
+instead of swallowing failures.
+
+**Do not re-test these**, and note WHY, because the obvious reason is the wrong one:
+- *Shallow checkout.* The flaking job is `offline-tests`, whose `actions/checkout` step
+  has NO `fetch-depth` and IS a depth-1 clone — so "the job fetches full history" is not
+  the argument. The argument is that this test never touches the outer checkout:
+  `cp_repo` runs `git init` in its own sandbox under `tmp_path` and hands the checker a
+  base sha from THAT repo, which the outer clone's depth cannot affect. Verified by
+  running the whole file inside a `--depth 1` clone (234 passed).
+- *gc.auto* — now pinned to 0 in the fixture.
+- *Local reproduction* — 30 single-test runs, a shallow clone, and the full file all pass.
+The root cause is NOT identified — the failing CI log was replaced by its own rerun
+before it could be read. Occurrence #4 will print git's actual error; capture that log
+BEFORE rerunning, and start there.
 
 **As-built (2026-07-28, PR 4 backstop review — 5 findings).** The push-time backstop caught
 a real hole in the gate's own premise: **`gh issue edit <PR#> --add-label` applies review
