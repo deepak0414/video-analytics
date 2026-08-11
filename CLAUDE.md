@@ -62,13 +62,23 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   naive times = NVR clock tz, VA_NVR_TZ or system-local;
                                                             #   stored URI is canonical UTC; window capped at 120 s —
                                                             #   pull motion episodes, not raw hours).
-                                                            #   Same env as motion-probe; verify-and-trim per §5d (curl
-                                                            #   + dHash vs LIVE snapshot, so pull while lighting still
-                                                            #   matches the recording — a day window pulled after dark
-                                                            #   rejects every chunk. Stale chunks trimmed: clips can be
-                                                            #   seconds shorter than the window, t=0 ≈ start_epoch only
-                                                            #   to ~1 s, and a DROPPED chunk shifts later footage up to
-                                                            #   10 s early — PTS-accurate alignment is backlog).
+                                                            #   Same env as motion-probe; ONE loadfile session per
+                                                            #   window, verified lighting-independently: dHash
+                                                            #   self-consistency vs the pull's own consensus trims the
+                                                            #   §5d stale lead-in, and a per-channel ReferenceLibrary
+                                                            #   (<workdir>/nvr_refs/, survives cache wipes) rejects
+                                                            #   wholly-wrong-camera clips — so backfill of KNOWN modes
+                                                            #   works at night/any lighting. A mode the library hasn't
+                                                            #   seen is admitted only if it matches a LIVE snapshot
+                                                            #   (right camera, current lighting — how day-seeded
+                                                            #   channels acquire night mode near-real-time); matching
+                                                            #   neither refuses with recovery guidance, so backfilling
+                                                            #   a never-seeded mode under mismatched lighting fails
+                                                            #   closed. FIRST pull on an empty channel seeds UNVERIFIED
+                                                            #   (warned, only after the pull passes verification).
+                                                            #   Trim caveat: clips can be seconds shorter than the
+                                                            #   window and t=0 ≈ start_epoch only to ~1 s —
+                                                            #   PTS-accurate alignment is backlog.
                                                             #   SINGLE-recorder assumption: identity (source_key,
                                                             #   camera `nvr-ch<n>`) has no recorder id — repointing
                                                             #   VA_NVR_HOST at another NVR dedups/links wrongly
@@ -91,6 +101,12 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   SLA: the NVR ring keeps ~6 days — outages longer than
                                                             #   that are unrecoverable (watcher pulls what remains).
                                                             #   Cameras register on first nvr:// ingest of a channel.
+                                                            #   Known interaction: a backfill episode in a NEVER-seeded
+                                                            #   lighting mode refuses fail-closed (see nvr:// above),
+                                                            #   and the held watermark queues later episodes behind it
+                                                            #   until the live lighting rotates to match (≤ ~12 h,
+                                                            #   self-heals; loss only if wedged past the ~6-day ring —
+                                                            #   one refused device pull is burned per cycle meanwhile).
 .venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner wired, others → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use

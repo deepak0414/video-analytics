@@ -646,3 +646,31 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   action lane floods the pool with one repeated X-CLIP label; and `query_objects` matches
   query WORDS against class names, so "vehicles"/"children" reach none of the 918
   car/person detections.
+- 2026-08-11 (NVR verify fix, loop session): **lighting-independent pull verification.**
+  `sources/nvr.py` fetch rewritten: ONE loadfile session per window (no more 10 s
+  chunk+concat), verified WITHOUT a live snapshot.cgi reference. Why: measured
+  2026-08-10 (matched channels), the live-reference dHash carries the lighting of the
+  download moment — same camera scores 22–23 six hours later and 38 at night (IR),
+  overlapping the 25–38 different-camera band, so backfill after dark rejected nearly
+  everything (night episode: 3 of 4 chunks dropped). And chunking multiplied seek
+  exposure: A/B over 10 random 5-min windows / 4 days / 4 cameras, single-request
+  purity 1.000 in 10/10 vs 2 dirty chunks in 300 for the chunk recipe. New checks:
+  per-frame dHash vs the pull's OWN consensus (`consensus_hash`/`self_distances`,
+  trims the stale-lead-in minority) + a per-channel `ReferenceLibrary` persisted at
+  `<workdir>/nvr_refs/ch<N>.json` (rejects a wholly-wrong, self-consistent clip;
+  bounded 12 hashes/channel, atomic writes, corrupt file reseeds). A lighting mode
+  the library hasn't seen is admitted only when it matches a LIVE snapshot (right
+  camera, current lighting — the production path by which a day-seeded channel
+  acquires night mode; round-1 review critical); matching neither library nor live
+  view refuses with recovery guidance. Undecodable frames are None (not an
+  all-zeros sentinel — that IS the dhash of a dark frame; round-1 finding 3):
+  excluded from consensus, forced-dirty in self-distances, not counted toward the
+  ≥3-decodable floor. Seeding happens only AFTER verification + trim succeed, from
+  the clean run's consensus (round-1 finding 4). FIRST pull on an empty channel
+  seeds UNVERIFIED with a warning — seed deliberately (one pull per camera per
+  lighting mode) if that trust matters. Removed dead: `chunk_bounds`,
+  `CHUNK_S`, `_reference_hash`, `_frame_hammings`, `_pull_chunk_verified`. Trim
+  caveat unchanged (clips can run short; t=0 ≈ start_epoch to ~1 s) but the
+  dropped-chunk 10 s shift mode is gone. Live before/after: night 2→34 frames,
+  0 chunks dropped; day 45→73 frames, detections 73→154. nvr-access-notes.md §5d
+  carries the superseded-recipe annotation (file is untracked/local).
