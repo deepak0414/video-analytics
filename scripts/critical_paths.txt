@@ -1,4 +1,6 @@
 # Bounded human review (workflow-trust-plan.md WT.7 / P5).
+# NB WT.7 embeds a byte-identical MIRROR of this table. Editing here without
+# re-copying into that block fails test_wt7_embedded_mirror_matches_the_shipped_checker.
 #
 # PRs touching these paths require the named label before CI goes green. The
 # list is deliberately SHORT: a long list collapses back into "review

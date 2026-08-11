@@ -623,3 +623,36 @@ def test_deleting_remote_main_is_blocked_at_push(trust_repo):
     res = r.push("origin", ":main")
     assert res.returncode != 0
     assert "deleting remote main" in res.stderr
+
+
+def test_wt7_embedded_mirror_matches_the_shipped_checker():
+    """WT.7 embeds a byte-identical copy of `check_critical_paths.sh`. Nothing
+    enforced that, and it drifted: the plan kept showing a failure message whose
+    presumed cause the same document declared eliminated 70 lines below. A stale
+    mirror is worse than no mirror — the next reader trusts it and either
+    re-diagnoses the ruled-out cause or restores the listing over the real file.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    plan = (repo / "workflow-trust-plan.md").read_text().split("\n")
+    script = (repo / "scripts" / "check_critical_paths.sh").read_text().rstrip("\n")
+
+    table = (repo / "scripts" / "critical_paths.txt").read_text().rstrip("\n")
+
+    # Both WT.7 listings, because declaring ONE of them authoritative makes the
+    # other more likely to be trusted: the table block was stale (it omitted
+    # run-qwen3vl/config/, so copying it back would have dropped a whole config
+    # dir out of golden-verified enforcement).
+    for marker, header_lines, actual, source in (
+        ("# MIRROR of scripts/check_critical_paths.sh", 3, script,
+         "scripts/check_critical_paths.sh"),
+        ("# MIRROR of scripts/critical_paths.txt", 2, table,
+         "scripts/critical_paths.txt"),
+    ):
+        starts = [i for i, l in enumerate(plan) if l.startswith(marker)]
+        assert len(starts) == 1, f"{source}: expected 1 mirror, found {len(starts)}"
+        body = starts[0] + header_lines
+        end = next(i for i in range(body, len(plan)) if plan[i].strip() == "```")
+
+        assert "\n".join(plan[body:end]) == actual, (
+            f"workflow-trust-plan.md's WT.7 listing has drifted from {source} — "
+            "re-copy the file into the block")
