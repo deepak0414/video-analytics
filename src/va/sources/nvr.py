@@ -341,14 +341,19 @@ class NvrRecordedSource:
         quoted = raw.replace("\\", "\\\\").replace('"', '\\"')
         return f'user = "{quoted}"\n'
 
-    def _curl(self, url: str, out: str, max_time: int = 60) -> None:
+    def _curl(self, url: str, out: str, max_time: int = 60) -> int:
+        """Returns curl's exit status. Callers that download a payload MUST
+        check it: a transfer killed by --max-time (exit 28) leaves a partial
+        file that can pass a size gate and ingest as a silently SHORT clip
+        (round-1 review minor 2). Best-effort callers (stopLoad, snapshot)
+        may ignore it."""
         _, user, password = self._conn()
-        subprocess.run(
+        return subprocess.run(
             self._curl_argv(url, out, max_time),
             input=self._curl_config(user, password),
             text=True,
             check=False,
-        )
+        ).returncode
 
     def _stop_load(self, chan: int) -> None:
         host, _, _ = self._conn()
@@ -498,9 +503,19 @@ class NvrRecordedSource:
 
     def _fetch_window(self, chan: int, start: datetime, end: datetime,
                       work: Path) -> Optional[Path]:
-        """One loadfile session for the whole window, remuxed to mpegts."""
+        """One loadfile session for the whole window; returns the raw .dav.
+
+        Deliberately NO -c copy remux: on some recordings this NVR's .dav
+        demuxes to h264 packets the mpegts muxer rejects ("no startcode
+        found", and h264_mp4toannexb does not repair it), while a full DECODE
+        of the same file succeeds — measured 2026-08-11 on a window that
+        downloaded 47 MB four times only to be reported as "no data" because
+        the silent remux discarded it every time. Downstream needs only
+        decodable frames (`_frame_hashes`) and a re-encode (`_trim_encode`),
+        and both read the .dav directly (bundled ffmpeg has the dhav
+        demuxer). Seeking on the .dav is exact: a -ss 2 -to 30 trim measured
+        28.00 s to the frame."""
         host, _, _ = self._conn()
-        ff = self._ffmpeg()
         local_s = start.astimezone(_tz()) if _tz() else start.astimezone()
         local_e = end.astimezone(_tz()) if _tz() else end.astimezone()
         for attempt in range(MAX_TRIES):
@@ -510,38 +525,43 @@ class NvrRecordedSource:
             url = (f"{host}/cgi-bin/loadfile.cgi?action=startLoad&channel={chan}"
                    f"&startTime={local_s:%Y-%m-%d %H:%M:%S}"
                    f"&endTime={local_e:%Y-%m-%d %H:%M:%S}").replace(" ", "%20")
-            self._curl(url, str(dav))
+            # 180 s: a 120 s window of 2688x1520 main stream is ~65 MB; the
+            # healthy device serves ~2 MB/s (47 MB in 24 s) but degrades under
+            # session pressure, and the old 60 s default silently truncated
+            # nothing only because windows were small. Sized, not guessed.
+            rc = self._curl(url, str(dav), max_time=180)
             self._stop_load(chan)   # close NOW so it cannot bleed into the next
-            if not (dav.exists() and dav.stat().st_size > 2000):
+            if rc != 0:
+                # A partial download (e.g. exit 28, --max-time hit) can be
+                # big enough to pass the size gate and would ingest as a
+                # silently SHORT clip — footage missing with no signal.
+                logger.warning("nvr ch%d fetch attempt %d: curl exited %d — "
+                               "discarding partial download", chan, attempt, rc)
                 dav.unlink(missing_ok=True)
                 continue
-            raw = work / "window.ts"
-            subprocess.run(
-                [ff, "-hide_banner", "-y", "-fflags", "+genpts", "-i", str(dav),
-                 "-c", "copy", "-f", "mpegts", str(raw)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-            )
+            if dav.exists() and dav.stat().st_size > 2000:
+                return dav
             dav.unlink(missing_ok=True)
-            if raw.exists() and raw.stat().st_size > 2000:
-                return raw
-            raw.unlink(missing_ok=True)
         return None
 
-    def _frame_hashes(self, ts_file: Path):
+    def _frame_hashes(self, media: Path):
         """dHash every sampled frame; None for an undecodable one.
 
-        None keeps the index -> time mapping intact (dropping a slot would
-        shift every later trim bound 1/FPS_SAMPLE early) while being
-        impossible to mistake for footage. A stand-in HASH cannot do that job:
-        all-zeros is the genuine dhash of any dark/uniform frame, so on night
-        footage a zeros sentinel would read as clean, vote in the consensus,
-        and could even seed the reference library (round-1 finding 3)."""
+        Reads the pulled .dav directly (+genpts synthesizes the timestamps
+        some of its packets lack, so fps sampling stays uniform). None keeps
+        the index -> time mapping intact (dropping a slot would shift every
+        later trim bound 1/FPS_SAMPLE early) while being impossible to
+        mistake for footage. A stand-in HASH cannot do that job: all-zeros is
+        the genuine dhash of any dark/uniform frame, so on night footage a
+        zeros sentinel would read as clean, vote in the consensus, and could
+        even seed the reference library (round-1 finding 3)."""
         from PIL import Image
 
-        fdir = ts_file.with_suffix(".frames")
+        fdir = media.with_suffix(".frames")
         fdir.mkdir(exist_ok=True)
         subprocess.run(
-            [self._ffmpeg(), "-hide_banner", "-y", "-i", str(ts_file),
+            [self._ffmpeg(), "-hide_banner", "-y", "-fflags", "+genpts",
+             "-i", str(media),
              "-vf", f"fps={FPS_SAMPLE},scale=400:-1", str(fdir / "f_%04d.jpg")],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
@@ -583,10 +603,13 @@ class NvrRecordedSource:
     def _trim_encode(self, raw: Path, a: float, b: float, part: Path) -> None:
         """Frame-accurate trim of [a,b) seconds into part (output-side seek +
         re-encode; verified accurate against a synthetic color-per-second
-        clip). One encode per pull — the old per-chunk encode+concat is gone
-        with chunking itself."""
+        clip, and on a real .dav: -ss 2 -to 30 measured 28.00 s). +genpts for
+        the timestamps some .dav packets lack — decode-side seeking needs a
+        sane clock. One encode per pull — the old per-chunk encode+concat is
+        gone with chunking itself."""
         subprocess.run(
-            [self._ffmpeg(), "-hide_banner", "-y", "-i", str(raw),
+            [self._ffmpeg(), "-hide_banner", "-y", "-fflags", "+genpts",
+             "-i", str(raw),
              "-ss", f"{a:.2f}", "-to", f"{b:.2f}",
              "-c:v", "libx264", "-an", "-movflags", "+faststart", str(part)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,

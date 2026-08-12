@@ -2783,3 +2783,35 @@ WT.4 (everything else is static config + shell).
 | Reviewer checks in separate files, one subagent per check ("stronger guarantee each check is actually checked"); oracle = different frontier model | Amp .agents/checks/ (Feb 2026) | ampcode.com/news/liberating-code-review; ampcode.com/manual |
 | Scope hygiene: agent edits never mix with pre-existing human edits (dirty commits committed separately) | Aider git integration | aider.chat/docs/git.html |
 | Commit authority: only the orchestrator commits; report-only reviewers; risk-gated reviewer roster | Every Inc compound-engineering plugin (2026) | github.com/EveryInc/compound-engineering-plugin |
+
+## Dispute record — 2026-08-11, `fix/nvr-dav-direct-decode` round-1 minor 1 (carried, disputed)
+
+Finding: "_fetch_window's retry loop lost its payload-validity gate — a
+large-but-undecodable .dav returns on attempt 1 and hard-fails downstream
+instead of consuming the remaining retries."
+
+Accurate description, disputed as a defect. The old "validity gate" was the
+mpegts `-c copy` remux, and it is the component this branch removes for cause:
+it rejected VALID footage (h264 packet form some recordings demux to), and its
+in-loop retries re-downloaded 47 MB windows four times per pull — measured
+2026-08-11 as the traffic pattern that wedged the recorder's HTTP service.
+Retrying a big download because a DECODE failed spends the device budget on
+the least likely remedy: a corrupt-on-disk recording decodes identically on
+attempt 2. The failure it leaves behind is loud ("only N decodable frames of
+M sampled"), the operational layer (watch / the backfill driver) re-pulls
+failed windows on its own schedule, and a decode-level validity probe inside
+the fetch loop would re-introduce a per-attempt full decode of up to 65 MB —
+cost without a measured failure it prevents. If a large-but-undecodable
+download is ever observed in practice, the right fix is a cheap container
+sniff (dhav magic in the first bytes), not a decode gate.
+
+Occurrence log (kept honest — the dispute rests on rarity + loud failure +
+operational retry, so occurrences must be counted): 2026-08-11 21:40-22:15,
+THREE occurrences in the 24 h backfill ("only 0 decodable frames of 0
+sampled", ch1 windows 16:08:54 / 17:05:30 / 17:13:54) among ~350 live
+pulls; the driver's end-of-pass retry covers them. Working hypothesis for
+the payload: an HTML/text error body from the device (>2000 bytes, curl
+rc 0, zero decodable frames) rather than a corrupt recording — which is a
+CONTAINER-SNIFF case, strengthening the "sniff, not decode gate" position.
+If the end-of-pass retries fail on the same windows, add the sniff and
+retract this dispute.
