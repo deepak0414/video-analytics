@@ -159,7 +159,7 @@ def test_torn_frame_jpeg_reads_as_undecodable_not_a_crash(tmp_path):
     # an all-zeros hash, because all-zeros IS the real dhash of a dark/uniform
     # frame. ffmpeg on the garbage ts writes no frames, so the pre-seeded
     # corrupt jpg is exactly what the loop sees.
-    ts = tmp_path / "window.ts"
+    ts = tmp_path / "window.dav"
     ts.write_bytes(b"not a video")
     fdir = tmp_path / "window.frames"
     fdir.mkdir()
@@ -474,7 +474,7 @@ def _pull_harness(monkeypatch, tmp_path, frames, snapshot="unset"):
     monkeypatch.setattr(NvrRecordedSource, "_stop_load",
                         lambda self, chan: None)
     monkeypatch.setattr(NvrRecordedSource, "_fetch_window",
-                        lambda self, c, s, e, w: w / "window.ts")
+                        lambda self, c, s, e, w: w / "window.dav")
     monkeypatch.setattr(NvrRecordedSource, "_frame_hashes",
                         lambda self, p: list(frames))
     monkeypatch.setattr(NvrRecordedSource, "_snapshot_hash",
@@ -663,3 +663,36 @@ def test_the_default_library_lives_beside_the_cache_in_the_workdir(
 
     assert (tmp_path / "nvr_refs" / "ch3.json").exists(), \
         "the default library must land at <workdir>/nvr_refs/ch<N>.json"
+
+
+def test_a_truncated_download_is_discarded_not_ingested_short(
+        monkeypatch, tmp_path):
+    """Round-1 review minor 2 (dav-direct branch): a transfer killed by
+    --max-time (curl exit 28) leaves a partial .dav big enough to pass the
+    size gate — it must be discarded and retried, never returned as a
+    silently short clip."""
+    from va.sources.nvr import NvrRecordedSource
+
+    monkeypatch.setattr(NvrRecordedSource, "_conn",
+                        staticmethod(lambda: ("http://nvr.test", "u", "p")))
+    monkeypatch.setattr(NvrRecordedSource, "_stop_load", lambda self, c: None)
+    monkeypatch.setattr("va.sources.nvr.time", type("T", (), {
+        "sleep": staticmethod(lambda s: None)})())
+    calls = []
+
+    def fake_curl(self, url, out, max_time=60):
+        if "startLoad" not in url:
+            return 0
+        calls.append(url)
+        Path(out).write_bytes(b"x" * 5000)       # partial but past the gate
+        return 28                                 # curl: --max-time hit
+
+    monkeypatch.setattr(NvrRecordedSource, "_curl", fake_curl)
+    t0 = datetime(2026, 8, 10, 1, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 8, 10, 1, 1, tzinfo=timezone.utc)
+
+    got = NvrRecordedSource()._fetch_window(1, t0, t1, tmp_path)
+
+    assert got is None, "a truncated download must not be returned"
+    assert len(calls) == 4, "each attempt should retry, none should succeed"
+    assert not (tmp_path / "window.dav").exists(), "partial file cleaned up"
