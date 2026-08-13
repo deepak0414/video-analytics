@@ -62,23 +62,29 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   naive times = NVR clock tz, VA_NVR_TZ or system-local;
                                                             #   stored URI is canonical UTC; window capped at 120 s —
                                                             #   pull motion episodes, not raw hours).
-                                                            #   Same env as motion-probe; ONE loadfile session per
-                                                            #   window, verified lighting-independently: dHash
-                                                            #   self-consistency vs the pull's own consensus trims the
-                                                            #   §5d stale lead-in, and a per-channel ReferenceLibrary
-                                                            #   (<workdir>/nvr_refs/, survives cache wipes) rejects
-                                                            #   wholly-wrong-camera clips — so backfill of KNOWN modes
-                                                            #   works at night/any lighting. A mode the library hasn't
-                                                            #   seen is admitted only if it matches a LIVE snapshot
-                                                            #   (right camera, current lighting — how day-seeded
-                                                            #   channels acquire night mode near-real-time); matching
-                                                            #   neither refuses with recovery guidance, so backfilling
-                                                            #   a never-seeded mode under mismatched lighting fails
-                                                            #   closed. FIRST pull on an empty channel seeds UNVERIFIED
-                                                            #   (warned, only after the pull passes verification).
-                                                            #   Trim caveat: clips can be seconds shorter than the
-                                                            #   window and t=0 ≈ start_epoch only to ~1 s —
-                                                            #   PTS-accurate alignment is backlog.
+                                                            #   Same env as motion-probe; DETERMINISTIC pull: ONE
+                                                            #   loadfile session for a PADDED window (start-10 s ..
+                                                            #   end+2 s), then a PTS cut to the exact request — the
+                                                            #   fixed pre-pad absorbs the §5d seek lead-in (~1-2 s
+                                                            #   measured) and the cut discards it, so lighting never
+                                                            #   matters (validated 2026-08-12: 7/7 windows clean
+                                                            #   across deep-night IR through noon; repeat pulls
+                                                            #   byte-identical). Window identity is trusted from the
+                                                            #   request — the stored file is single-camera — so there
+                                                            #   is NO fingerprinting; a leftover <workdir>/nvr_refs/
+                                                            #   dir is vestigial and can be deleted. A duration sanity
+                                                            #   check (cut must decode, length within ±2 s of the
+                                                            #   window) retries the whole pull. RING-EDGE FALLBACK: at
+                                                            #   the ~6-day ring edge the pre-pad can predate surviving
+                                                            #   footage even though [start,end] lives, so a second
+                                                            #   phase re-pulls the EXACT window with no pad (aligned,
+                                                            #   purity 1.000); only if BOTH phases fail does it raise —
+                                                            #   fail closed, never a silently short clip. A window that
+                                                            #   stays unpullable holds its `va watch` watermark (below).
+                                                            #   Timeline caveat: t=0 ≈ start_epoch to ~1 s normally;
+                                                            #   a ring-edge partial-head pull can shift up to a few s
+                                                            #   before the fallback engages — PTS-accurate alignment
+                                                            #   is backlog.
                                                             #   SINGLE-recorder assumption: identity (source_key,
                                                             #   camera `nvr-ch<n>`) has no recorder id — repointing
                                                             #   VA_NVR_HOST at another NVR dedups/links wrongly
@@ -101,12 +107,12 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   SLA: the NVR ring keeps ~6 days — outages longer than
                                                             #   that are unrecoverable (watcher pulls what remains).
                                                             #   Cameras register on first nvr:// ingest of a channel.
-                                                            #   Known interaction: a backfill episode in a NEVER-seeded
-                                                            #   lighting mode refuses fail-closed (see nvr:// above),
-                                                            #   and the held watermark queues later episodes behind it
-                                                            #   until the live lighting rotates to match (≤ ~12 h,
-                                                            #   self-heals; loss only if wedged past the ~6-day ring —
-                                                            #   one refused device pull is burned per cycle meanwhile).
+                                                            #   Watermark interaction: a window that stays unpullable
+                                                            #   (both pull phases fail — genuinely gone, not just a
+                                                            #   missing pre-pad) holds this camera's watermark and
+                                                            #   aborts its pass, so episodes queued behind it can
+                                                            #   expire off the ring. Narrowed by the nvr:// exact-window
+                                                            #   fallback (which recovers ring-edge footage), not gone.
 .venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner wired, others → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use

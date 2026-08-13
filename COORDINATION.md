@@ -674,3 +674,40 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   dropped-chunk 10 s shift mode is gone. Live before/after: night 2→34 frames,
   0 chunks dropped; day 45→73 frames, detections 73→154. nvr-access-notes.md §5d
   carries the superseded-recipe annotation (file is untracked/local).
+- 2026-08-12 (NVR deterministic pull): **pad + PTS-cut replaces dHash verify-and-trim
+  + ReferenceLibrary.** `sources/nvr.py` pull path rewritten: fetch a PADDED window
+  ([start-10 s, end+2 s], one loadfile session as before, raw .dav read directly),
+  PTS-cut to exactly [PAD_PRE, PAD_PRE+window_len], then a deterministic sanity check
+  (cut must decode; duration within ±2.0 s of the requested window) with whole-pull
+  retries up to MAX_TRIES, then a fail-closed raise. Why: the 2026-08-11 design's
+  perceptual admission was still lighting-dependent at its edges and false-refused
+  correct footage — 11 dusk windows in the .va-24h backfill were right-camera footage
+  refused for a lighting mismatch. Validation against the real LNR608 (2026-08-12,
+  scratchpad detpull/): padded pull + PTS cut was clean in 7/7 windows across every
+  lighting mode (deep-night IR, morning, late-morning, noon, afternoon, late-evening,
+  late-night; max dHash-from-consensus ≤ 2 — night IR identical to noon); the same
+  window pulled twice was BYTE-IDENTICAL (frame spread 0: 676/676, 666/666, 646/646);
+  a real full-res PTS cut of a 20 s target measured exactly 20.0 s. The §5d seek
+  lead-in is a bounded head contamination (~1-2 s measured; single-request purity
+  1.000 over 300+ prior pulls), so the 10 s pre-pad discards it deterministically —
+  window identity is trusted from the request (the stored file is single-camera).
+  A clean no-seek whole-file read (RPC_Loadfile / loadfile-by-fileName) is blocked on
+  this 2017 firmware (all forms "Invalid Request"/400), which is why we still pull by
+  time and cut client-side. DELETED wholesale: `ReferenceLibrary`, `consensus_hash`,
+  `self_distances`, `longest_clean_run`, `dhash`, `hamming`, `_frame_hashes`,
+  `_snapshot_hash`, constants `DHASH_THRESH`/`FPS_SAMPLE`/`MIN_KEEP_S`/`UNDECODABLE`;
+  `_pull_window` lost its `refs` param (now `(chan, start, end, out_mp4)` — test
+  doubles updated). New: `PAD_PRE=10`/`PAD_POST=2`/`DURATION_TOL_S=2.0` and
+  `_probe_cut` (full decode to null muxer; duration from the decoder clock, never
+  file size). `<workdir>/nvr_refs/` is vestigial (it was a cache) — safe to delete;
+  no migration. The old lighting-mode refusal path (and its
+  watermark wedge) is gone, BUT the pull can still fail-closed at the ~6-day RING
+  EDGE: the pre-pad can predate surviving footage even though [start,end] lives.
+  So `_pull_window` runs two phases — PADDED, then an EXACT-WINDOW fallback (no
+  pad, aligned by construction, purity 1.000) — raising only if BOTH fail. A
+  window that stays unpullable (genuinely gone) still holds its `va watch`
+  watermark and aborts the camera's pass; the fallback NARROWS that interaction
+  (recovers ring-edge footage) rather than removing it (review round-1 finding).
+  A partially-available pre-pad can shift the clip a few seconds before the
+  fallback engages. Timeline caveat otherwise unchanged: t=0 ≈ start_epoch to
+  ~1 s. Offline suite: 724 passed / 2 skipped (re-verified after the two-phase fix).

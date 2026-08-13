@@ -1,11 +1,12 @@
-"""WS4.c — nvr_recorded chunk source: URI parsing, identity, verify-and-trim
-plumbing (pure functions), and the end-to-end ingest oracle with the DEVICE
-layer stubbed (a synthetic clip stands in for the pulled window; the live pull
-is validated separately against the real LNR608, like WS4.a2)."""
+"""WS4.c — nvr_recorded chunk source: URI parsing, identity, the deterministic
+pad + PTS-cut pull flow (device layer stubbed), and the end-to-end ingest
+oracle with the DEVICE layer stubbed (a synthetic clip stands in for the pulled
+window; the live pull is validated separately against the real LNR608, like
+WS4.a2)."""
 import json
 import shutil
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,10 @@ import yaml
 from va.contracts.video import SourceType
 from va.sources.base import resolve_source
 from va.sources.nvr import (
+    MAX_TRIES,
+    PAD_POST,
+    PAD_PRE,
     NvrRecordedSource,
-    longest_clean_run,
     parse_nvr_uri,
 )
 
@@ -121,14 +124,6 @@ def test_nvr_windows_default_to_the_security_profile():
 
 # --- pure pull plumbing ------------------------------------------------------
 
-def test_longest_clean_run_trims_stale_leadin():
-    # the measured signature: ~1 s stale lead-in (Hamming ~31-37), clean rest
-    hs = [31, 35, 8, 9, 7, 10, 9, 8]
-    assert longest_clean_run(hs) == (2, 7)
-    assert longest_clean_run([30, 29, 40]) is None          # nothing clean
-    assert longest_clean_run([5, 6, 30, 7, 8, 9]) == (3, 5)  # longest, not first
-
-
 def test_curl_argv_never_carries_credentials():
     # Round-2 review: creds on the argv are readable by any local user via the
     # process list during a pull; they must travel via `--config -` on stdin.
@@ -152,27 +147,190 @@ def test_curl_config_rejects_newlines_loudly():
         NvrRecordedSource._curl_config("admin", "pa\nss")
 
 
-def test_torn_frame_jpeg_reads_as_undecodable_not_a_crash(tmp_path):
-    # Round-5/6 review lineage + round-1 finding 3 of this branch: a >500-byte
-    # but corrupt frame JPEG (ffmpeg died mid-write) must be marked None —
-    # undecodable — rather than raise out of _frame_hashes, and it must NOT be
-    # an all-zeros hash, because all-zeros IS the real dhash of a dark/uniform
-    # frame. ffmpeg on the garbage ts writes no frames, so the pre-seeded
-    # corrupt jpg is exactly what the loop sees.
-    ts = tmp_path / "window.dav"
-    ts.write_bytes(b"not a video")
-    fdir = tmp_path / "window.frames"
-    fdir.mkdir()
-    (fdir / "f_0001.jpg").write_bytes(b"\xff\xd8" + b"x" * 700)
-    hs = NvrRecordedSource()._frame_hashes(ts)
-    assert hs == [None]
-
-
 def test_conn_requires_env(monkeypatch):
     for var in ("VA_NVR_HOST", "VA_NVR_USER", "VA_NVR_PASS"):
         monkeypatch.delenv(var, raising=False)
     with pytest.raises(RuntimeError, match="VA_NVR_HOST"):
         NvrRecordedSource._conn()
+
+
+# --- the deterministic pad + PTS-cut pull (2026-08-12) -----------------------
+# Validated against the real device: 7/7 windows across every lighting mode had
+# the target window clean behind a 10 s pre-pad, and the same window pulled
+# twice was byte-identical. The pull is now pure timestamp arithmetic plus a
+# duration sanity check — these tests pin that flow with the device stubbed.
+
+T0 = datetime(2026, 8, 10, 1, 0, 0, tzinfo=timezone.utc)
+T1 = datetime(2026, 8, 10, 1, 0, 30, tzinfo=timezone.utc)   # a 30 s window
+
+
+def _det_harness(monkeypatch, tmp_path, probe_durations=(30.0,)):
+    """_pull_window with everything device-shaped stubbed out.
+
+    `probe_durations` is what the cut sanity probe reports per attempt (the
+    last value repeats). Returns (src, out, fetches, cuts) where `fetches`
+    records the datetimes given to _fetch_window and `cuts` the offsets given
+    to _trim_encode.
+    """
+    monkeypatch.setattr(NvrRecordedSource, "_conn",
+                        staticmethod(lambda: ("http://nvr.test", "u", "p")))
+    monkeypatch.setattr(NvrRecordedSource, "_stop_load",
+                        lambda self, chan: None)
+    fetches, cuts, probes = [], [], list(probe_durations)
+
+    def fake_fetch(self, chan, start, end, work):
+        fetches.append((chan, start, end))
+        dav = work / "window.dav"
+        dav.write_bytes(b"d" * 4096)
+        return dav
+
+    def fake_cut(self, raw, a, b, part):
+        cuts.append((a, b))
+        part.write_bytes(b"x" * 4096)
+
+    def fake_probe(self, part):
+        return probes.pop(0) if len(probes) > 1 else probes[0]
+
+    monkeypatch.setattr(NvrRecordedSource, "_fetch_window", fake_fetch)
+    monkeypatch.setattr(NvrRecordedSource, "_trim_encode", fake_cut)
+    monkeypatch.setattr(NvrRecordedSource, "_probe_cut", fake_probe)
+    cache = tmp_path / "cache"
+    cache.mkdir(exist_ok=True)
+    return NvrRecordedSource(), cache / "out.mp4", fetches, cuts
+
+
+def test_pull_fetches_the_padded_bounds(monkeypatch, tmp_path):
+    """The fetch must ask the device for [start-PAD_PRE, end+PAD_POST] — the
+    pre-pad is what absorbs the §5d seek lead-in deterministically."""
+    src, out, fetches, _ = _det_harness(monkeypatch, tmp_path)
+
+    src._pull_window(1, T0, T1, out)
+
+    assert fetches == [(1,
+                        T0 - timedelta(seconds=PAD_PRE),
+                        T1 + timedelta(seconds=PAD_POST))]
+
+
+def test_cut_offsets_are_the_pad_and_pad_plus_window(monkeypatch, tmp_path):
+    """The PTS cut is timestamp arithmetic, not a fingerprint-derived bound:
+    exactly [PAD_PRE, PAD_PRE + window_len] into the padded pull."""
+    src, out, _, cuts = _det_harness(monkeypatch, tmp_path)
+
+    src._pull_window(1, T0, T1, out)
+
+    assert cuts == [(PAD_PRE, PAD_PRE + 30.0)]
+
+
+@pytest.mark.parametrize("bad_dur", [None, 5.0], ids=["undecodable", "short"])
+def test_a_bad_cut_is_retried_and_raises_after_both_phases(monkeypatch, tmp_path,
+                                                           bad_dur):
+    """A cut with no decodable frames, or one far shorter than the window,
+    retries the whole pull; when BOTH the padded phase AND the exact-window
+    fallback are exhausted it raises — fail closed, never a silently short
+    clip."""
+    src, out, fetches, cuts = _det_harness(monkeypatch, tmp_path,
+                                           probe_durations=(bad_dur,))
+
+    with pytest.raises(RuntimeError, match="neither a padded"):
+        src._pull_window(1, T0, T1, out)
+
+    assert len(fetches) == 2 * MAX_TRIES, "padded phase then exact-window phase"
+    assert len(cuts) == 2 * MAX_TRIES, "each attempt of each phase re-cuts"
+    assert not out.exists(), "a failed pull must never land a clip"
+
+
+def test_a_transiently_bad_cut_recovers_on_retry(monkeypatch, tmp_path):
+    src, out, fetches, _ = _det_harness(monkeypatch, tmp_path,
+                                        probe_durations=(None, 30.0))
+
+    src._pull_window(1, T0, T1, out)
+
+    assert out.exists()
+    assert len(fetches) == 2, "one failed attempt, then a clean re-pull"
+    # still the PADDED phase — the fallback only engages after MAX_TRIES fail
+    assert fetches[-1] == (1, T0 - timedelta(seconds=PAD_PRE),
+                           T1 + timedelta(seconds=PAD_POST))
+
+
+def test_falls_back_to_exact_window_when_the_padded_phase_is_exhausted(
+        monkeypatch, tmp_path):
+    """Ring-edge recovery: when the pre-pad predates available footage the
+    padded cut can never land, so after MAX_TRIES the pull re-fetches the EXACT
+    window [start,end] with NO pad and cuts [0, window_len] — aligned by
+    construction. This is the interaction that previously wedged a camera's
+    watermark; the fallback recovers footage the padded pull can't."""
+    # MAX_TRIES padded failures, then the exact-window attempt succeeds.
+    src, out, fetches, cuts = _det_harness(
+        monkeypatch, tmp_path,
+        probe_durations=tuple([None] * MAX_TRIES + [30.0]))
+
+    src._pull_window(1, T0, T1, out)
+
+    assert out.exists(), "the exact-window fallback must recover the pull"
+    assert len(fetches) == MAX_TRIES + 1
+    assert fetches[0] == (1, T0 - timedelta(seconds=PAD_PRE),
+                          T1 + timedelta(seconds=PAD_POST)), "phase 1 is padded"
+    assert fetches[-1] == (1, T0, T1), "fallback fetches the exact window, no pad"
+    assert cuts[-1] == (0.0, 0.0 + 30.0), "fallback cuts from offset 0"
+
+
+def test_a_good_pull_lands_out_mp4_atomically(monkeypatch, tmp_path):
+    """A validated cut is renamed into place; intermediates are cleaned up."""
+    src, out, _, _ = _det_harness(monkeypatch, tmp_path,
+                                  probe_durations=(29.1,))   # within ±2.0 s
+
+    src._pull_window(1, T0, T1, out)
+
+    assert out.exists() and out.stat().st_size > 0
+    leftovers = [p for p in out.parent.iterdir() if p != out]
+    assert leftovers == [], "the pull-private temp dir must be removed"
+
+
+def test_probe_cut_measures_a_real_clip_and_rejects_garbage(tmp_path):
+    """The sanity probe against reality: a real 6 s clip measures ~6 s; a
+    file with no decodable frames reads None (which fails the pull)."""
+    from va.media.synth import write_color_video
+
+    clip = write_color_video(tmp_path / "clip.mp4",
+                             [("grey", (128, 128, 128), 6.0)], fps=10)
+    dur = NvrRecordedSource()._probe_cut(Path(clip))
+    assert dur is not None and abs(dur - 6.0) <= 0.5
+
+    junk = tmp_path / "junk.mp4"
+    junk.write_bytes(b"z" * 5000)                # past the size gate, no video
+    assert NvrRecordedSource()._probe_cut(junk) is None
+    assert NvrRecordedSource()._probe_cut(tmp_path / "absent.mp4") is None
+
+
+def test_a_truncated_download_is_discarded_not_ingested_short(
+        monkeypatch, tmp_path):
+    """Round-1 review minor 2 (dav-direct branch): a transfer killed by
+    --max-time (curl exit 28) leaves a partial .dav big enough to pass the
+    size gate — it must be discarded and retried, never returned as a
+    silently short clip."""
+    monkeypatch.setattr(NvrRecordedSource, "_conn",
+                        staticmethod(lambda: ("http://nvr.test", "u", "p")))
+    monkeypatch.setattr(NvrRecordedSource, "_stop_load", lambda self, c: None)
+    monkeypatch.setattr("va.sources.nvr.time", type("T", (), {
+        "sleep": staticmethod(lambda s: None)})())
+    calls = []
+
+    def fake_curl(self, url, out, max_time=60):
+        if "startLoad" not in url:
+            return 0
+        calls.append(url)
+        Path(out).write_bytes(b"x" * 5000)       # partial but past the gate
+        return 28                                 # curl: --max-time hit
+
+    monkeypatch.setattr(NvrRecordedSource, "_curl", fake_curl)
+    t0 = datetime(2026, 8, 10, 1, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 8, 10, 1, 1, tzinfo=timezone.utc)
+
+    got = NvrRecordedSource()._fetch_window(1, t0, t1, tmp_path)
+
+    assert got is None, "a truncated download must not be returned"
+    assert len(calls) == 4, "each attempt should retry, none should succeed"
+    assert not (tmp_path / "window.dav").exists(), "partial file cleaned up"
 
 
 # --- the done-when oracle: ingest a pulled window end-to-end -----------------
@@ -339,360 +497,3 @@ def test_camera_get_or_create_is_atomic_and_never_clobbers(tmp_path):
     assert (created_a, created_b) == (True, False)
     assert b.name == "user renamed me"   # existing row untouched
     store.close()
-
-
-# --- lighting-independent verification (2026-08-10) --------------------------
-# The live-snapshot reference was rejecting good footage: measured on the real
-# device, a night window lost 3 of 4 chunks while the data itself scored purity
-# 1.000 against its own consensus. These pin the replacement.
-
-def _scene(seed: int, n: int = 64):
-    """A deterministic 64-bit 'scene' hash."""
-    import numpy as np
-    rng = np.random.default_rng(seed)
-    return rng.integers(0, 2, n, dtype=bool)
-
-
-def _shift(scene, bits: int):
-    """Same scene, `bits` bits different — simulates a lighting change."""
-    import numpy as np
-    out = np.array(scene, dtype=bool)
-    out[:bits] = ~out[:bits]
-    return out
-
-
-def test_consensus_ignores_a_contaminated_minority():
-    """Stale lead-in must not drag the reference toward itself."""
-    from va.sources.nvr import consensus_hash, hamming
-    real, junk = _scene(1), _scene(99)
-    frames = [junk, junk] + [real] * 10          # 2 bad frames at the head
-
-    cons = consensus_hash(frames)
-
-    assert hamming(cons, real) == 0, "consensus should be the majority scene"
-
-
-def test_self_distances_flag_the_lead_in_only():
-    from va.sources.nvr import longest_clean_run, self_distances
-    real, junk = _scene(2), _scene(77)
-    frames = [junk, junk] + [real] * 10
-
-    d = self_distances(frames)
-    run = longest_clean_run(d)
-
-    assert d[0] > 18 and d[1] > 18, "the contaminated head must read dirty"
-    assert run == (2, 11), f"the clean run should skip the lead-in, got {run}"
-
-
-def test_a_two_mode_library_judges_each_mode_against_its_own_entry(tmp_path):
-    """Library unit behavior: once both modes are held, each verifies against
-    its own entry (day->IR measured 38 bits apart, beyond the 18 gate). How a
-    second mode ENTERS the library in production is pinned separately below,
-    through _pull_window — building this state by hand proves nothing about
-    the shipped flow (CLAUDE.md 2026-08-08 lesson, review round 1)."""
-    from va.sources.nvr import ReferenceLibrary
-    lib = ReferenceLibrary(tmp_path / "refs")
-    day = _scene(3)
-    night = _shift(day, 38)                      # measured day->IR distance
-
-    lib.add(1, day)
-    ok_before, best_before = lib.accepts(1, night)
-    lib.add(1, night)
-    ok_after, _ = lib.accepts(1, night)
-
-    assert not ok_before and best_before == 38, "night must not match a day entry"
-    assert ok_after, "once seeded, night footage verifies against the night entry"
-    assert lib.accepts(1, day)[0], "and daylight still verifies"
-
-
-def test_library_is_per_channel_so_another_camera_is_refused(tmp_path):
-    """A pooled library would accept ch3's footage for a ch0 request — every
-    camera here is 'ours'. Keying per channel is what makes the check mean
-    anything."""
-    from va.sources.nvr import ReferenceLibrary
-    lib = ReferenceLibrary(tmp_path / "refs")
-    ch0, ch3 = _scene(4), _scene(5)              # different cameras
-    lib.add(0, ch0)
-    lib.add(3, ch3)
-
-    assert not lib.accepts(0, ch3)[0], "ch3's scene must not pass as ch0"
-    assert not lib.accepts(3, ch0)[0]
-    assert lib.accepts(0, ch0)[0] and lib.accepts(3, ch3)[0]
-
-
-def test_first_sight_seeds_and_is_reported_as_unverified(tmp_path):
-    from va.sources.nvr import ReferenceLibrary
-    lib = ReferenceLibrary(tmp_path / "refs")
-    s = _scene(6)
-
-    ok, best = lib.accepts(2, s)
-    assert ok and best is None, "an unseeded channel reports no comparison made"
-
-    lib.add(2, s)
-    assert lib.accepts(2, s) == (True, 0)
-
-
-def test_library_survives_a_corrupt_file(tmp_path):
-    """A cache must never break a pull — it is rebuildable by construction."""
-    from va.sources.nvr import ReferenceLibrary
-    lib = ReferenceLibrary(tmp_path / "refs")
-    lib.add(1, _scene(7))
-    (tmp_path / "refs" / "ch1.json").write_text("{ not json")
-
-    ok, best = lib.accepts(1, _scene(8))
-
-    assert ok and best is None, "unreadable library degrades to first-sight"
-
-
-def test_library_is_bounded_and_deduped(tmp_path):
-    from va.sources.nvr import ReferenceLibrary
-    lib = ReferenceLibrary(tmp_path / "refs")
-    base = _scene(9)
-    for _ in range(5):
-        lib.add(1, base)                          # same mode, repeatedly
-    assert len(lib.load(1)) == 1, "one entry per lighting mode, not per pull"
-
-    for i in range(1, ReferenceLibrary.MAX_PER_CHANNEL + 6):
-        lib.add(1, _shift(base, 20 + i))          # many distinct modes
-    assert len(lib.load(1)) <= ReferenceLibrary.MAX_PER_CHANNEL
-
-
-# --- the production pull flow (review round 1: findings must be pinned through
-# --- _pull_window itself, not through hand-built library states) -------------
-
-def _pull_harness(monkeypatch, tmp_path, frames, snapshot="unset"):
-    """A _pull_window call with everything device-shaped stubbed out.
-
-    `frames` is what _frame_hashes reports; `snapshot` is what the live
-    snapshot hashes to (None = snapshot unavailable). Returns (call, lib, out)
-    where call() runs the pull.
-    """
-    from va.sources.nvr import NvrRecordedSource, ReferenceLibrary
-
-    monkeypatch.setattr(NvrRecordedSource, "_conn",
-                        staticmethod(lambda: ("http://nvr.test", "u", "p")))
-    monkeypatch.setattr(NvrRecordedSource, "_stop_load",
-                        lambda self, chan: None)
-    monkeypatch.setattr(NvrRecordedSource, "_fetch_window",
-                        lambda self, c, s, e, w: w / "window.dav")
-    monkeypatch.setattr(NvrRecordedSource, "_frame_hashes",
-                        lambda self, p: list(frames))
-    monkeypatch.setattr(NvrRecordedSource, "_snapshot_hash",
-                        lambda self, chan, work: snapshot, raising=False)
-    monkeypatch.setattr(
-        NvrRecordedSource, "_trim_encode",
-        lambda self, raw, a, b, part: part.write_bytes(b"x" * 4096),
-        raising=False)
-
-    cache = tmp_path / "cache"
-    cache.mkdir(exist_ok=True)
-    lib = ReferenceLibrary(tmp_path / "nvr_refs")
-    out = cache / "out.mp4"
-    t0 = datetime(2026, 8, 10, 1, 0, tzinfo=timezone.utc)
-    t1 = datetime(2026, 8, 10, 1, 1, tzinfo=timezone.utc)
-    src = NvrRecordedSource()
-    return (lambda chan=1: src._pull_window(chan, t0, t1, out, lib)), lib, out
-
-
-def test_the_regression_a_night_pull_on_a_day_seeded_channel_verifies(
-        monkeypatch, tmp_path):
-    """THE REGRESSION, through the production path. Channel first seen in
-    daylight; a night pull must still be ingestable. The live snapshot (taken
-    at pull time, i.e. at night) vouches for the new mode — it is reliably the
-    right camera, and its lighting matches footage pulled near-real-time."""
-    day = _scene(3)
-    night = _shift(day, 38)                      # measured day->IR distance
-    call, lib, out = _pull_harness(monkeypatch, tmp_path,
-                                   frames=[night] * 12, snapshot=night)
-    lib.add(1, day)                              # channel was day-seeded
-
-    call()
-
-    assert out.exists(), "the night pull must produce a clip"
-    assert len(lib.load(1)) == 2, "the night mode must now be in the library"
-    assert lib.accepts(1, night)[0], "later night pulls verify off the library"
-
-
-def test_an_unknown_scene_matching_neither_library_nor_live_view_is_refused(
-        monkeypatch, tmp_path):
-    """Wrong-camera footage fails BOTH checks — that is what keeps the
-    snapshot fallback from weakening the identity gate."""
-    import pytest as _pytest
-    day, night = _scene(3), _shift(_scene(3), 38)
-    wrong_cam = _scene(55)
-    call, lib, out = _pull_harness(monkeypatch, tmp_path,
-                                   frames=[wrong_cam] * 12, snapshot=night)
-    lib.add(1, day)
-
-    with _pytest.raises(RuntimeError, match="neither"):
-        call()
-    assert not out.exists()
-    assert len(lib.load(1)) == 1, "a refused pull must not touch the library"
-
-
-def test_snapshot_unavailable_on_a_new_mode_refuses_with_guidance(
-        monkeypatch, tmp_path):
-    """Backfilling an unseen lighting mode with no live corroboration cannot
-    be verified — the error must tell the operator how to recover, because
-    the failure persists until the mode is seeded."""
-    import pytest as _pytest
-    day = _scene(3)
-    night = _shift(day, 38)
-    call, lib, _ = _pull_harness(monkeypatch, tmp_path,
-                                 frames=[night] * 12, snapshot=None)
-    lib.add(1, day)
-
-    with _pytest.raises(RuntimeError, match="nvr_refs"):
-        call()
-
-
-def test_a_failed_first_pull_does_not_poison_the_channel(monkeypatch, tmp_path):
-    """Review round 1 finding 4: seeding must happen only AFTER the pull
-    passes verification — a garbage first pull that dies on 'no clean run'
-    must leave the library empty, not become the channel's reference."""
-    import pytest as _pytest
-    garbage = [_scene(i) for i in range(12)]     # internally inconsistent
-    call, lib, _ = _pull_harness(monkeypatch, tmp_path,
-                                 frames=garbage, snapshot=None)
-
-    with _pytest.raises(RuntimeError, match="clean run"):
-        call()
-    assert lib.load(1) == [], "a failed pull must not seed the library"
-
-
-def test_first_sight_still_seeds_through_the_production_path(
-        monkeypatch, tmp_path):
-    night = _scene(4)
-    call, lib, out = _pull_harness(monkeypatch, tmp_path,
-                                   frames=[night] * 12, snapshot=None)
-
-    call()
-
-    assert out.exists()
-    assert len(lib.load(1)) == 1, "first sight seeds after a successful pull"
-
-
-def test_the_seed_comes_from_the_clean_run_not_the_contaminated_window(
-        monkeypatch, tmp_path):
-    """A first-sight pull WITH a stale lead-in must seed the scene the clean
-    run agrees on — not a consensus dragged by frames that were trimmed away."""
-    import numpy as np
-    from va.sources.nvr import hamming
-    real, junk = _scene(5), _scene(66)
-    call, lib, _ = _pull_harness(monkeypatch, tmp_path,
-                                 frames=[junk, junk] + [real] * 10,
-                                 snapshot=None)
-
-    call()
-
-    seeded = np.asarray(lib.load(1)[0], dtype=bool)
-    assert hamming(seeded, real) == 0, "the seed must be the clean run's scene"
-
-
-# --- undecodable frames (review round 1 finding 3: the all-zeros sentinel
-# --- IS the dhash of any dark/uniform frame, so it must not exist) -----------
-
-def test_undecodable_frames_read_dirty_even_on_dark_footage(monkeypatch,
-                                                            tmp_path):
-    """dhash of a black frame is all zeros. A torn frame must therefore carry
-    a marker that can NEVER equal a real hash — on night footage an all-zeros
-    sentinel would sit INSIDE the clean run and defeat the whole check."""
-    import numpy as np
-    from va.sources.nvr import longest_clean_run, self_distances
-    dark = np.zeros(64, dtype=bool)              # a real, valid night hash
-    frames = [None, None] + [dark] * 10          # 2 torn frames at the head
-
-    d = self_distances(frames)
-    run = longest_clean_run(d)
-
-    assert d[0] > 18 and d[1] > 18, "torn frames must read dirty on dark footage"
-    assert run == (2, 11), "the clean run must exclude the torn frames"
-
-
-def test_a_pull_of_mostly_undecodable_frames_is_refused(monkeypatch, tmp_path):
-    """Disk-full / mass decode failure must abort the pull — undecodable
-    frames do not count toward the 'enough to verify' floor, and a garbage
-    pull must never reach the library."""
-    import numpy as np
-    import pytest as _pytest
-    dark = np.zeros(64, dtype=bool)
-    frames = [None] * 10 + [dark] * 2            # only 2 real frames
-
-    call, lib, _ = _pull_harness(monkeypatch, tmp_path,
-                                 frames=frames, snapshot=None)
-
-    with _pytest.raises(RuntimeError, match="decodable"):
-        call()
-    assert lib.load(1) == []
-
-
-def test_an_unwritable_library_never_fails_a_finished_pull(tmp_path):
-    """Round-2 review minor 1: by seeding time the verified clip has already
-    landed — a failed library WRITE (read-only subtree, ENOSPC) must warn and
-    leave the channel unseeded, not raise out of _pull_window and fail an
-    ingest whose output is already cached. load() swallows corruption; add()
-    must match."""
-    from va.sources.nvr import ReferenceLibrary
-    blocker = tmp_path / "refs"
-    blocker.write_text("a file where the library dir should go")  # mkdir fails
-    lib = ReferenceLibrary(blocker)
-
-    lib.add(1, _scene(10))                           # must not raise
-
-    assert lib.load(1) == [], "the channel simply stays unseeded"
-
-
-def test_the_default_library_lives_beside_the_cache_in_the_workdir(
-        monkeypatch, tmp_path):
-    """Round-3 review minor: production never injects a library — fetch()
-    calls _pull_window with 4 args and the default derivation places it at
-    <workdir>/nvr_refs (BESIDE the transient cache/, which out_mp4 lives in,
-    so a cache wipe cannot reset every channel to first-sight trust). Nothing
-    else pins that location: if a refactor moved the cache dir, the library
-    would silently relocate, every channel would reset to unverified
-    first-sight, and pulls would keep succeeding."""
-    from va.sources.nvr import NvrRecordedSource
-    night = _scene(11)
-    # harness only for the stubs; its injected library goes UNUSED
-    _pull_harness(monkeypatch, tmp_path, frames=[night] * 12, snapshot=None)
-    out = tmp_path / "cache" / "out.mp4"
-    t0 = datetime(2026, 8, 10, 1, 0, tzinfo=timezone.utc)
-    t1 = datetime(2026, 8, 10, 1, 1, tzinfo=timezone.utc)
-
-    NvrRecordedSource()._pull_window(3, t0, t1, out)   # the production call shape
-
-    assert (tmp_path / "nvr_refs" / "ch3.json").exists(), \
-        "the default library must land at <workdir>/nvr_refs/ch<N>.json"
-
-
-def test_a_truncated_download_is_discarded_not_ingested_short(
-        monkeypatch, tmp_path):
-    """Round-1 review minor 2 (dav-direct branch): a transfer killed by
-    --max-time (curl exit 28) leaves a partial .dav big enough to pass the
-    size gate — it must be discarded and retried, never returned as a
-    silently short clip."""
-    from va.sources.nvr import NvrRecordedSource
-
-    monkeypatch.setattr(NvrRecordedSource, "_conn",
-                        staticmethod(lambda: ("http://nvr.test", "u", "p")))
-    monkeypatch.setattr(NvrRecordedSource, "_stop_load", lambda self, c: None)
-    monkeypatch.setattr("va.sources.nvr.time", type("T", (), {
-        "sleep": staticmethod(lambda s: None)})())
-    calls = []
-
-    def fake_curl(self, url, out, max_time=60):
-        if "startLoad" not in url:
-            return 0
-        calls.append(url)
-        Path(out).write_bytes(b"x" * 5000)       # partial but past the gate
-        return 28                                 # curl: --max-time hit
-
-    monkeypatch.setattr(NvrRecordedSource, "_curl", fake_curl)
-    t0 = datetime(2026, 8, 10, 1, 0, tzinfo=timezone.utc)
-    t1 = datetime(2026, 8, 10, 1, 1, tzinfo=timezone.utc)
-
-    got = NvrRecordedSource()._fetch_window(1, t0, t1, tmp_path)
-
-    assert got is None, "a truncated download must not be returned"
-    assert len(calls) == 4, "each attempt should retry, none should succeed"
-    assert not (tmp_path / "window.dav").exists(), "partial file cleaned up"
