@@ -48,16 +48,30 @@ class YoloWorldDetector:
         reliably triggers the mismatch, evict+rebuild recovers with no propagated crash, and the
         rebuilt model detects correctly (a car was detected before and after two rebuilds).
         """
+        rebuild = False
         try:
             self._model.set_classes(list(wanted))
-        except Exception as e:  # noqa: BLE001 — re-prime device mismatch; rebuild and retry once
+        except Exception as e:  # noqa: BLE001 — re-prime device mismatch (or memory pressure)
             # Not silent: a rebuild is a full weights reload (a per-change cost worth seeing), and
             # a non-device-mismatch failure (OOM, corrupt weights) surfaces here identically — log
             # the swallowed cause and the vocab transition before rebuilding so both are visible.
             prev = getattr(self._model, "_va_primed_classes", None)
+            # Log str(e), NOT e: a retaining log handler (pytest caplog, a MemoryHandler, a
+            # breadcrumb/aggregator) keeps the LogRecord — and passing the exception object stores
+            # it in record.args, whose traceback pins the evicted model's `self` frame, defeating the
+            # free-before-rebuild below. The message string carries the same information, no traceback.
             logging.getLogger(__name__).warning(
                 "YOLO-World re-prime failed (%s: %s); rebuilding model to change vocabulary "
-                "%s -> %s", type(e).__name__, e, list(prev) if prev else None, list(wanted))
+                "%s -> %s", type(e).__name__, str(e), list(prev) if prev else None, list(wanted))
+            rebuild = True
+        if rebuild:
+            # Rebuild OUTSIDE the except block. While `e` is alive its traceback strongly pins the
+            # evicted model — the failing set_classes frame's `self` IS that model — so dropping the
+            # reference inside the handler frees nothing (both copies stay resident through the
+            # rebuild). Once the except block has exited, `e` and its traceback are gone, so
+            # unload's gc/empty_cache can actually reclaim the old weights before MANAGER.get loads
+            # the replacement — otherwise a failure that was itself memory pressure re-OOMs here.
+            self._model = None
             MANAGER.unload(self._key)
             self._model = MANAGER.get(self._key, self._build)
             self._model.set_classes(list(wanted))

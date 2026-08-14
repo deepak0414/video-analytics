@@ -381,11 +381,16 @@ def _reprocess_object_detector(workdir: str, video_id: str) -> int:
         ]
         tracks = []
 
-    # Build fully, THEN write both stores — a mid-run failure leaves the prior rows intact and the
-    # role stays stale for a clean retry (rows-first invariant). A concurrent `va remove` during the
-    # (long, real-model) re-detect deletes the catalog row + dir; re-check RIGHT BEFORE the
-    # destructive replace_* so we don't re-insert rows for a removed video (matches reindex_visual).
-    # If it's gone, raise without writing — the executor leaves Roles 5/6 stale, nothing to restamp.
+    # Build fully, THEN write — a failure DURING the build (detect/track) leaves BOTH prior stores
+    # intact and the role stale for a clean retry (rows-first invariant). NB: the two replaces below
+    # are NOT one transaction (separate stores/connections, exactly as ingest writes them), so a
+    # failure BETWEEN them leaves detections and tracks transiently inconsistent until the retry;
+    # tolerable because no current query joins the two tables across that window (a single-connection
+    # transaction spanning both stores is a store-layer change for ingest+reprocess alike — deferred).
+    # A concurrent `va remove` during the (long, real-model) re-detect deletes the catalog row + dir;
+    # re-check RIGHT BEFORE the destructive replace_* so we don't re-insert rows for a removed video
+    # (matches reindex_visual). If it's gone, raise without writing — the executor leaves Roles 5/6
+    # stale, nothing to restamp.
     cat = Catalog(ws.catalog_db)
     try:
         still_present = cat.get(video.id) is not None

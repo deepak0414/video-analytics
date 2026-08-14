@@ -115,6 +115,51 @@ def test_reprime_device_crash_is_recovered_by_rebuild(monkeypatch, caplog):
     assert any("re-prime failed" in r.getMessage() for r in caplog.records)
 
 
+def test_reprime_rebuild_frees_old_model_before_reload(monkeypatch):
+    """On the recovery rebuild the evicted model's weights must be COLLECTABLE before the replacement
+    loads — else both copies are resident and a memory-pressure re-prime (the OTHER failure this
+    handler catches) can re-OOM. TWO things can pin the old model: a rebuild done INSIDE the `except`
+    (the live traceback's set_classes frame `self`), and logging the exception OBJECT (a retaining
+    handler keeps the record, whose args hold that traceback). We install our own retaining handler
+    (so this doesn't depend on pytest's log capture) and assert model #1 is actually DEAD (weakref)
+    once unload evicts it — this fails on EITHER regression, where a `det._model is None` proxy check
+    would not."""
+    import gc
+    import logging
+    import weakref
+
+    keep: list = []   # a retaining handler, like pytest caplog / a MemoryHandler / a breadcrumb log
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            keep.append(record)
+
+    lg = logging.getLogger("va.adapters.object_detector.yolo_world_inproc")
+    handler = _Keep()
+    lg.addHandler(handler)
+    try:
+        mgr = _install(monkeypatch, lambda: _FakeYolo(raise_on_reprime=True))
+        det = YoloWorldDetector(load={"device": "cpu"})
+        det.detect([_IMG], ["car"])              # primes model #1
+        ref1 = weakref.ref(mgr._cache["yoloworld::yolov8s-world.pt"])
+
+        seen: dict = {}
+        real_unload = mgr.unload
+
+        def spy_unload(key):
+            alive = real_unload(key)             # evict model #1 from the cache FIRST...
+            gc.collect()
+            seen["old_alive"] = ref1() is not None   # ...then: still pinned (traceback), or freed?
+            return alive
+
+        monkeypatch.setattr(mgr, "unload", spy_unload)
+        det.detect([_IMG], ["boat"])             # re-prime raises -> recovery rebuild
+        assert keep, "precondition: the re-prime warning was logged and retained"
+        assert seen["old_alive"] is False         # collected before reload (fails in-except OR log(e))
+    finally:
+        lg.removeHandler(handler)
+
+
 def test_detect_returns_one_list_per_image(monkeypatch):
     """Sanity: detect() returns one detection list per input image."""
     _install(monkeypatch, lambda: _FakeYolo(raise_on_reprime=False))
