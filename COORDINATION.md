@@ -711,3 +711,20 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   A partially-available pre-pad can shift the clip a few seconds before the
   fallback engages. Timeline caveat otherwise unchanged: t=0 ≈ start_epoch to
   ~1 s. Offline suite: 724 passed / 2 skipped (re-verified after the two-phase fix).
+- **2026-08-14 (WRITE PATH — reprocess extends to detection/tracking):** `va reprocess` now also
+  re-runs **`object_detector`** in place (`reprocess._reprocess_object_detector`) and rebuilds
+  **`object_tracker`** in the SAME pass (detection feeds tracking in one loop, as ingest does), so a
+  stale tracker is restamped via `_SATISFIES`, not re-run (2nd active edge alongside
+  vlm_captioner→text_embedder). It re-samples at the video's RECORDED fps — from `object_detector`
+  provenance, falling back to `visual_embedder` because the silent YOLO-World re-prime bug left the
+  detector unstamped on 231 of 238 `.va-24h` windows; an unknown fps is refused → `va reingest --fps`
+  — then builds fully and `replace_detections` + `replace_tracks` (rows-first: a mid-run failure
+  leaves prior rows intact and the role stays stale). Honors the tracker gate: a profile that
+  disables `object_tracker` while keeping the detector gets UNTRACKED detections (track_id NULL) +
+  ZERO tracks, same as ingest. Drops the ingest-era `appearance.npz` shard (its per-track payloads
+  would dangle after the track replace); new tracks carry `appearance_ref` NULL — Role-12 ReID
+  appearance is NOT re-captured on reprocess yet. **For the web agent (`va serve`):**
+  `object_detections`/`object_tracks` can now be replaced in place under a running server answering
+  `va objects`/`va count` — same replace-window/concurrency shape as the RPRC-1a/1b shard rebuilds.
+  Wires the 4th reprocess role; the remaining leaf roles (OCR, actions, STT/diarizer) still →
+  `va reingest`.
