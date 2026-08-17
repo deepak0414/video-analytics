@@ -3,13 +3,17 @@
 `plan_reprocess` resolves WHICH (video, role) pairs a reprocess would touch — the stale
 set from PROV-4 (`stale_report`), scoped by role/video/all-stale — WITHOUT mutating.
 `execute_reprocess` then re-runs each stale role that has an in-place reprocessor and
-restamps its provenance. `text_embedder`, `visual_embedder`, and `vlm_captioner` are wired
-so far (`reprocessable_roles()`); every other stale role is left for whole-video `va reingest`
+restamps its provenance. `text_embedder`, `visual_embedder`, `vlm_captioner`, and
+`object_detector` (which also rebuilds `object_tracker` in one pass) are wired so far
+(`reprocessable_roles()`); every other stale role is left for whole-video `va reingest`
 (D5 scope cap). The CLI runs the plan on `--dry-run` and executes otherwise. Dependency-aware
 (RPRC-2, `_SATISFIES`): when a provider's reprocess also rebuilds a dependent's artifact (re-
-captioning rebuilds the text index), the dependent is restamped without a redundant rebuild.
+captioning rebuilds the text index; re-detecting rebuilds the tracks), the dependent is
+restamped without a redundant rebuild.
 """
 from __future__ import annotations
+
+import logging
 
 from typing import Any, Optional
 
@@ -267,27 +271,176 @@ def _reprocess_vlm_captioner(workdir: str, video_id: str) -> int:
     return len(new_caps)
 
 
+def _drop_appearance_shard(ws, video) -> None:
+    """Delete the video's ingest-era appearance shard (`appearance.{npz,json}`) when detection/
+    tracking is reprocessed. Its payloads are keyed by track id and this reprocess replaces every
+    track, so leaving it strands dangling refs — Role-12 ReID (the shard's only consumer) would
+    surface phantom matches against deleted tracks. Ingest's retry path clears the same staleness.
+    Best-effort: shard bookkeeping must never fail the reprocess (the role already restamps on the
+    rows, which are written)."""
+    try:
+        video_dir = ws.video_dir(video.source_key, video.title)
+        for ext in ("npz", "json"):
+            (video_dir / f"appearance.{ext}").unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001 — bookkeeping, never fatal
+        logging.getLogger(__name__).warning(
+            "reprocess: could not drop stale appearance shard for %s: %s", video.id, e)
+
+
+def _reprocess_object_detector(workdir: str, video_id: str) -> int:
+    """Re-run Role 5 (detection) AND Role 6 (tracking) in place from the LOCAL media, replacing
+    both stores. The two are wired together because tracking consumes the detector's per-frame
+    output in a single pass (ingest does the same); reprocessing the detector therefore rebuilds
+    object_tracks too, so `_SATISFIES` restamps object_tracker instead of re-running it. Detection
+    density depends on the sampling fps, so re-sample at the fps the video was ingested at
+    (recorded provenance); an unknown fps refuses rather than silently changing density. Returns
+    detections written.
+
+    Honors the SAME tracker gate ingest does: object_tracker is independently gateable, so a
+    footage profile can disable it while keeping the detector. When the tracker is OFF, write
+    UNTRACKED detections (track_id NULL) and NO tracks — regenerating the tracks the profile
+    forbids would leave unstamped-and-disabled rows `va stale` excludes forever (no convergence)
+    and that `va count` would answer from.
+
+    Drops the ingest-era appearance.npz shard: its per-track payloads are keyed by track id, and
+    this reprocess replaces every track (the new tracks carry appearance_ref NULL, the unused
+    Role-12 ReID field), so the old shard's refs would all dangle — the exact staleness ingest's
+    retry path clears. Appearance is not re-captured on reprocess yet."""
+    from pathlib import Path
+
+    from va.media.frames import sample_frames
+    from va.registry import get_ingest_classes, get_object_detector, get_object_tracker
+    from va.storage.structured.detections import DetectionStore
+    from va.storage.structured.provenance_store import ProvenanceStore
+    from va.storage.structured.tracks import TrackStore
+
+    ws = Workspace(workdir)
+    cat = Catalog(ws.catalog_db)
+    try:
+        video = lookup_video(cat, video_id)
+    finally:
+        cat.close()
+    if video is None:
+        raise ValueError(f"video {video_id} not found — cannot reprocess object_detector")
+    if not video.local_path or not Path(video.local_path).exists():
+        raise ValueError(
+            f"video {video_id} media is not available locally ({video.local_path!r}) — "
+            f"cannot re-detect; use `va reingest`")
+    # object_detector may never have been stamped (that's the gap this fixes), so read the ingest
+    # density from a role that DID run on every window — the visual embedder shares the single-
+    # decode fps. Null-safe: a present-but-null fps row must NOT short-circuit the fallback (a
+    # prior reprocess of a never-stamped role can restamp fps NULL). Refuse if still unknown
+    # rather than change density (Roles 5/6 depend on it).
+    def _recorded_fps(pv, role):
+        rows = pv.get(video_id, role)
+        return rows[0]["fps"] if rows and rows[0]["fps"] is not None else None
+    pv = ProvenanceStore(ws.catalog_db)
+    try:
+        fps = _recorded_fps(pv, "object_detector") or _recorded_fps(pv, "visual_embedder")
+    finally:
+        pv.close()
+    if fps is None:
+        raise ValueError(
+            f"video {video_id} recorded fps is unknown — density can't be preserved; "
+            f"use `va reingest {video_id} --fps <N>`")
+
+    cfg = config_for(video.profile, video.source_type.value)
+    detector = get_object_detector(cfg)
+    classes = get_ingest_classes(cfg)
+
+    frames_dets: list = []
+    for batch in _batched(sample_frames(video.local_path, fps=fps), _VISUAL_BATCH):
+        images = [img for _, img in batch]
+        per_image = detector.detect(images, classes)
+        for (ts, _img), dets in zip(batch, per_image):
+            frames_dets.append((ts, dets))
+    if not frames_dets:
+        # Zero DECODED frames (one frames_dets entry per frame, regardless of detections) from a
+        # video that HAD them at ingest means the media broke silently — truncated/corrupt, opens
+        # but iterates nothing — the same input reindex_visual refuses. Replacing good detections/
+        # tracks with an empty rebuild while `va stale` reads clean is silent data loss, so fail
+        # BEFORE any write: the prior rows survive and the role stays stale for retry.
+        raise ValueError(
+            f"video {video.id} re-detect produced 0 frames — media may be corrupt; "
+            f"not replacing existing detections/tracks")
+
+    # Mirror ingest's tracker gate. A role ABSENT from config is enabled (the tracker getter
+    # tolerates that shape via its stub, and the gate must not be stricter than the getter it
+    # guards — same rule as ingest's _enabled).
+    tracker_on = "object_tracker" not in cfg.roles or cfg.role("object_tracker").enabled
+    if tracker_on:
+        result = get_object_tracker(cfg).track(video.id, frames_dets)
+        detections, tracks = result.detections, result.tracks
+    else:
+        # Tracker disabled by the profile: keep the detector's output UNTRACKED (track_id NULL,
+        # stamped with video_id/timestamp the tracker would otherwise set) and write ZERO tracks,
+        # purging any prior-attempt rows the profile forbids.
+        detections = [
+            d.model_copy(update={"video_id": video.id, "timestamp": ts})
+            for ts, dets in frames_dets for d in dets
+        ]
+        tracks = []
+
+    # Build fully, THEN write — a failure DURING the build (detect/track) leaves BOTH prior stores
+    # intact and the role stale for a clean retry (rows-first invariant). NB: the two replaces below
+    # are NOT one transaction (separate stores/connections, exactly as ingest writes them), so a
+    # failure BETWEEN them leaves detections and tracks transiently inconsistent until the retry;
+    # tolerable because no current query joins the two tables across that window (a single-connection
+    # transaction spanning both stores is a store-layer change for ingest+reprocess alike — deferred).
+    # A concurrent `va remove` during the (long, real-model) re-detect deletes the catalog row + dir;
+    # re-check RIGHT BEFORE the destructive replace_* so we don't re-insert rows for a removed video
+    # (matches reindex_visual). If it's gone, raise without writing — the executor leaves Roles 5/6
+    # stale, nothing to restamp.
+    cat = Catalog(ws.catalog_db)
+    try:
+        still_present = cat.get(video.id) is not None
+    finally:
+        cat.close()
+    if not still_present:
+        raise ValueError(f"video {video.id} was removed during reprocess — aborting re-detect")
+
+    det_store = DetectionStore(ws.catalog_db)
+    try:
+        det_store.replace_detections(video.id, detections)
+    finally:
+        det_store.close()
+    track_store = TrackStore(ws.catalog_db)
+    try:
+        track_store.replace_tracks(video.id, tracks)  # [] when tracker off; appearance_ref NULL
+    finally:
+        track_store.close()
+    # The replaced tracks orphan the ingest-era appearance shard (its payloads reference deleted
+    # track ids). Drop it — new tracks carry appearance_ref NULL, so nothing points into it.
+    _drop_appearance_shard(ws, video)
+    return len(detections)
+
+
 _REPROCESSORS = {
     "text_embedder": _reprocess_text_embedder,
     "visual_embedder": _reprocess_visual_embedder,
     "vlm_captioner": _reprocess_vlm_captioner,
+    "object_detector": _reprocess_object_detector,
 }
 
 # RPRC-2 dependency-aware invalidation. `_SATISFIES[provider]` = roles whose derived artifact the
 # provider's reprocess ALSO rebuilds, so they need only a restamp — not a redundant rebuild — when
-# both are stale in the same batch. One edge is active for in-place reprocess: re-captioning
-# (`vlm_captioner`) rebuilds the text index, bringing `text_embedder` current. The rest of the role
-# graph (R1->R4/5/6/7, R5->R6, R8->R9) involves roles that aren't in-place reprocessable — they go
-# through whole-video `va reingest`, which re-runs the pipeline and satisfies those deps wholesale.
+# both are stale in the same batch. Two edges are active for in-place reprocess: re-captioning
+# (`vlm_captioner`) rebuilds the text index, bringing `text_embedder` current, and re-detecting
+# (`object_detector`) rebuilds the tracks in one pass, bringing `object_tracker` current. The rest
+# of the role graph (R1->R4/5/6/7, R8->R9) involves roles that aren't in-place reprocessable — they
+# go through whole-video `va reingest`, which re-runs the pipeline and satisfies those deps wholesale.
 _SATISFIES = {
     "vlm_captioner": frozenset({"text_embedder"}),
+    # Detection and tracking rebuild in one pass: re-detecting also rewrites object_tracks, so a
+    # stale object_tracker in the same batch needs only a restamp, not a redundant re-run.
+    "object_detector": frozenset({"object_tracker"}),
 }
 
 
 def _dependency_ordered(roles):
     """Stale roles with dependency PROVIDERS first, so a provider's rebuild can satisfy its
-    dependents within the same batch (a light topological order; one active edge today:
-    vlm_captioner -> text_embedder)."""
+    dependents within the same batch (a light topological order; active edges today:
+    vlm_captioner -> text_embedder and object_detector -> object_tracker)."""
     return sorted(roles, key=lambda r: 0 if r in _SATISFIES else 1)
 
 

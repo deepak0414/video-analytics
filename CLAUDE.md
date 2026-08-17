@@ -113,7 +113,7 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   aborts its pass, so episodes queued behind it can
                                                             #   expire off the ring. Narrowed by the nvr:// exact-window
                                                             #   fallback (which recovers ring-edge footage), not gone.
-.venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner wired, others → `va reingest`)
+.venv/bin/va --workdir .va reprocess --all-stale --yes      # re-run stale roles in place (needs --yes to mutate; --dry-run to plan) (§6-b pillar B; text/visual embedders + captioner + object_detector (rebuilds object_tracker in the same pass) wired, others → `va reingest`)
 
 # run with the REAL models (SigLIP + Whisper) on GPU; downloads weights on first use
 VA_CONFIG_DIR=run-siglip/config .venv/bin/va --workdir .va ingest "<url>"

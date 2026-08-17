@@ -698,6 +698,22 @@ def _ingest_impl(
                 roles=[r for r in PROVENANCE_ROLES if r not in failed and r not in skipped],
                 cfg=cfg,
             )
+            # Reflect this ingest's degradations in ONE place, from the sets the roles above
+            # maintained. `failed` = best-effort roles that ERRORED and were left unstamped
+            # (the silent-gap case that hid the .va-24h detector loss); `skipped` = intentionally
+            # not run (profile-disabled / a disabled parent). Failures ALSO hit the app logger so
+            # they surface even when VA_TRACE is off — the very condition under which the gap went
+            # unnoticed; intentional skips stay trace-only (info) to avoid warning on every
+            # security ingest, which always skips the speech roles.
+            if failed:
+                trace("ingest", "degraded", f"best-effort roles failed: {sorted(failed)}",
+                      level="warn", roles=sorted(failed))
+                logging.getLogger(__name__).warning(
+                    "ingest %s degraded — roles failed and were left unstamped: %s",
+                    video.id, sorted(failed))
+            if skipped:
+                trace("ingest", "skipped-roles", f"intentionally skipped: {sorted(skipped)}",
+                      level="info", roles=sorted(skipped))
             # Stamp the video with this ingest's trace run_id (None when tracing is
             # off) so a later query/ask trace can point back at the ingest that
             # produced its data — and any degradations that ingest recorded.
