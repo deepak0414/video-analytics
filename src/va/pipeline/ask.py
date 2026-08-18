@@ -276,11 +276,17 @@ def ask(
 
         rendered = render_answer(answer, workdir)
 
-        # Deterministic facts are displayed deterministically: when a deep scan ran,
-        # lead with its code-counted numbers — a weak narrator (observed: qwen-7B
-        # said "10" while its own evidence said 19 distinct) can't hide them.
-        ds = [i for i in evidence.items if i.modality == "deep_scan_count"]
-        if ds and "CODE-COUNTED" not in rendered:
+        # Deterministic facts are displayed deterministically: when a deep scan
+        # or a typed aggregation ran, lead with the code-counted numbers — a
+        # weak narrator (observed: qwen-7B said "10" while its own evidence
+        # said 19 distinct) can't hide them. Aggregate counts first: they are
+        # the typed tier's exact answer to the question asked.
+        ds = ([i for i in evidence.items if i.modality == "aggregate_count"]
+              + [i for i in evidence.items if i.modality == "deep_scan_count"])
+        # Guard on THE chosen item's own line, not a generic "CODE-COUNTED"
+        # substring — a narrator quoting some OTHER code-counted line must not
+        # suppress the lead (review: aggregate + deep-scan on one question).
+        if ds and ds[0].content not in rendered:
             rendered = f"[{ds[0].content}]\n\n{rendered}"
         trace("ask", "answer", (rendered or "").splitlines()[0][:120] if rendered else "")
         return AskResult(

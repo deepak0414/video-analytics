@@ -7,9 +7,9 @@
 """
 from __future__ import annotations
 
-import re
 from typing import List
 
+from va.pipeline.aggregate import resolve_category
 from va.pipeline.paths import Workspace
 from va.storage.structured.detections import DetectionStore, ObjectSummary
 from va.storage.structured.tracks import DistinctCount, TrackStore
@@ -18,14 +18,12 @@ from va.storage.structured.tracks import DistinctCount, TrackStore
 def _classes(text: str) -> List[str]:
     """Candidate class names from query words — include singular forms so
     'birds' matches the detector class 'bird' (observed: plural query words
-    silently produced ZERO object evidence)."""
-    words = re.findall(r"[a-z0-9']+", text.lower())
-    out: List[str] = []
-    for w in words:
-        for candidate in (w, w.rstrip("s")):
-            if candidate and candidate not in out:
-                out.append(candidate)
-    return out
+    silently produced ZERO object evidence).
+
+    The logic lives in `pipeline.aggregate.resolve_category` (the typed-query
+    tier's category seam) — one source, so the two paths can never drift."""
+    categories, _source = resolve_category(text)
+    return categories
 
 
 def query_objects(text: str, workdir: str = ".va") -> List[ObjectSummary]:

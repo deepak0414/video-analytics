@@ -1,0 +1,29 @@
+# Typed-query tier golden (TQ1.h): the original failing question — a windowed
+# count over the 24 h NVR backfill — answered by CODE through the full
+# planner -> dispatch -> count path.
+#
+# Run against the .va-24h workdir:
+#   RUN_GOLDEN=1 VA_CONFIG_DIR=run-claude/config GOLDEN_WORKDIR=.va-24h \
+#       .venv/bin/pytest -m golden -k nvr24h -q
+#
+# Ground truth: hand-computed 2026-08-17 by INDEPENDENT direct SQL over
+# .va-24h object_tracks ⋈ videos (frame_count >= 2, absolute track start
+# inside Aug-11 2026 00:00–12:00 America/Los_Angeles = epochs
+# [1786431600, 1786474800)): nvr-ch2 = 55, nvr-ch1 = 22, TOTAL = 77.
+# NB what this pins: the TRACKER's raw-upper-bound number over the same rows
+# (a cross-check that planner->dispatch->SQL reproduces the hand SQL exactly)
+# — NOT a human count of real cars in the footage. No human has watched the
+# 12 h of video; a tracker over/under-count is invisible to this fixture.
+# Asserted exactly because the count path is deterministic SQL, not a model.
+video_id: nvr24h_aggregate
+source_key: "nvr:ch1:1786434359-1786434396"   # one Aug-11-morning chunk; gates on the workdir
+title: 24h NVR backfill — typed windowed count (Aug 11 morning cars)
+
+ask_questions:
+  - id: nvr24h-agg-cars-aug11-morning
+    question: "How many cars were seen between midnight and noon on August 11 2026, local time (America/Los_Angeles)?"
+    modality: aggregate_count
+    statistic: total
+    expected_min: 77
+    expected_max: 77
+    provenance: hand-sql-crosscheck   # hand SQL 2026-08-17 (ch2 55 / ch1 22); pins tracker output, not human footage truth

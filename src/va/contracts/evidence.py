@@ -25,6 +25,7 @@ MODALITY_ON_SCREEN_TEXT = "on_screen_text"  # Role 10 OCR line
 MODALITY_ACTION = "action"        # Role 7 recognized action
 MODALITY_OBJECT_COUNT = "object_count"  # Role 6 distinct-instance count
 MODALITY_CO_OCCURRENCE = "co_occurrence"  # Roles 5/6 temporal join (classes together)
+MODALITY_AGGREGATE_COUNT = "aggregate_count"  # typed-query tier windowed count (code-counted)
 
 
 class EvidenceItem(BaseModel):

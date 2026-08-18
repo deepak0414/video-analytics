@@ -60,6 +60,9 @@ but **must be calibrated on a first real run** and may be tuned per query.
 CODE-COUNTED statistic (`total_episodes`, `distinct_states`, …) lies within
 `[expected_min, expected_max]`. The narrator's prose is never asserted — only the
 deterministic numbers. Provenance `human-verified` = the user hand-counted the truth.
+An optional `modality:` per question picks WHICH code-counted evidence is asserted:
+`deep_scan_count` (default — the Tier-5b sweep) or `aggregate_count` (the typed-query
+tier's windowed track count; its item carries `total` and `per_camera` attributes).
 
 ```bash
 RUN_GOLDEN=1 VA_CONFIG_DIR=run-claude/config GOLDEN_WORKDIR=.va-shots \
@@ -77,6 +80,12 @@ ingested workdir); individual questions skip if their video isn't in the workdir
 - `model-regression` — pins behavior we observed from a validated real-model run (e.g.
   Whisper transcript lines we didn't independently hear). Weaker: tests *regressions*,
   not absolute truth. Use when frames can't verify the fact (audio).
+- `hand-sql-crosscheck` — the expected number was hand-computed by INDEPENDENT direct
+  SQL over the same stored rows the op queries (e.g. the `.va-24h` car count). Tests
+  that the full pipeline (planner → dispatch → SQL) reproduces the hand computation
+  exactly — NOT that the stored rows match reality (no human watched the footage; a
+  tracker over/under-count is invisible to such a fixture). Do NOT label these
+  `human-verified`.
 
 ## Status
 

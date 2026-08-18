@@ -587,4 +587,20 @@ def retrieve(
         "rerank_weight": RERANK_WEIGHT,
         "gate": applied[0] if len(applied) == 1 else applied,
     }
+
+    # Typed-query tier: deterministic windowed aggregation (code counts, the
+    # LLM narrates). Dispatched AFTER fusion/gate/cap on purpose — a
+    # code-counted fact does not compete with retrieval candidates on cosine
+    # relevance and must never be relevance-dropped or crowded out.
+    if plan.needs_aggregation:
+        from va.pipeline.aggregate import dispatch_aggregation
+
+        agg_items, agg_notes = dispatch_aggregation(plan.params or {}, workdir)
+        ev.items.extend(agg_items)
+        ev.notes.extend(agg_notes)
+        trace("retriever", "aggregation",
+              (agg_items[0].content if agg_items
+               else next(iter(agg_notes), "aggregation degraded")),
+              level=("info" if agg_items else "warn"),
+              items=len(agg_items))
     return ev

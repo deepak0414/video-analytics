@@ -8,6 +8,39 @@ from typing import Optional, Sequence
 from va.contracts.evidence import Evidence
 from va.roles.reasoner import Keyframe
 
+def _aggregation_tools_section() -> str:
+    """Render the needs_aggregation planner guidance FROM the tool registry
+    (pipeline.aggregate.AGGREGATION_TOOLS) — one source, so the prompt cannot
+    drift from the schemas the dispatcher validates against. Braces are doubled
+    because PLANNER_PROMPT goes through str.format."""
+    from va.pipeline.aggregate import AGGREGATION_TOOLS
+
+    ops = []
+    for name, tool in AGGREGATION_TOOLS.items():
+        schema = tool["parameters"]
+        req = set(schema.get("required", []))
+        params = ", ".join(
+            f"\"{p}\" ({'REQUIRED' if p in req else 'optional'}: "
+            f"{spec.get('description', spec.get('type', ''))})"
+            for p, spec in schema["properties"].items())
+        ops.append(f'  * "{name}" — {tool["description"]} Arguments: {params}')
+    lines = [
+        '- needs_aggregation: the query asks to COUNT or LIST detected objects '
+        'within an EXPLICIT time window on recorded footage ("how many cars '
+        'yesterday morning", "vehicles between midnight and noon on Aug 11"). '
+        'Code runs the count deterministically — never estimate the number '
+        'yourself. When set, also put an "aggregation" object inside "params" '
+        'with an "op" plus that op\'s arguments:',
+        *ops,
+        '  Derive start/end/tz from the question (tz is the footage locale, '
+        'IANA name). NEVER invent a window or timezone the question does not '
+        'let you infer — OMIT any argument you cannot ground in the question; '
+        'missing arguments degrade to an honest "not run" note, never a '
+        'guessed total.',
+    ]
+    return "\n".join(lines).replace("{", "{{").replace("}", "}}")
+
+
 PLANNER_PROMPT = """You are the query planner for a video search system. Decide which \
 retrieval tiers a user query needs. Available flags (set true only when useful):
 - needs_transcript_search: the query is about something SAID/spoken in the video
@@ -26,17 +59,25 @@ retrieval tiers a user query needs. Available flags (set true only when useful):
   "scan_target" inside "params": the thing to observe per frame, as a SHORT PLAIN
   NOUN PHRASE of 2-5 words taken from the query (e.g. "the girl's dress") — no
   parentheses, no examples, no style notes
+""" + _aggregation_tools_section() + """
 Also set "search_terms": short keywords for retrieval (drop question words).
 
 User query: {query}
 
 Respond with ONLY a JSON object, e.g.:
-{{"needs_caption_search": true, "needs_object_query": true, "needs_vlm_reasoning": true, "search_terms": "person red car"}}"""
+{{"needs_caption_search": true, "needs_object_query": true, "needs_vlm_reasoning": true, "search_terms": "person red car"}}
+or, for a windowed count:
+{{"needs_aggregation": true, "needs_object_query": true, "params": {{"aggregation": {{"op": "count_objects", "category": "car", "start": "2026-08-11T00:00", "end": "2026-08-11T12:00", "tz": "America/Los_Angeles"}}}}, "search_terms": "cars"}}"""
 
 REASONER_PROMPT = """You are answering a question about video content using retrieved \
 evidence and keyframe images. Be precise and conservative: claim only what the evidence \
 or images support. If several distinct instances answer the question (e.g. different \
 people at different times), report each as its own item.
+
+If the evidence contains an "aggregate_count" item, its number was computed \
+DETERMINISTICALLY IN CODE (a typed SQL count over object tracks in an explicit time \
+window) — state THAT number and its caveats; do NOT recount or estimate a different \
+total from the other items.
 
 If the evidence contains a "deep_scan_count" item, its numbers were computed \
 DETERMINISTICALLY IN CODE from an exhaustive frame scan — do NOT recount from the other \

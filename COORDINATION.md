@@ -728,3 +728,87 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   `va objects`/`va count` — same replace-window/concurrency shape as the RPRC-1a/1b shard rebuilds.
   Wires the 4th reprocess role; the remaining leaf roles (OCR, actions, STT/diarizer) still →
   `va reingest`.
+- **2026-08-17 (roles, typed-query tier TQ1.a):** New contracts module `src/va/contracts/aggregate.py`
+  (typed-query-tier-plan.md §3–§6): `TimeWindow{start,end,tz}` (tz REQUIRED + validated — blank or
+  unknown IANA zone rejects at model validation; `epoch_bounds()` computes NUMERIC UTC epoch bounds
+  in Python, never SQLite `strftime` text), `CountResult`, `ResolutionProvenance`, `EventRow`,
+  `Bucket`, `DedupMode`. Purely additive — nothing consumes them yet (the aggregation ops land in
+  `pipeline/aggregate.py` next). Evolution idiom matches query_plan.py/evidence.py (`extra="allow"`,
+  defaults, attributes bags). The two untracked design docs (typed-query-tier-plan.md +
+  typed-query-tier-loop.md) are committed alongside.
+- **2026-08-17 (roles, typed-query tier TQ1.b):** New `src/va/pipeline/aggregate.py` opens with the
+  category resolve-seam: `resolve_category(category) -> (categories, source)` — the SAME plural-strip
+  logic `pipeline.objects._classes` always applied, promoted to a named seam returning the provenance
+  source string ("plural-strip"). `_classes` now delegates to it (one source, parity pinned by a
+  table test). Behavior of `query_objects`/`count_objects` unchanged. Deliberately NO synonym
+  content ("vehicle" does not expand) — that is the human-gated TQ1.b2 / Role-12 taxonomy.
+- **2026-08-17 (roles, typed-query tier TQ1.c):** Windowed track selection landed. New storage
+  surface: `TrackStore.select_placed(classes, epoch_start, epoch_end, cameras=None) ->
+  list[PlacedTrack]` (`PlacedTrack{track, camera, first_seen_epoch, last_seen_epoch}` in
+  `storage/structured/tracks.py`) — tracks whose ABSOLUTE start (`videos.start_epoch + first_seen`)
+  falls in the half-open [start, end) epoch window; NULL-epoch (A-EV) videos skipped by
+  construction; TEXT bounds raise TypeError (SQLite orders numbers below text, so a
+  strftime('%s') bound silently matches nothing — the false-0 bug the tier exists to prevent,
+  pinned by test). New pipeline op `pipeline.aggregate.select_tracks(categories, window, workdir,
+  cameras)` — tz conversion happens once in Python via `TimeWindow.epoch_bounds()`. Additive; no
+  existing surface changed.
+- **2026-08-17 (roles, typed-query tier TQ1.d):** Identity resolve-seam landed in
+  `pipeline/aggregate.py`: `resolve_identities(tracks, mode, min_frames=2) -> IdentityResolution`
+  (`Entity{category, camera, first/last_seen_epoch, tracks}`). `mode="raw"` = one track per entity
+  after the min_frames flicker filter (parity with `TrackStore.distinct_counts` pinned by test);
+  `mode="instance"` is ACCEPTED but falls back to raw with an explicit no-ReID caveat —
+  `dedup_mode` provenance reports what actually RAN ("raw"), never the requested mode. Unknown
+  modes raise. Additive; Role-12 ReID later swaps only the body + provenance strings.
+- **2026-08-17 (roles, typed-query tier TQ1.e):** The windowed count op landed:
+  `pipeline.aggregate.count_objects(category, window, workdir, cameras=None, dedup="raw",
+  min_frames=2) -> CountResult` — the plan-§5 composition (resolve_category -> select_tracks ->
+  resolve_identities), filling total/per_camera/window-echo/ResolutionProvenance, three STANDING
+  caveats (raw-upper-bound, parked/"crossed"≠"present", start-only window membership), the
+  instance-fallback caveat when requested, a mixed-footage-workdir caveat via
+  `Catalog.footage_domains()` (done-only, reused per its convention), and one `EvidenceItem` per
+  counted entity (modality "object_count", track manifest in attributes). NB: same NAME as the
+  whole-corpus `pipeline.objects.count_objects` by design (the plan's op vocabulary), different
+  module + signature. Additive; nothing existing changed.
+- **2026-08-17 (roles, typed-query tier TQ1.f):** `pipeline.aggregate.list_events(category,
+  window, workdir, cameras, limit=100, dedup, min_frames)` (one `EventRow` per counted entity —
+  the rows BEHIND `count_objects`, same selection path so they cannot disagree; absolute order,
+  limit-capped) and `timeline_histogram(category, window, workdir, bucket="1h", cameras, dedup,
+  min_frames)` (per-bucket entity counts, zeros emitted; buckets are fixed absolute spans aligned
+  to window start — a '1d' bucket is 24 h, not a calendar day across DST; counts sum exactly to
+  the count op; bucket grammar `<int><s|m|h|d>`, 10k-bucket explosion guard). Named heuristics
+  flagged: default bucket "1h", MAX_HISTOGRAM_BUCKETS=10000. Additive.
+- **2026-08-17 (roles, typed-query tier TQ1.g — ⚠ touches shared cli.py, additive only):** New CLI
+  subcommand group `va aggregate {count,events,histogram} <category> --from <iso> --to <iso>
+  --tz <IANA> [--camera ...]* [--dedup raw|instance] [--min-frames N] [--limit N] [--bucket 1h]`
+  invoking the TQ1.e/f ops; prints the per-camera table / event rows / bucket chart plus
+  resolution provenance and caveats. Existing `va count` untouched (whole-corpus semantics
+  preserved). Shape decision recorded: a NEW subcommand group was the smaller-diff option vs
+  retrofitting window/tz flags onto `va count`. Ground-truth check on `.va-24h` reproduced the
+  hand-computed Aug-11 00:00–12:00 PDT car table exactly (ch2 55 / ch1 22 / 77 total,
+  frame_count>=2). CLAUDE.md commands block documents the new surface.
+- **2026-08-17 (roles, typed-query tier TQ1.h — ⚠ shared-contract additions, all
+  backward-compatible defaults):** Planner-integrated aggregation. `QueryPlan` gains
+  `needs_aggregation: bool = False` (args in `params["aggregation"]`: op + category/start/end/tz
+  [+cameras/dedup/min_frames/limit/bucket]); new evidence modality string `"aggregate_count"`;
+  `pipeline.aggregate.AGGREGATION_TOOLS` (JSON-schema registry) + `dispatch_aggregation(params,
+  workdir)` — validates args, runs the op, returns ONE summary EvidenceItem (verbatim
+  CODE-COUNTED content; full CountResult/rows/buckets in attributes) or degrades to an honest
+  "not run" note (never a fabricated number). `retrieve()` dispatches AFTER fusion/gate/cap
+  (code-counted facts are never relevance-gated); `assemble()` dispatches too; `ask()` now leads
+  the rendered answer with the aggregate CODE-COUNTED line (before deep-scan's, if both).
+  PLANNER_PROMPT is rendered FROM the registry (drift-guarded by test). Golden: harness
+  `test_golden_ask` gained an optional per-question `modality:` key (default `deep_scan_count`);
+  new fixture `tests/golden_queries/nvr24h_aggregate.yaml` asserts total==77 on `.va-24h`
+  (hand-SQL ground truth) — run with GOLDEN_WORKDIR=.va-24h. Web layer: unchanged endpoints;
+  polled ask answers may now begin with a "[CODE-COUNTED: ...]" line and notes may carry
+  "aggregation caveat: ..." entries.
+- **2026-08-17 (roles, typed-query tier — batch-review fix):** Windowed counts now DISCLOSE the
+  A-EV exclusion (a combined-commit review caught the silent false-zero: NULL-`start_epoch`
+  videos' tracks are invisible to any windowed count). New `TrackStore.window_anchoring(classes,
+  min_frames) -> WindowAnchoring{placed_videos, unplaced_tracks}`; `count_objects` leads caveats
+  with a NOT-APPLICABLE disclosure when the workdir has zero wall-clock-anchored done videos and
+  names the excluded matched-track count whenever un-anchored ones exist (also machine-readable
+  in `CountResult.attributes["window_anchoring"]`); planner dispatch DEGRADES to an honest note
+  (no "[CODE-COUNTED: 0]") on un-windowable workdirs and appends the exclusion NB to the
+  CODE-COUNTED line otherwise; `va aggregate` help + CLAUDE.md note it. Additive surfaces;
+  behavior change only in caveat/note text on affected workdirs.
