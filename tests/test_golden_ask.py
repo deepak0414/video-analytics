@@ -51,8 +51,13 @@ def test_golden_ask(doc, case):
         pytest.skip(f"{doc['video_id']} not ingested in {workdir}")
 
     res = ask(case["question"], workdir=workdir, k=15)
-    ds = [i for i in res.evidence.items if i.modality == "deep_scan_count"]
-    assert ds, f"deep scan did not run; notes={res.evidence.notes}"
+    # Which code-counted modality this question asserts: "deep_scan_count"
+    # (default, the Tier-5b sweep) or "aggregate_count" (the typed-query tier's
+    # windowed track count).
+    modality = case.get("modality", "deep_scan_count")
+    ds = [i for i in res.evidence.items if i.modality == modality]
+    assert ds, (f"no {modality} evidence produced; "
+                f"notes={res.evidence.notes}")
 
     stat = case["statistic"]
     value = ds[0].attributes.get(stat)

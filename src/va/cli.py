@@ -60,6 +60,88 @@ def _cmd_count(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_aggregate(args: argparse.Namespace) -> int:
+    """`va aggregate count/events/histogram` — the typed-query tier's CLI.
+
+    Prints the number TOGETHER with how it was derived (resolution provenance)
+    and its caveats — a count never ships without its method."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from pydantic import ValidationError
+
+    from va.contracts.aggregate import TimeWindow
+    from va.pipeline import aggregate as agg
+
+    def parse_dt(s: str) -> datetime:
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            raise SystemExit(f"unparseable time {s!r} (ISO 8601 wall-clock, "
+                             f"e.g. 2026-08-11T00:00 or '2026-08-11 00:00:30')")
+
+    try:
+        window = TimeWindow(start=parse_dt(args.start), end=parse_dt(args.end),
+                            tz=args.tz)
+    except ValidationError as e:
+        raise SystemExit(f"invalid window: {e}")
+    zone = ZoneInfo(window.tz)
+
+    def local(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, zone).isoformat()
+
+    # The canonical count runs for EVERY subcommand: its total is the
+    # untruncated number, and its caveats/provenance are the method — a number
+    # never prints without them (same every-op honesty as the dispatch path).
+    r = agg.count_objects(args.category, window, workdir=args.workdir,
+                          cameras=args.camera, dedup=args.dedup,
+                          min_frames=args.min_frames)
+
+    def print_method() -> None:
+        res = r.resolution
+        print(f"resolution: classes matched {res.categories_matched} "
+              f"(via {res.category_source}); dedup {res.dedup_mode} "
+              f"({res.dedup_source})")
+        for c in r.caveats:
+            print(f"caveat: {c}")
+
+    if args.agcmd == "count":
+        print(f"'{args.category}' from {local(window.epoch_bounds()[0])} "
+              f"to {local(window.epoch_bounds()[1])} [{window.tz}]:")
+        for cam in sorted(r.per_camera, key=lambda c: (-r.per_camera[c], c)):
+            print(f"  {cam:<14} {r.per_camera[cam]}")
+        print(f"  {'total':<14} {r.total}")
+        print_method()
+    elif args.agcmd == "events":
+        rows = agg.list_events(args.category, window, workdir=args.workdir,
+                               cameras=args.camera, limit=args.limit,
+                               dedup=args.dedup, min_frames=args.min_frames)
+        for row in rows:
+            cam = row.camera or "(no camera)"
+            print(f"{local(row.first_seen_epoch)}  {cam:<10} "
+                  f"'{row.category}'  {row.frames} frames  "
+                  f"track={row.track_id}")
+        shown = (f"all {len(rows)}" if len(rows) == r.total
+                 else f"first {len(rows)} of {r.total} (raise --limit for more)")
+        print(f"{r.total} event(s) — showing {shown}")
+        print_method()
+    else:  # histogram
+        try:
+            buckets = agg.timeline_histogram(
+                args.category, window, workdir=args.workdir, bucket=args.bucket,
+                cameras=args.camera, dedup=args.dedup, min_frames=args.min_frames)
+        except ValueError as e:  # bad bucket grammar / bucket-explosion guard
+            raise SystemExit(str(e))
+        peak = max((b.count for b in buckets), default=0)
+        for b in buckets:
+            bar = "#" * (0 if peak == 0 else round(20 * b.count / peak))
+            print(f"{local(b.bucket_start_epoch)}  {b.count:>5}  {bar}")
+        print(f"{sum(b.count for b in buckets)} total across "
+              f"{len(buckets)} bucket(s) of {args.bucket}")
+        print_method()
+    return 0
+
+
 def _cmd_objects(args: argparse.Namespace) -> int:
     from va.pipeline.objects import query_objects
 
@@ -582,6 +664,58 @@ def build_parser() -> argparse.ArgumentParser:
     pn.add_argument("--min-frames", type=int, default=2,
                     help="ignore tracks seen in fewer frames (flicker filter)")
     pn.set_defaults(func=_cmd_count)
+
+    pag = sub.add_parser(
+        "aggregate",
+        help="windowed, tz-aware object aggregation (typed query tier)",
+        description=(
+            "Deterministic aggregation over object tracks, bounded to an "
+            "explicit wall-clock window. --tz is REQUIRED: a count with no "
+            "timezone is ambiguous (the same window counted 111 local vs 147 "
+            "UTC on real footage). Every result prints its caveats — today's "
+            "counts are a raw upper bound (no cross-window/camera "
+            "re-identification, parked objects included, window membership by "
+            "track start). Only wall-clock-anchored videos can be windowed "
+            "(e.g. NVR ingests, which record start_epoch): standalone/edited "
+            "videos (YouTube, local files) have no clock anchor, are EXCLUDED, "
+            "and the exclusion is disclosed in the caveats — a workdir with "
+            "none prints NOT APPLICABLE rather than a bare 0; use `va count` "
+            "(whole-corpus) for such footage."))
+    agsub = pag.add_subparsers(dest="agcmd", required=True)
+
+    def _ag_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("category",
+                       help="object category as a DETECTOR CLASS NAME, e.g. "
+                            "'car' or 'person' (plurals ok: 'cars'; synonyms/"
+                            "hypernyms like 'vehicle' or 'people' do NOT map "
+                            "to classes until the Role-12 taxonomy)")
+        p.add_argument("--from", dest="start", required=True, metavar="WHEN",
+                       help="window start, ISO 8601 wall-clock (e.g. 2026-08-11T00:00)")
+        p.add_argument("--to", dest="end", required=True, metavar="WHEN",
+                       help="window end (exclusive), same format")
+        p.add_argument("--tz", required=True,
+                       help="IANA timezone the window is expressed in, e.g. "
+                            "America/Los_Angeles (REQUIRED — an unqualified "
+                            "count is meaningless)")
+        p.add_argument("--camera", action="append", default=None, metavar="CAM",
+                       help="restrict to a camera id, e.g. nvr-ch2 (repeatable; "
+                            "default: all cameras)")
+        p.add_argument("--dedup", choices=["raw", "instance"], default="raw",
+                       help="'instance' (cross-window ReID) is accepted but "
+                            "falls back to raw with a caveat until Role 12 lands")
+        p.add_argument("--min-frames", type=int, default=2,
+                       help="ignore tracks seen in fewer frames (flicker filter)")
+
+    pagc = agsub.add_parser("count", help="how many distinct tracks, per camera")
+    _ag_common(pagc)
+    page = agsub.add_parser("events", help="the rows behind a count, wall-clock placed")
+    _ag_common(page)
+    page.add_argument("--limit", type=int, default=100, help="max rows printed")
+    pagh = agsub.add_parser("histogram", help="counts per time bucket across the window")
+    _ag_common(pagh)
+    pagh.add_argument("--bucket", default="1h", metavar="WIDTH",
+                      help="bucket width: <int><s|m|h|d>, e.g. 1h, 30m (default 1h)")
+    pag.set_defaults(func=_cmd_aggregate)
 
     psv = sub.add_parser("serve", help="web UI: ingest + search from a browser")
     psv.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")

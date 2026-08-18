@@ -50,6 +50,20 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
 .venv/bin/va --workdir .va actions "driving" -k 5           # recognized actions (Role 7)
 .venv/bin/va --workdir .va objects "car person"             # object appearances (Role 5)
 .venv/bin/va --workdir .va count "car"                      # distinct instances (Role 6)
+.venv/bin/va --workdir .va aggregate count "car" --from 2026-08-11T00:00 --to 2026-08-11T12:00 \
+    --tz America/Los_Angeles [--camera nvr-ch2] [--dedup raw|instance] [--min-frames 2]
+                                                            # typed-query tier: WINDOWED, per-camera,
+                                                            #   tz-mandatory count over tracks (also
+                                                            #   `aggregate events` / `aggregate histogram
+                                                            #   --bucket 1h`); prints provenance + caveats
+                                                            #   (raw upper bound — no cross-window ReID).
+                                                            #   Pure SQL, no models; window membership =
+                                                            #   track START in [from, to). Windowed counts
+                                                            #   cover ONLY wall-clock-anchored videos (NVR
+                                                            #   ingests with start_epoch) — A-EV videos
+                                                            #   (YouTube/local) are excluded WITH a caveat;
+                                                            #   an all-A-EV workdir reads NOT APPLICABLE,
+                                                            #   never a bare 0 (use `va count` there).
 .venv/bin/va --workdir .va ask "what color is the car?"     # reasoned, cited answer (Role 11)
 .venv/bin/va --workdir .va remove "<uuid|source_key|url>"   # delete a video everywhere
 .venv/bin/va --workdir .va reingest "<...>"                 # re-process (model changes)
@@ -154,7 +168,12 @@ somewhere to park probability when nothing fits; when it wins, no event is store
 it left confident-correct labels intact (Ferrari 11/11 driving) while trimming the dresses
 montage from 29 → 23 borderline labels.
 
-**Role 11 (`va ask`)**: `pipeline/ask.py` runs plan (LLM call 1) → `assemble()` evidence →
+**Role 11 (`va ask`)**: since TQ1.h the planner can also select the **typed aggregation
+tier** — `QueryPlan.needs_aggregation` + `params["aggregation"]` (op + args, JSON-schemas in
+`pipeline/aggregate.py::AGGREGATION_TOOLS`, planner prompt rendered FROM that registry);
+`retrieve()`/`assemble()` dispatch to the windowed count/events/histogram ops, the rendered
+answer LEADS with the verbatim CODE-COUNTED line, and missing/invalid args degrade to an
+honest "not run" note — never a guessed total. `pipeline/ask.py` runs plan (LLM call 1) → `assemble()` evidence →
 keyframes at top moments (per-video `keyframes/` dirs) → reason (LLM call 2, sees images) →
 answer rendered with hyperlinked timestamps (YouTube `&t=` deep links). Deep-scan triggers
 are defense-in-depth: LLM planner (primary) + closed regex floor (weak-planner/offline

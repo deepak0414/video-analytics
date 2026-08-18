@@ -38,6 +38,12 @@ class QueryPlan(BaseModel):
     # Tier 5b: exhaustive frame sweep + code-side counting (architecture doc,
     # "Deep-Scan Escalation"). For counting-events/changes-over-time queries.
     needs_deep_scan: bool = False
+    # Typed-query tier (typed-query-tier-plan.md): deterministic windowed
+    # aggregation over object tracks ("how many cars on Aug 11 before noon").
+    # When set, the planner puts the op arguments in params["aggregation"]
+    # (see pipeline.aggregate.AGGREGATION_TOOLS for the schemas); missing or
+    # invalid arguments degrade to an evidence note, never a guessed total.
+    needs_aggregation: bool = False
 
     # Optional refinements the planner may emit; safe to omit.
     search_terms: Optional[str] = None     # rephrased terms for text searches

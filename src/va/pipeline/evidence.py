@@ -83,6 +83,15 @@ def assemble(plan: QueryPlan, workdir: str = ".va", k: int = 5) -> Evidence:
         finally:
             store.close()
 
+    # Typed-query tier: deterministic windowed aggregation (same dispatch the
+    # retriever uses; invalid/missing args degrade to a note, never a guess).
+    if plan.needs_aggregation:
+        from va.pipeline.aggregate import dispatch_aggregation
+
+        agg_items, agg_notes = dispatch_aggregation(plan.params or {}, workdir)
+        ev.items.extend(agg_items)
+        ev.notes.extend(agg_notes)
+
     # Requested-but-unavailable tiers: note them instead of failing.
     for flag, note in _UNAVAILABLE.items():
         if getattr(plan, flag, False):
