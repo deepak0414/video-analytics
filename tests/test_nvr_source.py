@@ -26,6 +26,14 @@ REPO_CONFIG = Path(__file__).resolve().parents[1] / "config"
 URI = "nvr://1/2026-08-01T12:00:00/2026-08-01T12:00:30"
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_main_stream(monkeypatch):
+    """The reingest/ingest oracles run the delivery-verification gate on cache
+    hits; an ambient VA_NVR_MAIN_STREAM (the documented operator setup) would
+    refuse the 64x64 synth clips as wrong-stream. Keep it out of these tests."""
+    monkeypatch.delenv("VA_NVR_MAIN_STREAM", raising=False)
+
+
 # --- URI + identity ----------------------------------------------------------
 
 def test_parse_uri_utc(monkeypatch):
@@ -194,6 +202,12 @@ def _det_harness(monkeypatch, tmp_path, probe_durations=(30.0,)):
     monkeypatch.setattr(NvrRecordedSource, "_fetch_window", fake_fetch)
     monkeypatch.setattr(NvrRecordedSource, "_trim_encode", fake_cut)
     monkeypatch.setattr(NvrRecordedSource, "_probe_cut", fake_probe)
+    # These tests exercise the fetch/cut/retry/fallback FLOW, not delivery
+    # verification (which needs real decoded frames and has its own tests in
+    # test_nvr_contamination.py). Stub the gate to pass-through so the fake
+    # 4 KB cut files here aren't decoded.
+    monkeypatch.setattr(NvrRecordedSource, "_verify_and_trim",
+                        lambda self, cut, chan, start, end: cut)
     cache = tmp_path / "cache"
     cache.mkdir(exist_ok=True)
     return NvrRecordedSource(), cache / "out.mp4", fetches, cuts
@@ -470,6 +484,60 @@ def test_reingest_survives_deleted_camera_and_keeps_epoch(tmp_path, monkeypatch,
     assert result is not None and result.video.ingest_status.value == "done"
     assert result.video.start_epoch == first.video.start_epoch
     assert any("no longer exists" in r.message for r in caplog.records)
+
+
+def test_fetch_sets_aside_a_verified_bad_cache_file_and_repulls(tmp_path, monkeypatch):
+    """A contaminated clip left in cache/ by pre-fix code (or preserved across a
+    reingest) must be VERIFIED when fetch() reuses it, not trusted. A rejected
+    cache clip is set aside (never trusted) and a fresh, re-verifying pull runs —
+    it must not dead-end the window while clean footage may still be on the ring."""
+    from va.media.synth import write_color_video
+
+    monkeypatch.setenv("VA_NVR_TZ", "UTC")
+    monkeypatch.setenv("VA_NVR_MAIN_STREAM", "2688x1520@20")   # cached 64x64 is wrong-stream
+    src = NvrRecordedSource()
+    resolved = src.resolve("nvr://1/2026-08-10T01:00:00/2026-08-10T01:00:06")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    key = resolved.source_key.replace(":", "_")
+    out = cache / (key + ".mp4")
+    write_color_video(out, [("grey", (128, 128, 128), 6.0)], fps=10)  # a "pre-fix" file
+
+    pulled = {}
+
+    def fake_pull(self, chan, start, end, out_mp4):     # a fresh, clean pull
+        write_color_video(out_mp4, [("grey", (128, 128, 128), 6.0)], fps=10)
+        pulled["called"] = True
+
+    monkeypatch.setattr(NvrRecordedSource, "_pull_window", fake_pull)
+
+    got = src.fetch(resolved, cache)
+
+    assert pulled.get("called"), "a rejected cache clip must trigger a fresh pull"
+    assert (cache / (key + ".rejected.mp4")).exists(), \
+        "the verified-bad cache clip is set aside, never trusted"
+    assert got.local_path == str(out)
+
+
+def test_fetch_reuses_a_verified_clean_cache_file(tmp_path, monkeypatch):
+    """The flip side: a clean cache hit is reused without a re-pull (the NVR ring
+    is short — reingest must not depend on the device)."""
+    from va.media.synth import write_color_video
+
+    monkeypatch.setenv("VA_NVR_TZ", "UTC")
+    src = NvrRecordedSource()
+    resolved = src.resolve("nvr://1/2026-08-10T01:00:00/2026-08-10T01:00:06")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    out = cache / (resolved.source_key.replace(":", "_") + ".mp4")
+    write_color_video(out, [("grey", (128, 128, 128), 6.0)], fps=10)
+
+    def dead_pull(self, chan, start, end, out_mp4):
+        raise AssertionError("must not re-pull a present cache file")
+
+    monkeypatch.setattr(NvrRecordedSource, "_pull_window", dead_pull)
+    got = src.fetch(resolved, cache)
+    assert got.local_path == str(out)
 
 
 def test_set_camera_rejects_unknown_camera(tmp_path):
