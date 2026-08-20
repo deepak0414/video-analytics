@@ -78,17 +78,50 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   pull motion episodes, not raw hours).
                                                             #   Same env as motion-probe; DETERMINISTIC pull: ONE
                                                             #   loadfile session for a PADDED window (start-10 s ..
-                                                            #   end+2 s), then a PTS cut to the exact request — the
-                                                            #   fixed pre-pad absorbs the §5d seek lead-in (~1-2 s
-                                                            #   measured) and the cut discards it, so lighting never
-                                                            #   matters (validated 2026-08-12: 7/7 windows clean
-                                                            #   across deep-night IR through noon; repeat pulls
-                                                            #   byte-identical). Window identity is trusted from the
-                                                            #   request — the stored file is single-camera — so there
-                                                            #   is NO fingerprinting; a leftover <workdir>/nvr_refs/
-                                                            #   dir is vestigial and can be deleted. A duration sanity
-                                                            #   check (cut must decode, length within ±2 s of the
-                                                            #   window) retries the whole pull. RING-EDGE FALLBACK: at
+                                                            #   end+2 s), then a PTS cut to the exact request, then a
+                                                            #   DELIVERY-VERIFICATION gate. Determinism is NOT
+                                                            #   correctness: the census in
+                                                            #   va-24h-data-integrity-investigation.md proved the
+                                                            #   pre-pad does NOT reliably absorb the §5d seek lead-in —
+                                                            #   the seek intermittently prepends a STALE (~7-day, ~1
+                                                            #   ring cycle) CROSS-CAMERA fragment that lands at t=0 of
+                                                            #   the CUT (30% of .va-24h clips carried one; 4 more were a
+                                                            #   wholly-foreign sub-stream), and ALL passed the duration
+                                                            #   check. The old "7/7 clean" validation was blind — it
+                                                            #   hashed `-vf fps=4` samples whose first frame isn't
+                                                            #   frame 0, so a 1-5-frame head was invisible. So window
+                                                            #   identity is now VERIFIED, not trusted: after the cut,
+                                                            #   the source-agnostic verifier (src/va/sources/verify.py,
+                                                            #   a PURE fn behind the sources/ seam) checks (1) the TRUE
+                                                            #   first frames (decoded by index) perceptually vs the
+                                                            #   clip's OWN body — a cross-camera lead-in is TRIMMED;
+                                                            #   (2) delivered resolution/fps vs the channel's main
+                                                            #   stream (env VA_NVR_MAIN_STREAM, e.g. "2688x1520@20";
+                                                            #   unset = check inactive) — a sub-stream is REJECTED;
+                                                            #   (3) the burned-in clock when a reader is injected
+                                                            #   (default none → OCR clock gate inactive; OCR-free
+                                                            #   guards still run). Head check is SELF-referential so it
+                                                            #   needs no persisted per-channel library; a leftover
+                                                            #   <workdir>/nvr_refs/ dir is vestigial and can be deleted.
+                                                            #   A duration sanity check (cut must decode, length within
+                                                            #   ±2 s) still runs but is NOT sufficient. A head that fails
+                                                            #   a check that RAN and can't be cleanly trimmed, or a
+                                                            #   wrong-stream delivery, FAILS the pull (fail closed).
+                                                            #   COVERAGE (honest, not a cure): cross-camera heads are
+                                                            #   trimmed; sub-streams are rejected ONLY when
+                                                            #   VA_NVR_MAIN_STREAM is set; but SAME-CAMERA WRONG-WEEK
+                                                            #   footage (~25 census clips + 21 same-view-different-day
+                                                            #   heads below the dHash band) is caught ONLY by the
+                                                            #   burned-in-clock gate, and NO default OCR reader ships yet
+                                                            #   (the clock gate is a tested, injectable seam). Per the
+                                                            #   census that reader is mandatory item 1 before a clean
+                                                            #   re-pull — until it lands, do NOT treat re-pulls as fully
+                                                            #   safe. Trim caveat: a sub-second foreign head is dropped,
+                                                            #   so t=0 then lags start_epoch by that much (within the
+                                                            #   ~1 s alignment caveat below); re-deriving start_epoch is
+                                                            #   backlog. Cache note: fetch() re-verifies an EXISTING
+                                                            #   cache/reingest clip too, so pre-gate files can't slip
+                                                            #   through. RING-EDGE FALLBACK: at
                                                             #   the ~6-day ring edge the pre-pad can predate surviving
                                                             #   footage even though [start,end] lives, so a second
                                                             #   phase re-pulls the EXACT window with no pad (aligned,

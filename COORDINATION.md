@@ -812,3 +812,30 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   (no "[CODE-COUNTED: 0]") on un-windowable workdirs and appends the exclusion NB to the
   CODE-COUNTED line otherwise; `va aggregate` help + CLAUDE.md note it. Additive surfaces;
   behavior change only in caveat/note text on affected workdirs.
+- **2026-08-19 (roles, NVR delivery-verification — ⚠ pull-contract change):** An `nvr://`
+  pull can now REJECT or TRIM a delivery on verification, not just on duration. New
+  source-agnostic seam `src/va/sources/verify.py`: a PURE, injectable
+  `verify_delivery(RequestedWindow, ObservedSignals, ExpectedProfile) -> DeliveryVerdict`
+  (accept | trim@k | reject) + extractor Protocols (`DeliveryVerifier`/`SignalExtractor`/
+  `TimestampReader`) + `DeliveryRejected`. `NvrRecordedSource` now takes optional
+  `verifier`/`timestamp_reader` (defaults: the pure verifier; no clock reader) and runs
+  `_verify_and_trim` after the PTS cut inside `_pull_window` — a rejected/unrecoverable
+  delivery is retried through both phases then FAILS CLOSED (the existing `RuntimeError`,
+  no clip landed). New env var `VA_NVR_MAIN_STREAM` ("WxH@fps", comma-separated; unset =
+  stream-identity check inactive). New reusable media primitive
+  `va.media.frames.first_frames(path, count)` (true first frames by index — fixes the
+  `-vf fps` sampler blindness) and synth helper `va.media.synth.write_frames_video`.
+  Addresses the `.va-24h` contamination (`va-24h-data-integrity-investigation.md`): the
+  census proved the pre-pad did NOT absorb the seek lead-in (30% cross-camera heads, 4
+  sub-stream clips, all passing the duration gate). COVERAGE is honest and partial —
+  cross-camera heads are trimmed and sub-streams rejected (when `VA_NVR_MAIN_STREAM` is
+  set), but SAME-CAMERA WRONG-WEEK footage (~25 census clips + 21 same-view heads below the
+  dHash band) is caught ONLY by the burned-in-clock gate, which ships as a tested,
+  injectable seam with NO default OCR reader — the census's mandatory item 1 before a clean
+  re-pull, deferred here. `fetch()` now also re-verifies an EXISTING cache/reingest clip so
+  pre-gate files can't bypass the gate. No change to `ingest()`/`resolve()` signatures or
+  the web contract — `ingest` still drives `fetching→processing→done/failed` and dedups on
+  `done`; a pull that fails verification surfaces as an ingest failure (status `failed`)
+  exactly like any other unpullable window. Backlog flagged in-code: the default OCR
+  clock-reader (item 1), re-deriving `start_epoch` after a head trim, per-channel
+  main-stream config, and the recorder-id/multi-NVR identity gap (pre-existing).

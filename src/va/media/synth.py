@@ -80,6 +80,30 @@ def write_boxes_video(
     return path
 
 
+def write_frames_video(
+    path: str | Path,
+    clips: Sequence[Tuple[np.ndarray, float]],
+    fps: int = 10,
+) -> Path:
+    """A clip stitched from explicit RGB frame arrays, each held for a number of
+    seconds. Unlike `write_color_video`, callers supply full HxWx3 frames — so a
+    segment can carry real spatial STRUCTURE (needed to make a perceptual hash
+    tell two segments apart; solid colours all hash alike). Used to fabricate a
+    foreign-head-plus-correct-body clip for delivery-verification tests.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = imageio.get_writer(str(path), fps=fps, macro_block_size=None)
+    try:
+        for frame, seconds in clips:
+            arr = np.asarray(frame, dtype=np.uint8)
+            for _ in range(int(round(seconds * fps))):
+                writer.append_data(arr)
+    finally:
+        writer.close()
+    return path
+
+
 def write_color_video(
     path: str | Path,
     segments: Sequence[Segment],

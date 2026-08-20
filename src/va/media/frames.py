@@ -68,6 +68,30 @@ def keyframes_for_spans(
     return [[frames[i] for i in idxs] for idxs in layout]
 
 
+def first_frames(path: str | Path, count: int = 8) -> list[Tuple[float, Image.Image]]:
+    """The TRUE first `count` decoded frames, by frame index, as (t, image).
+
+    Delivery verification must inspect the frames an indexer will actually
+    embed. An `ffmpeg -vf fps=N` resample does NOT start at the file's first
+    frame (its first output frame measured 28-39 dHash from the real t=0 on the
+    NVR clips), so a 1-5-frame foreign head at the very start of a pull was
+    invisible to it — the specific blindness that let cross-camera lead-ins
+    through (see `va-24h-data-integrity-investigation.md` §3.2). Decoding by
+    index sees frame 0."""
+    reader = imageio.get_reader(str(path))
+    meta = reader.get_meta_data()
+    src_fps = meta.get("fps") or 30.0
+    out: list[Tuple[float, Image.Image]] = []
+    try:
+        for idx, frame in enumerate(reader):
+            if idx >= count:
+                break
+            out.append((idx / src_fps, Image.fromarray(frame)))
+    finally:
+        reader.close()
+    return out
+
+
 def sample_frames(path: str | Path, fps: float = 1.0) -> Iterator[Tuple[float, Image.Image]]:
     """Yield frames at ~`fps`. Always yields at least the first frame."""
     reader = imageio.get_reader(str(path))
