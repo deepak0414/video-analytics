@@ -236,6 +236,9 @@ override any of these at the approval session):**
   *Deps:* TQ1.e, TQ1.f. *Done when:* CLI runs against `.va-24h` and reproduces the hand-computed
   Aug-11-local-morning car table (ch2 55 / ch1 22 / 77 total, `frame_count≥2`) — recorded in the
   digest as the ground-truth check; help text documents the tz requirement + caveats; suite green.
+  *(Update 2026-08-19: that 77 was the PRE-repair count. The `.va-24h` data-integrity repair removed
+  contaminated foreign-camera/stale heads; the repaired workdir now reads 72 (ch2 51 / ch1 21), which
+  the golden fixture `nvr24h_aggregate.yaml` pins — see `va-24h-data-integrity-investigation.md`.)*
   *NB:* `cli.py` is a `human-reviewed` critical path.
 - [R] **TQ1.h** Planner integration — a **tool/registry entry** for the aggregation ops
   (JSON-schema-described) that the Role-11 planner selects and fills; `retrieve()`/`ask()`
