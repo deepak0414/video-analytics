@@ -1111,7 +1111,13 @@ Design decisions (research + user decisions 2026-07-24/25):
 - **Recursion guard:** `agent-review.sh` exports `VA_AGENT_REVIEW=1`; every hook
   (post-commit, stop_gate) exits 0 when it is set, so the reviewer's own headless
   session — which runs in this same project directory with these same hooks — can
-  never trigger tests or a review of itself.
+  never trigger tests or a review of itself. A **second producer** sets the same
+  var by design: the `claude-code` reasoner backend
+  (`adapters/reasoner/claude_cli_inproc._sanitized_child_env`) puts `VA_AGENT_REVIEW=1`
+  in the environment of every headless `claude -p` child it spawns, so a `va ask` /
+  `va serve` planner child is hook-less too — it must never spawn a suite or a
+  review of the parent's working tree. So a headless child carrying the var is not
+  necessarily a reviewer session.
 - **Pre-push stays as the fail-closed backstop, near-free when redundant.** Headless
   review runs on the existing subscription login (same mechanism as the
   `claude-code` reasoner backend), so extra runs cost time, not money. Watch-item

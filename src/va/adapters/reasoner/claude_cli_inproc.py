@@ -12,9 +12,10 @@ rate limits and spawns a process per call. The production path is the
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 from uuid import UUID
 
 from va.adapters.reasoner.prompts import (
@@ -29,6 +30,35 @@ from va.adapters.reasoner.rule_inproc import RuleReasoner
 from va.contracts.evidence import Evidence
 from va.contracts.query_plan import Answer, QueryPlan
 from va.roles.reasoner import Keyframe
+
+
+# Env vars a headless ``claude -p`` child must NOT inherit: each would steer a
+# pytest suite the child spawns toward the real-model / golden path instead of the
+# stub, which is the whole storm. VA_CONFIG_DIR selects the real backends;
+# RUN_GOLDEN un-gates the GPU golden harnesses (and tells conftest to KEEP
+# VA_CONFIG_DIR); GOLDEN_WORKDIR points them at the ingested real-model workdir.
+_STORM_ENV_VARS = ("VA_CONFIG_DIR", "RUN_GOLDEN", "GOLDEN_WORKDIR")
+
+
+def _sanitized_child_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Environment for the headless ``claude -p`` child, with two deliberate edits.
+
+    - DROP the real-model / golden selectors (``_STORM_ENV_VARS``): the child (and
+      any pytest suite IT spawns, e.g. its own Stop gate) must load the stub
+      backends, not the real-model config the parent selected. A leaked real-model
+      or golden env turns those child suites glacial and flaky and lets them pile
+      into pytest "storms".
+    - SET ``VA_AGENT_REVIEW=1``: the post-commit recursion guard, so a reasoner
+      child never re-triggers the review workflow (the Stop gate honours it).
+
+    Pure — the caller's mapping is copied, never mutated — so it is unit-testable.
+    Defaults to the live ``os.environ``.
+    """
+    env = dict(os.environ if base is None else base)
+    for var in _STORM_ENV_VARS:
+        env.pop(var, None)
+    env["VA_AGENT_REVIEW"] = "1"
+    return env
 
 
 class ClaudeCliReasoner:
@@ -48,7 +78,8 @@ class ClaudeCliReasoner:
         if allow_read:
             cmd += ["--allowedTools", "Read"]
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=self.timeout
+            cmd, capture_output=True, text=True, timeout=self.timeout,
+            env=_sanitized_child_env(),
         )
         if proc.returncode != 0:
             raise RuntimeError(f"claude CLI failed: {proc.stderr[:300]}")
