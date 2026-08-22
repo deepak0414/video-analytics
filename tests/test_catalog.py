@@ -59,6 +59,44 @@ def test_failed_status_records_error(tmp_path):
     assert got.ingest_status is IngestStatus.failed and got.ingest_error == "boom"
 
 
+def test_quarantined_status_round_trips(tmp_path):
+    # A clip marked `quarantined` (deliberately excluded as contaminated, e.g. the
+    # .va-24h data repair) must survive read-back: `Catalog.list()` builds a `Video`
+    # per row via `IngestStatus(...)`, so an unmodelled status string raised ValueError
+    # and 500'd `va serve` / `va migrate-layout` on that workdir. Regression pin: list()
+    # returns the row WITH its quarantined status, visible (not silently dropped).
+    import sqlite3
+
+    db = tmp_path / "c.db"
+    cat = Catalog(db)                      # creates the schema
+    done, _ = cat.get_or_create(_resolved("ddddddddddd"))
+    cat.set_status(done.id, IngestStatus.done, mark_processed=True)
+    cat.close()
+
+    # Insert a quarantined row the way the repair did (raw — no enum path at write time).
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO videos (id, source_type, source_uri, source_key, ingest_status, "
+        "ingest_error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("11111111-1111-1111-1111-111111111111", "nvr_recorded",
+         "nvr://1/x", "nvr:ch1:quarantined", "quarantined",
+         "quarantined by data-repair: wholly-foreign substream", "2026-08-20T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    cat2 = Catalog(db)
+    try:
+        listed = cat2.list()              # must NOT raise
+        by_key = {v.source_key: v for v in listed}
+        assert "nvr:ch1:quarantined" in by_key
+        assert by_key["nvr:ch1:quarantined"].ingest_status is IngestStatus.quarantined
+        # the done row is still there and distinct from quarantined
+        assert by_key["ddddddddddd"].ingest_status is IngestStatus.done
+    finally:
+        cat2.close()
+
+
 def test_connect_uses_wal_and_applies_schema(tmp_path):
     from va.storage.structured.schema import connect
 

@@ -121,6 +121,40 @@ def test_non_done_video_scope_flags_reingest_not_current(tmp_path):
         plan_reprocess(wd, video=str(res.video.id))
 
 
+def test_quarantined_video_excluded_from_all_stale(tmp_path):
+    # a quarantined clip (deliberately excluded as contaminated) is not `done`, so an
+    # all-stale plan must never fan out onto it — even with a drifted role fingerprint.
+    from va.contracts.video import IngestStatus
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=2.0)
+    _make_stale(wd, res.video.id)                             # would be stale IF it were done
+    cat = Catalog(Workspace(wd).catalog_db)
+    try:
+        cat.set_status(res.video.id, IngestStatus.quarantined)
+    finally:
+        cat.close()
+    assert plan_reprocess(wd, all_stale=True) == []          # excluded from the batch
+
+
+def test_quarantined_video_scope_refuses_with_quarantine_message(tmp_path):
+    # naming a quarantined clip explicitly must NOT be routed to `va reingest` (which
+    # would re-admit the bad footage) — it gets a quarantine-specific refusal instead.
+    from va.contracts.video import IngestStatus
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    cat = Catalog(Workspace(wd).catalog_db)
+    try:
+        cat.set_status(res.video.id, IngestStatus.quarantined)
+    finally:
+        cat.close()
+    with pytest.raises(ValueError, match="quarantined"):
+        plan_reprocess(wd, video=str(res.video.id))
+
+
 def test_execute_reprocesses_text_embedder_and_clears_stale(tmp_path):
     # the wired role (text_embedder) re-runs in place and its provenance is restamped, so it
     # is no longer stale afterward — with rows/shard written BEFORE the restamp.

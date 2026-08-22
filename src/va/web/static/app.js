@@ -175,7 +175,9 @@ function pollJob(jobId) {
       loadVideos(); // the catalog row (status=failed) still appears in the list
     } else if (j.state === 'done') {
       const r = j.result || {};
-      pill.textContent = r.deduped
+      pill.textContent = r.ingest_status === 'quarantined'
+        ? 'quarantined — not searchable'
+        : r.deduped
         ? 'done (already ingested)'
         : `done — ${r.frames_indexed} frames, ${r.segments} segments, `
           + `${r.transcript_lines} transcript lines, ${r.detections} detections`;

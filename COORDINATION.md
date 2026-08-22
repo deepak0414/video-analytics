@@ -19,7 +19,7 @@ Function signatures + result fields actually consumed by `src/va/web/`:
 
 | Entry point | Consumed fields / semantics |
 |---|---|
-| `va.pipeline.ingest.ingest(uri, workdir, fps) -> IngestResult` | `.video`, `.deduped`, `.frames_indexed`, `.segments`, `.captioned_segments`, `.transcript_lines`, `.detections`; **idempotent** on `done`; sets catalog `ingest_status` through `fetching→processing→done/failed` |
+| `va.pipeline.ingest.ingest(uri, workdir, fps) -> IngestResult` | `.video`, `.deduped`, `.frames_indexed`, `.segments`, `.captioned_segments`, `.transcript_lines`, `.detections`; **idempotent** — a dedup no-op (`.deduped=True`) on both `done` and `quarantined`; sets catalog `ingest_status` through `fetching→processing→done/failed` (`quarantined` is set out-of-band, never by ingest) |
 | `va.pipeline.query.query(text, workdir, k) -> list[SearchHit]` | `.video_id`, `.source_uri`, `.timestamp`, `.score` |
 | `va.pipeline.caption.search_captions(text, workdir, k) -> list[CaptionHit]` | `.video_id`, `.start_time`, `.caption`, `.score` |
 | `va.pipeline.transcript.search_transcripts(text, workdir, k) -> list[TranscriptHit]` | `.video_id`, `.start_time`, `.speaker`, `.text`, `.score` |
@@ -839,3 +839,33 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   exactly like any other unpullable window. Backlog flagged in-code: the default OCR
   clock-reader (item 1), re-deriving `start_epoch` after a head trim, per-channel
   main-stream config, and the recorder-id/multi-NVR identity gap (pre-existing).
+- **2026-08-21 (roles, `IngestStatus.quarantined` — ⚠ new catalog status value the web
+  layer will now serialize):** Added a first-class `quarantined` member to
+  `contracts.video.IngestStatus` — a TERMINAL state for a clip deliberately excluded as
+  contaminated / wrong-footage (the `.va-24h` integrity repair marked 4 clips this way;
+  the WS-4 delivery verifier that fails-closed is the intended future writer). Before this,
+  `Catalog._from_row` did `IngestStatus(row)` and raised `ValueError` on the unmodelled
+  string, 500'ing `Catalog.list()` — and thus `va serve` GET `/api/videos`,
+  `va migrate-layout`, and the `va ask` deep-scan catalog fallback — on any workdir holding
+  a quarantined row. Now: `Catalog.list()`/`get*()` round-trip it; `/api/videos` returns
+  `ingest_status: "quarantined"` (web player already renders the status string — no crash,
+  distinct badge); `va stale`/`va reprocess --all-stale` EXCLUDE it (they already
+  done-filter, now reachable); an explicit `va reprocess --video <quarantined>` gets a
+  quarantine-specific refusal (NOT routed to `va reingest`, which would re-admit bad
+  footage); and a plain `va ingest` of a quarantined `source_key` is a terminal DEDUP no-op
+  (does not re-run roles / silently un-quarantine). The `va ingest` CLI prints
+  `[quarantined] … note: NOT searchable`, not `[already-ingested]`. Deliberate re-admission
+  is `va remove` + a fresh `va ingest` (a real re-pull) — NOT `va reingest`, which for an
+  `nvr_recorded` clip re-runs roles on the SAME preserved bytes and (with the stream
+  verifier inactive) would silently re-admit the contaminated footage. That danger is now
+  ENFORCED, not just documented: `manage.reingest_video` REFUSES a quarantined target with a
+  `ValueError` BEFORE the destructive `remove_video`, mirroring `plan_reprocess`'s refusal.
+  **Web contract addition (⚠ web layer):** the durable ingest job's `job.result` now carries
+  `ingest_status` (additive dict key), and `app.js` renders a quarantined dedup as
+  "quarantined — not searchable" instead of "done (already ingested)" — the same misreport
+  the CLI avoids. Enforcement is status + the row/shard purge the repair did: the read paths
+  do NOT yet filter on `ingest_status`, so a quarantined clip whose rows/shards survive stays
+  searchable — gating reads (or a `quarantine_video()` helper mirroring `remove_video` minus
+  the catalog delete) is future work for the WS-4 verifier writer. Additive: the `ingest`
+  `fetching→processing→done/failed` flow and the `done` dedup are unchanged; `quarantined`
+  is only ever set out-of-band today (data repair). No signature changes.

@@ -17,9 +17,22 @@ import sys
 def _cmd_ingest(args: argparse.Namespace) -> int:
     from va.pipeline.ingest import ingest
 
+    from va.contracts.video import IngestStatus
+
     result = ingest(args.uri, workdir=args.workdir, fps=args.fps, profile=args.profile)
-    status = "already-ingested" if result.deduped else "ingested"
-    if result.deduped and args.profile and result.video.profile != args.profile:
+    quarantined = result.video.ingest_status is IngestStatus.quarantined
+    status = "quarantined" if quarantined else "already-ingested" if result.deduped else "ingested"
+    if quarantined:
+        # A dedup no-op on a quarantined clip must NOT read as "already-ingested" (which
+        # implies searchable). Say it is excluded, and DON'T point at `va reingest`: for an
+        # NVR clip that re-runs roles on the SAME (contaminated) preserved bytes without a
+        # re-pull, silently re-admitting it. Deliberate re-admission is `va remove` + a fresh
+        # `va ingest` (a real re-pull), under the operator's hand.
+        print(f"note: this source is QUARANTINED (deliberately excluded — "
+              f"{result.video.ingest_error or 'contaminated / wrong footage'}); ingest is a "
+              f"no-op and it is NOT searchable. To re-admit deliberately: `va remove "
+              f"{args.uri}` then a fresh `va ingest {args.uri}`.")
+    elif result.deduped and args.profile and result.video.profile != args.profile:
         print(f"note: --profile {args.profile} NOT applied — video already ingested "
               f"under profile '{result.video.profile or '(pre-profile)'}'; "
               f"use `va reingest {args.uri} --profile {args.profile}` to change it")
@@ -255,7 +268,11 @@ def _cmd_remove(args: argparse.Namespace) -> int:
 def _cmd_reingest(args: argparse.Namespace) -> int:
     from va.pipeline.manage import reingest_video
 
-    result = reingest_video(args.workdir, args.video, fps=args.fps, profile=args.profile)
+    try:
+        result = reingest_video(args.workdir, args.video, fps=args.fps, profile=args.profile)
+    except ValueError as e:  # quarantined target refuses reingest (mirror _cmd_reprocess)
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     if result is None:
         print(f"no video matching {args.video!r}")
         return 1
