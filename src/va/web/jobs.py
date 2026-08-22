@@ -281,6 +281,10 @@ class IngestQueue(SerialQueue):
             job.video_id = str(res.video.id)
             job.result = {
                 "deduped": res.deduped,
+                # Distinguishes a quarantined dedup (deliberately excluded, NOT searchable)
+                # from a normal already-ingested dedup — the UI must not render both as
+                # "done (already ingested)" (mirrors the CLI's `[quarantined]` note).
+                "ingest_status": res.video.ingest_status.value,
                 "frames_indexed": res.frames_indexed,
                 "segments": res.segments,
                 "captioned_segments": res.captioned_segments,

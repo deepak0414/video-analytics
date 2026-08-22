@@ -76,7 +76,31 @@ def test_ingest_job_flow_and_video_list(client, tmp_path):
     again = _ingest(client, str(clip))
     assert again["state"] == "done"
     assert again["result"]["deduped"] is True
+    assert again["result"]["ingest_status"] == "done"   # distinguishes a normal dedup
     assert again["video_id"] == job["video_id"]
+
+
+def test_web_ingest_of_quarantined_reports_quarantined(client, tmp_path):
+    # A quarantined dedup through the web layer must carry ingest_status so the UI can
+    # render "quarantined — not searchable" instead of the misleading "already ingested".
+    from uuid import UUID
+
+    from va.contracts.video import IngestStatus
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    clip = _make_clip(tmp_path)
+    job = _ingest(client, str(clip))
+    assert job["state"] == "done"
+
+    cat = Catalog(tmp_path / ".va" / "catalog.db")
+    try:
+        cat.set_status(UUID(job["video_id"]), IngestStatus.quarantined)
+    finally:
+        cat.close()
+
+    again = _ingest(client, str(clip))
+    assert again["result"]["deduped"] is True
+    assert again["result"]["ingest_status"] == "quarantined"
 
 
 def test_ingest_failure_reports_error(client, tmp_path):

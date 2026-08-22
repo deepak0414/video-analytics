@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
-from va.contracts.video import SourceType, Video
+from va.contracts.video import IngestStatus, SourceType, Video
 from va.pipeline.paths import Workspace
 from va.storage.structured.catalog_sqlite import Catalog
 
@@ -104,6 +104,18 @@ def reingest_video(workdir: str, ident: str, fps: float = 1.0, profile: str | No
         catalog.close()
     if existing is None:
         return None
+    if existing.ingest_status is IngestStatus.quarantined:
+        # A quarantined clip was deliberately excluded (contaminated / wrong footage).
+        # reingest = remove + re-ingest, and for an nvr_recorded clip it re-runs roles on
+        # the SAME preserved bytes (parked in cache/, no re-pull) — so it would SILENTLY
+        # re-admit the exact bad footage the quarantine exists to keep out. Refuse BEFORE
+        # the destructive remove_video, mirroring plan_reprocess's refusal. Deliberate
+        # re-admission is a knowing two-step: `va remove` (drops the clip + its dir) then a
+        # fresh `va ingest` (a genuine re-pull, re-run through the delivery verifier).
+        raise ValueError(
+            f"video {ident!r} is quarantined (deliberately excluded as contaminated) — "
+            f"`va reingest` would re-admit it on the same bytes; use `va remove {ident}` "
+            f"then a fresh `va ingest` to re-pull deliberately")
     # Validate the target profile BEFORE the destructive removal: a typo'd
     # --profile (or a recorded profile whose yaml was renamed since ingest) must
     # fail here with the video's data intact, not after remove_video ran.

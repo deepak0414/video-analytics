@@ -234,6 +234,19 @@ def _ingest_impl(
             trace("ingest", "deduped", f"{resolved.source_key} already done")
             return IngestResult(video=video, deduped=True, frames_indexed=0)
 
+        if video.ingest_status is IngestStatus.quarantined:
+            # Terminal, like `done`: a quarantined clip was deliberately excluded
+            # (contaminated / wrong footage). A plain re-ingest must NOT silently
+            # re-run roles and flip it back to searchable — that would defeat the
+            # quarantine. Dedup no-op. NB the deliberate re-admission path is
+            # `va remove` + a fresh `va ingest` (a genuine re-pull), NOT `va reingest`:
+            # reingest of an nvr_recorded clip re-runs roles on the SAME preserved
+            # bytes (manage.py parks them in cache/, no re-pull) and — with the
+            # verifier's stream check inactive (VA_NVR_MAIN_STREAM unset) — would
+            # re-admit the exact contaminated footage this status exists to keep out.
+            trace("ingest", "deduped", f"{resolved.source_key} quarantined")
+            return IngestResult(video=video, deduped=True, frames_indexed=0)
+
         # Resolve the profile to RECORD: it must match what the roles actually run
         # under — roles self-load config, which applies roles.yaml
         # `active_footage_profile` — so the probe's resolution (explicit arg >

@@ -107,6 +107,29 @@ def test_non_done_video_is_skipped(tmp_path):
     assert stale_report(wd) == []                    # skipped despite missing provenance
 
 
+def test_quarantined_video_is_not_stale(tmp_path):
+    # a quarantined clip (deliberately excluded as contaminated) is NOT `done`, so it
+    # must never be selected for reprocess — even with drifted/absent provenance it must
+    # stay out of `va stale`, exactly like any other non-done row.
+    from va.contracts.video import IngestStatus
+    from va.storage.structured.catalog_sqlite import Catalog
+
+    wd = str(tmp_path / ".va")
+    res = ingest(str(_clip(tmp_path)), workdir=wd, fps=1.0)
+    pv = ProvenanceStore(Workspace(wd).catalog_db)        # drift a role — would be stale IF done
+    try:
+        pv.record(res.video.id, "ocr", "old-model", "STALE-FP")
+    finally:
+        pv.close()
+    cat = Catalog(Workspace(wd).catalog_db)
+    try:
+        cat.set_status(res.video.id, IngestStatus.quarantined)
+    finally:
+        cat.close()
+
+    assert stale_report(wd) == []                         # excluded despite the drift
+
+
 def test_unknown_role_raises_rather_than_reporting_all_stale(tmp_path):
     # an unstamped role (reasoner) or a typo would match no recorded row and mark EVERY
     # video stale — a confidently-wrong report. stale_report must reject it, not guess.

@@ -38,6 +38,15 @@ def test_video_from_resolved_carries_fields_and_defaults():
     assert v.id is not None and v.created_at is not None
 
 
+def test_quarantined_is_a_distinct_ingest_status():
+    # `quarantined` is a first-class terminal status (deliberately excluded /
+    # contaminated), parseable from its stored string and NOT conflated with
+    # `failed` or `done`.
+    assert IngestStatus("quarantined") is IngestStatus.quarantined
+    assert IngestStatus.quarantined.value == "quarantined"
+    assert IngestStatus.quarantined not in (IngestStatus.failed, IngestStatus.done)
+
+
 def test_frame_embedding_validates_and_casts_dtype():
     fe = FrameEmbedding(video_id=uuid4(), timestamp=3.5, vector=np.ones(768, dtype=np.float64))
     assert fe.vector.dtype == np.float32 and fe.vector.shape == (768,)

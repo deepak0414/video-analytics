@@ -66,7 +66,16 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   never a bare 0 (use `va count` there).
 .venv/bin/va --workdir .va ask "what color is the car?"     # reasoned, cited answer (Role 11)
 .venv/bin/va --workdir .va remove "<uuid|source_key|url>"   # delete a video everywhere
-.venv/bin/va --workdir .va reingest "<...>"                 # re-process (model changes)
+.venv/bin/va --workdir .va reingest "<...>"                 # re-process (model changes). NB a
+                                                            #   QUARANTINED clip (ingest_status
+                                                            #   `quarantined` — deliberately excluded
+                                                            #   contaminated/wrong footage, e.g. the
+                                                            #   .va-24h repair) is a DEDUP NO-OP on plain
+                                                            #   `va ingest` (prints `[quarantined]`, stays
+                                                            #   unsearchable); to re-admit deliberately use
+                                                            #   `va remove` + a fresh `va ingest` (a real
+                                                            #   re-pull) — NOT `va reingest`, which re-runs
+                                                            #   roles on the same preserved NVR bytes.
 .venv/bin/va --workdir .va stale                            # videos on an outdated model/config (§6-b)
 .venv/bin/va motion-probe "2026-08-02" "2026-08-03"         # query the MotionSource (WS-4; sidecar stub by default;
                                                             #   lnr-eventlog needs VA_NVR_HOST + VA_NVR_USER/PASS env;

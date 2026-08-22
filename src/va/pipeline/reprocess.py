@@ -68,6 +68,14 @@ def plan_reprocess(
         cat.close()
     if target is None:
         raise ValueError(f"no such video: {video!r} (expected a UUID, source_key, URL, or path)")
+    if target.ingest_status is IngestStatus.quarantined:
+        # A quarantined clip was deliberately excluded (contaminated / wrong footage). It
+        # has no role rows to reprocess, and it must NOT be routed to `va reingest` the way
+        # a merely-incomplete ingest is (re-pulling would re-admit the bad footage). Refuse
+        # with a quarantine-specific message so the operator makes that call explicitly.
+        raise ValueError(
+            f"video {video!r} is quarantined (deliberately excluded as contaminated) — "
+            f"nothing to reprocess; `va remove` it or re-pull deliberately if that was wrong")
     if target.ingest_status is not IngestStatus.done:
         # stale_report done-filters, so a non-done target yields an EMPTY plan that reads as
         # "already current" — misleading for a video the user explicitly named. An incomplete

@@ -27,6 +27,20 @@ class IngestStatus(str, enum.Enum):
     processing = "processing"
     done = "done"
     failed = "failed"
+    # Deliberately excluded from analytics: the media is contaminated / was
+    # rejected as not-the-requested-footage (e.g. a foreign sub-stream flagged by
+    # the .va-24h integrity repair). A terminal state, DISTINCT from `failed` (an
+    # ingest *error*, retryable) and from `done` (a completed, searchable ingest).
+    # Enforcement today is by STATUS + PURGE, not by status alone: this value keeps
+    # the clip out of the active/processable set (dedup no-op, and `va stale` /
+    # `va reprocess` skip it), but the read paths (query/caption/ocr/… gather) do
+    # NOT yet filter on ingest_status, so any role rows/vector shards left behind
+    # stay searchable. The clip is only truly dark once its rows/shards are also
+    # purged — which the .va-24h repair did. The NVR delivery verifier
+    # (`sources/verify.py`, WS-4) that fails-closed on a bad pull is the intended
+    # future writer; wiring it (and/or gating the read paths on status) is future
+    # work. Set out-of-band by data repair today.
+    quarantined = "quarantined"
 
 
 class VideoMetadata(BaseModel):
