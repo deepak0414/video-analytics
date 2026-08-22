@@ -2821,3 +2821,39 @@ rc 0, zero decodable frames) rather than a corrupt recording — which is a
 CONTAINER-SNIFF case, strengthening the "sniff, not decode gate" position.
 If the end-of-pass retries fail on the same windows, add the sniff and
 retract this dispute.
+
+## Dispute record — 2026-08-22, `feature/nvr-clock-gate-default-reader` round-3 major 1 (partially fixed, partially disputed)
+
+Finding: "HEAD_FRAMES=8 inspects only ~0.4 s, shorter than the same-camera
+wrong-week heads the new reader now detects, so clips with a GOOD body are
+REJECTED whole instead of trimmed; ... a live pull ... holds the camera
+watermark (multi-day stall)."
+
+MOSTLY ADDRESSED, one part disputed. Addressed: (a) the clock now inspects a
+~1.5 s span (`ocr_clock.CLOCK_HEAD_SECONDS` via `media.head_clock_frames`), so a
+wrong-week head that fits the window trims at its aligned tail; (b) the validation
+was made body-aware — `scripts/validate_clock_gate_va24h.py --real` now OCRs a body
+frame per reject and the claim was restated honestly (**211 accept / 5 trim / 22
+reject** over the true head frames, replacing the head-only "26, zero false-rejects"
+claim, which the finding rightly called unverified against the body).
+
+Disputed part: that rejecting a long-head clip is a defect ("must trim / stall").
+Measuring the real heads (dense OCR, `--real`) showed they are LONG — 1.95 s, 2.15 s,
+>3 s — NOT the ~0.5–1 s the finding (and the census) assumed from t<0.5 s Role-10
+rows. No practical inspection window trims all of them, and trimming 2–3 s discards
+the clip's onset. Crucially, a reject does NOT dead-end: `_pull_window` phase 1
+(padded, `start−10 s`) is exactly the seek that lands in ~7-day-stale ring content
+and produces the head; a phase-1 reject falls through to phase 2, the EXACT-WINDOW
+pull with NO pre-pad seek, which the census measured aligned/purity 1.000. So on a
+LIVE pull a long-head reject re-pulls the window CLEAN — a strictly BETTER result than
+a trimmed clip missing its onset, and it does not stall (phase 2 is aligned by
+construction, not a repeat of phase 1). The 19 "body-aligned" rejects in `.va-24h`
+are historical clips pulled by pre-gate code (phase 1 accepted, no fallback) and are
+off-ring, so they cannot be re-pulled — but they ARE contaminated (2–3 s wrong-week
+head), so excluding them is correct, not a false-reject. The `va reingest`
+destruction the finding's sibling (major 2) flagged is separately fixed
+(non-destructive restore on the cache-reverify path).
+
+Retract this dispute if a long-head window is observed where phase 2 (exact-window,
+no pad) ALSO delivers a wrong-week head — that would make reject a genuine stall and
+restore the case for in-place trimming. (Not reproducible on `.va-24h`: off-ring.)

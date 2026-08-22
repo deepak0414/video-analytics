@@ -315,6 +315,36 @@ def test_fetch_trims_a_foreign_head_in_an_existing_cache_file(tmp_path, monkeypa
                for _, img in first_frames(str(out), 3)), "cached head trimmed away"
 
 
+def test_fetch_restores_preserved_bytes_when_the_rejected_cache_clip_cannot_be_repulled(
+        tmp_path, monkeypatch):
+    """MAJOR-2 non-destruction: when an EXISTING cache clip fails verification and the
+    re-pull then fails (the window has rolled off the ring — e.g. `va reingest` of an
+    old contaminated clip), the preserved bytes must be RESTORED to the cache path, not
+    orphaned under `.rejected.mp4`. Uses a wrong-stream reject (non-trimmable) so the
+    except branch runs, and a re-pull that raises."""
+    monkeypatch.setenv("VA_NVR_TZ", "UTC")
+    monkeypatch.setenv("VA_NVR_MAIN_STREAM", "2688x1520@20")   # our 64x64 synth is a wrong stream
+    src = NvrRecordedSource(timestamp_reader=None)             # stream gate alone; no OCR
+    resolved = src.resolve("nvr://1/2026-08-10T01:00:00/2026-08-10T01:00:06")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    out = cache / (resolved.source_key.replace(":", "_") + ".mp4")
+    write_frames_video(out, [(BODY, 6.0)], fps=10)
+    before = out.read_bytes()
+
+    def dead_pull(self, *a):
+        raise RuntimeError("window rolled off the ~6-day ring")
+
+    monkeypatch.setattr(NvrRecordedSource, "_pull_window", dead_pull)
+
+    with pytest.raises(RuntimeError):
+        src.fetch(resolved, cache)
+
+    assert out.exists(), "preserved bytes restored to the cache path, not orphaned"
+    assert out.read_bytes() == before, "the exact preserved bytes are back in place"
+    assert not out.with_suffix(".rejected.mp4").exists(), "no orphaned .rejected.mp4"
+
+
 class _StubClockReader:
     """A burned-in-clock reader stand-in (no OCR). It reports a 7-day-stale head
     then aligned frames on the original cut, and — because a real reader re-reads

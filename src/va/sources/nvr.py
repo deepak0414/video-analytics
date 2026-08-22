@@ -138,6 +138,25 @@ DURATION_TOL_S = 2.0  # the cut must land within this of the requested window
 HEAD_FRAMES = 8       # true first frames inspected; the census head was 1-5 frames
 IDENTITY_MAX_DHASH = 20   # head-vs-body dHash: same-camera <=18, cross-camera >=24
 CLOCK_TOL_S = 5.0     # burned-in clock skew that still counts as aligned
+# When a burned-in-clock READER is active the clock signal is a COARSE OCR read.
+# Two error sources must be TOLERATED, not rejected: (1) legitimate loadfile
+# alignment DRIFT, which reaches ~56 s (census "drift" band, GOOD footage); and
+# (2) a CONSISTENT OCR time-field substitution — RapidOCR errs the same way across
+# the near-identical head (the reason the `\d{2}` parse fix exists), so a misread
+# minute/hour digit, or an AM/PM flip (12 h), would otherwise be a confident,
+# agreeing, all-foreign REJECT of good footage. The only GENUINE contamination is a
+# stale ring fragment, a full cycle (~7 days) off — the census "foreign" band is
+# |Δ| >= 12 h with nothing between 56 s and there. So the OCR-path tolerance sits just
+# ABOVE the largest benign error and far below the foreign band. The largest benign
+# error is a consistent AM/PM flip (exactly 12 h) COMBINED with legitimate drift (up to
+# 56 s in the same direction) = ~12 h + 56 s; a plain 12 h tolerance tests `> 12 h` and
+# would REJECT that flipped-and-drifted GOOD clip, so the tolerance carries a 5 min
+# margin over 12 h. It still forgives every within-12 h OCR misread (and a 1 h DST
+# fall-back fold error) while catching wrong-day/wrong-week (~13x below the ~7-day
+# foreign band). Without a reader `clock` is empty and this is unused; the pure
+# verifier's own default stays CLOCK_TOL_S for callers that build their own ExpectedProfile.
+CLOCK_OCR_TOL_S = 12 * 3600.0 + 300.0   # 12 h (AM/PM flip) + drift margin; still
+                                        # ~13x below the ~7-day foreign band
 MIN_KEPT_S = 1.0      # a head trim must leave at least this much footage
 
 
@@ -224,14 +243,27 @@ def _parse_main_stream(spec: Optional[str]) -> Optional[frozenset]:
     return frozenset(profiles)
 
 
+# Sentinel: "no reader argument given" — distinct from an explicit None (gate off),
+# so a bare NvrRecordedSource() auto-wires the default clock reader.
+_AUTO_READER = object()
+
+
 class NvrRecordedSource:
-    def __init__(self, verifier=verify_delivery, timestamp_reader=None):
+    def __init__(self, verifier=verify_delivery, timestamp_reader=_AUTO_READER):
         """`verifier` and `timestamp_reader` are the injectable delivery-
         verification seam (sources/verify.py). The default verifier is the pure
-        `verify_delivery`; `timestamp_reader` is the burned-in-clock extractor —
-        None (the default) leaves the OCR-dependent clock gate inactive while the
-        OCR-free head-identity and stream-identity defences still run."""
+        `verify_delivery`; `timestamp_reader` is the burned-in-clock extractor.
+
+        `timestamp_reader` left unset AUTO-WIRES the default OCR clock reader
+        (`ocr_clock.default_timestamp_reader()` — active when the `[ocr]` extra is
+        importable and `VA_NVR_CLOCK_GATE` is not disabled; None otherwise). Passing
+        an explicit reader injects it; passing None forces the clock gate OFF while
+        the OCR-free head-identity and stream-identity defences still run."""
         self._verifier = verifier
+        if timestamp_reader is _AUTO_READER:
+            from va.sources.ocr_clock import default_timestamp_reader
+
+            timestamp_reader = default_timestamp_reader()
         self._timestamp_reader = timestamp_reader
 
     def resolve(self, uri: str) -> ResolvedVideo:
@@ -289,7 +321,18 @@ class NvrRecordedSource:
                 logger.warning(
                     "nvr ch%d: cached clip failed delivery verification (%s) — "
                     "set aside as %s and re-pulling", chan, exc, aside.name)
-                self._pull_window(chan, start, end, out)
+                try:
+                    self._pull_window(chan, start, end, out)
+                except Exception:
+                    # The re-pull failed — typically the window has rolled off the
+                    # ~6-day ring, e.g. `va reingest` of an old preserved clip whose
+                    # head is a same-camera wrong-week fragment the clock gate now
+                    # rejects. Do NOT orphan the preserved bytes under .rejected.mp4:
+                    # restore them to the cache path so nothing is destroyed, then
+                    # fail closed. (Reingesting a known-contaminated clip on purpose
+                    # needs VA_NVR_CLOCK_GATE=off — see CLAUDE.md.)
+                    os.replace(aside, out)
+                    raise
         meta = probe(str(out))
         if meta.title is None:
             meta.title = (f"nvr ch{chan} "
@@ -373,10 +416,15 @@ class NvrRecordedSource:
                 "nvr ch%d: VA_NVR_MAIN_STREAM unset — stream-identity check "
                 "inactive (head-identity%s still run)", chan,
                 " + clock" if self._timestamp_reader is not None else "")
+        # A coarse tolerance ONLY when a clock reader is active (its readings are
+        # coarse OCR, and legitimate drift reaches ~56 s — see CLOCK_OCR_TOL_S);
+        # without a reader `clock` is empty and the tolerance is moot.
+        clock_tol = (CLOCK_OCR_TOL_S if self._timestamp_reader is not None
+                     else CLOCK_TOL_S)
         return ExpectedProfile(
             stream_profiles=stream_profiles,
             identity_max_distance=IDENTITY_MAX_DHASH,
-            clock_tol_s=CLOCK_TOL_S, min_kept_s=MIN_KEPT_S,
+            clock_tol_s=clock_tol, min_kept_s=MIN_KEPT_S,
         )
 
     def _observe(self, cut: Path, requested: RequestedWindow) -> ObservedSignals:

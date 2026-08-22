@@ -107,9 +107,47 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   (2) delivered resolution/fps vs the channel's main
                                                             #   stream (env VA_NVR_MAIN_STREAM, e.g. "2688x1520@20";
                                                             #   unset = check inactive) — a sub-stream is REJECTED;
-                                                            #   (3) the burned-in clock when a reader is injected
-                                                            #   (default none → OCR clock gate inactive; OCR-free
-                                                            #   guards still run). Head check is SELF-referential so it
+                                                            #   (3) the burned-in clock, read by the DEFAULT OCR reader
+                                                            #   (src/va/sources/ocr_clock.py — REUSES the Role-10 RapidOCR
+                                                            #   adapter; auto-on when the [ocr] extra is importable, off
+                                                            #   via VA_NVR_CLOCK_GATE=off, degrades to inactive when [ocr]
+                                                            #   is absent — OCR-free guards still run). It reads the Lorex
+                                                            #   MM-DD-YYYY hh:mm:ss AM/PM overlay off the TRUE head frames
+                                                            #   and hands the verifier a skew gated on a COARSE tolerance
+                                                            #   (CLOCK_OCR_TOL_S = 12 h + 5 min — just over a 12 h AM/PM flip
+                                                            #   plus drift, far below the ~7-day foreign band; legit loadfile
+                                                            #   drift reaches 56 s and a CONSISTENT OCR time-field misread can
+                                                            #   reach 12 h, both GOOD footage, while wrong-week is ~7 days).
+                                                            #   FAIL OPEN is the policy: an unreadable / low-confidence /
+                                                            #   no-agreeing-cluster clock emits NO reading (gate skipped,
+                                                            #   other guards run) — no false-reject of good footage on those
+                                                            #   OCR-noise modes. (RESIDUAL: a CONSISTENT valid-digit date
+                                                            #   SUBSTITUTION across the whole head — rarer than the dropped
+                                                            #   digit the \d{2} fix removed — parses to a valid multi-day skew
+                                                            #   and CAN false-reject; the backlog fix is a head-vs-body clock
+                                                            #   cross-check.) Two robustness rules cover the common modes on
+                                                            #   REAL frames (validated on .va-24h's 9806 OCR rows):
+                                                            #   (a) month/day/hour must be zero-padded \d{2}, because real
+                                                            #   RapidOCR consistently DROPS a leading digit (08-1-2026 for
+                                                            #   08-11) the SAME way across the near-identical head — a
+                                                            #   \d{1,2} match would parse a confident ~10-day-off read and
+                                                            #   false-reject GOOD footage (off-by rows 73->19, majority-off
+                                                            #   videos 3->0 under \d{2}); a dropped digit is now a non-parse.
+                                                            #   (b) the reader keeps every read agreeing with >=2 survivors
+                                                            #   and drops only SINGLETON outliers, in time order, so a
+                                                            #   multi-frame foreign HEAD keeps its aligned tail for the
+                                                            #   verifier to trim (see COVERAGE). (c) the clock inspects a
+                                                            #   ~1.5 s span (CLOCK_HEAD_SECONDS, sampled sparsely), NOT just
+                                                            #   the first ~0.4 s: a same-camera wrong-week head can run ~1 s,
+                                                            #   so a shorter window would see it as all-foreign and REJECT a
+                                                            #   recoverable clip instead of TRIMMING at its aligned body. The
+                                                            #   12 h tolerance also makes a DST fall-back fold error (1 h) a
+                                                            #   non-event. Reproduce the .va-24h validation via
+                                                            #   scripts/validate_clock_gate_va24h.py (--proxy = Role-10 rows,
+                                                            #   OPTIMISTIC — samples PAST the sub-second head into the good
+                                                            #   body; --real = the shipped reader over the TRUE head frames,
+                                                            #   definitive, and splits body-aligned vs whole-clip-wrong-week
+                                                            #   rejects). Head check is SELF-referential so it
                                                             #   needs no persisted per-channel library; a leftover
                                                             #   <workdir>/nvr_refs/ dir is vestigial and can be deleted.
                                                             #   A duration sanity check (cut must decode, length within
@@ -118,19 +156,40 @@ bash scripts/setup-hooks.sh             # activate the trust gates (git hooks) �
                                                             #   wrong-stream delivery, FAILS the pull (fail closed).
                                                             #   COVERAGE (honest, not a cure): cross-camera heads are
                                                             #   trimmed; sub-streams are rejected ONLY when
-                                                            #   VA_NVR_MAIN_STREAM is set; but SAME-CAMERA WRONG-WEEK
-                                                            #   footage (~25 census clips + 21 same-view-different-day
-                                                            #   heads below the dHash band) is caught ONLY by the
-                                                            #   burned-in-clock gate, and NO default OCR reader ships yet
-                                                            #   (the clock gate is a tested, injectable seam). Per the
-                                                            #   census that reader is mandatory item 1 before a clean
-                                                            #   re-pull — until it lands, do NOT treat re-pulls as fully
-                                                            #   safe. Trim caveat: a sub-second foreign head is dropped,
+                                                            #   VA_NVR_MAIN_STREAM is set; SAME-CAMERA WRONG-WEEK footage
+                                                            #   (~25 census clips "right camera, wrong week", + the
+                                                            #   fully-foreign clips) is now caught by the DEFAULT OCR
+                                                            #   clock reader (census "mandatory item 1" — DONE): a
+                                                            #   wrong-week head that fits inside the ~1.5 s inspected window
+                                                            #   (with an aligned tail) is TRIMMED at that tail; a head that
+                                                            #   fills the whole window is REJECTED — the RIGHT outcome, not a
+                                                            #   regression: the .va-24h wrong-week heads are LONG (measured
+                                                            #   2-3 s+, not the ~1 s the census estimated), and on a LIVE pull
+                                                            #   a reject re-runs _pull_window's exact-window fallback (phase 2,
+                                                            #   no pre-pad seek — the pre-pad seek is what lands in stale ring
+                                                            #   content), which re-pulls the window CLEAN (census purity
+                                                            #   1.000), a better result than a trimmed clip missing its onset.
+                                                            #   A SINGLE-frame stale lead-in is below the agree floor and left
+                                                            #   to the dHash head gate (fail-open by design). Validated over
+                                                            #   .va-24h's real head frames (scripts/validate_clock_gate_va24h.py
+                                                            #   --real): 211 accept / 5 trim / 22 reject, the 22 all genuine
+                                                            #   multi-second wrong-week heads (3 whole-clip, 19 head-over-good-
+                                                            #   body), ZERO good-footage false-rejects. Trim
+                                                            #   caveat: a sub-second foreign head is dropped,
                                                             #   so t=0 then lags start_epoch by that much (within the
                                                             #   ~1 s alignment caveat below); re-deriving start_epoch is
                                                             #   backlog. Cache note: fetch() re-verifies an EXISTING
                                                             #   cache/reingest clip too, so pre-gate files can't slip
-                                                            #   through. RING-EDGE FALLBACK: at
+                                                            #   through — INCLUDING on `va reingest`, so reingesting one of
+                                                            #   the ~22 .va-24h clips whose same-camera wrong-week head now
+                                                            #   fails the clock gate will REJECT it (not re-admit it). Scope
+                                                            #   of "non-destructive": reingest runs remove_video FIRST (role
+                                                            #   rows + per-video dir gone), THEN re-verifies; the cache-reverify
+                                                            #   path restores the preserved BYTES (not orphaned as
+                                                            #   .rejected.mp4) if the expired-window re-pull fails — but the row
+                                                            #   ends `failed` with no role outputs until reingested with
+                                                            #   VA_NVR_CLOCK_GATE=off (which is how to reingest such a clip in
+                                                            #   one step). Bytes survive; derived data is re-run. RING-EDGE FALLBACK: at
                                                             #   the ~6-day ring edge the pre-pad can predate surviving
                                                             #   footage even though [start,end] lives, so a second
                                                             #   phase re-pulls the EXACT window with no pad (aligned,
@@ -484,7 +543,11 @@ ingest→query path. **The offline suite strips `VA_CONFIG_DIR` at collection** 
 so it ALWAYS runs the stub even under a leaked env — a `claude -p` child (the Role-11 reasoner
 subprocess or the post-commit reviewer) inherits the var, and a real-model config there turns the
 child's own suites glacial and flaky (pytest "storms"). Set `RUN_GOLDEN=1` to keep the real config
-for the golden harnesses below. **Golden-query fixtures** for real videos live in `tests/golden_queries/`
+for the golden harnesses below. `tests/conftest.py` also forces `VA_NVR_CLOCK_GATE=off` for the
+offline suite so the NVR burned-in-clock reader (`sources/ocr_clock.py`) never builds the real
+RapidOCR model on synthetic clips — the gate tests inject a fake reader; set **`RUN_OCR_CLOCK=1`**
+to additionally run the one opt-in test that OCRs a rendered clock with real RapidOCR.
+**Golden-query fixtures** for real videos live in `tests/golden_queries/`
 (`<video_id>.md` human + `<video_id>.yaml` machine-readable assertions); they are generated by
 a vision+adversarial-verify agent workflow (see that dir's README) and split into `match` /
 `no_match` / future-role queries. Two gated harnesses run them against a pre-ingested
