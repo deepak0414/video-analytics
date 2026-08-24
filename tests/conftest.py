@@ -34,3 +34,14 @@ def _should_strip(environ) -> bool:
 
 if _should_strip(os.environ):
     os.environ.pop("VA_CONFIG_DIR", None)
+
+
+# Offline hermeticity for the NVR burned-in-clock gate (``sources/ocr_clock.py``).
+# Its default reader auto-enables whenever the ``[ocr]`` extra is importable; on a
+# dev box that HAS rapidocr installed, a bare ``NvrRecordedSource()`` built anywhere
+# in the suite would then build the real RapidOCR model and run it on synthetic
+# clips — slow, and non-deterministic if OCR ever hallucinated a timestamp. Force
+# the gate OFF for the offline suite so it stays model-free and deterministic;
+# tests that exercise the gate inject a fake reader/OCR explicitly, and the one
+# real-OCR test is opt-in (RUN_OCR_CLOCK=1). Mirrors the VA_CONFIG_DIR strip above.
+os.environ["VA_NVR_CLOCK_GATE"] = "off"

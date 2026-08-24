@@ -869,3 +869,76 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   the catalog delete) is future work for the WS-4 verifier writer. Additive: the `ingest`
   `fetching→processing→done/failed` flow and the `done` dedup are unchanged; `quarantined`
   is only ever set out-of-band today (data repair). No signature changes.
+- **2026-08-22 (roles, default burned-in-clock reader — no contract change; new env
+  knob `VA_NVR_CLOCK_GATE`):** Shipped the census's "mandatory item 1" — a DEFAULT
+  `TimestampReader` (`src/va/sources/ocr_clock.py`) that activates the previously-inert
+  burned-in-clock gate in the NVR delivery verifier, closing the same-camera WRONG-WEEK
+  gap. It REUSES the Role-10 RapidOCR adapter (no new OCR engine) to read the Lorex
+  `MM-DD-YYYY hh:mm:ss AM/PM` overlay off the TRUE head frames, parses to a UTC epoch
+  (localized via the NVR clock tz, VA_NVR_TZ), noise-filters across frames, and hands
+  `verify_delivery` the readings it already gates over. `NvrRecordedSource()` now
+  auto-wires it (a sentinel default; explicit `timestamp_reader=None` still forces the
+  gate off, an explicit reader still injects). Enablement: auto-on when the `[ocr]` extra
+  is importable, off via `VA_NVR_CLOCK_GATE=off`, degrades to inactive (as before) when
+  `[ocr]` is absent — the OCR-free head/stream guards are unchanged either way.
+  **Robustness = FAIL OPEN** (the CLAUDE.md "never false-reject good footage on OCR
+  noise" rule), hardened against REAL RapidOCR output: (a) month/day/hour must be
+  zero-padded `\d{2}` — real RapidOCR consistently DROPS a leading digit (`08-1-2026`)
+  the same way across the near-identical head, so a `\d{1,2}` match parsed a confident
+  ~10-day-off read and false-rejected GOOD footage; a dropped digit is now a non-parse.
+  (b) the reader keeps every read agreeing with >= 2 survivors and drops only SINGLETON
+  outliers, in TIME ORDER, so a multi-frame foreign head keeps its aligned tail for the
+  verifier to trim. An unreadable / low-confidence / no-agreeing-cluster clock emits NO
+  reading, so the gate is skipped; only a CONFIDENT, LARGE, CONSISTENT wrong-week
+  consensus rejects (or, with an aligned tail, trims). RESIDUAL: fail-open covers the
+  no-reading modes (low confidence, unreadable, dropped digit, disagreeing frames); a
+  CONSISTENT valid-digit date SUBSTITUTION across the whole head (rarer than the dropped
+  digit) parses to a valid multi-day skew and CAN false-reject good footage — the backlog
+  fix is a head-vs-body clock cross-check (documented in `ocr_clock.py`).
+  The reader-path clock tolerance is COARSE — `nvr.CLOCK_OCR_TOL_S = 12 h + 5 min` — set
+  just above the largest benign error (a 12 h AM/PM flip PLUS same-direction loadfile
+  drift, which a plain 12 h band would reject) and far below the ~7-day foreign band, so a
+  within-12 h OCR misread (and a 1 h DST fall-back fold error) is forgiven while wrong-day/
+  wrong-week is caught. Applied in
+  `_expected_profile` ONLY when a reader is active; the pure verifier's default stays
+  `CLOCK_TOL_S = 5 s`. The clock inspects a ~1.5 s span (`ocr_clock.CLOCK_HEAD_SECONDS`,
+  sampled sparsely via `media.head_clock_frames`), NOT just the first ~0.4 s, so a
+  same-camera wrong-week head that runs ~1 s still shows its aligned tail and TRIMS rather
+  than rejecting a good body. No change to
+  `ingest()`/`resolve()`/`fetch()` signatures or the web contract — a wrong-week pull
+  surfaces as an ingest failure like any other rejected delivery. `tests/conftest.py`
+  forces `VA_NVR_CLOCK_GATE=off` for the offline suite so it stays model-free/hermetic on
+  a box that has rapidocr installed (mirrors the VA_CONFIG_DIR strip); tests drive the
+  reader with a fake OCR, and one real-RapidOCR check is opt-in (`RUN_OCR_CLOCK=1`).
+  Coverage is honest: a wrong-week head that fits inside the ~1.5 s inspected window
+  (with an aligned tail) is TRIMMED at that tail; a head that fills the whole window
+  (no aligned tail inspected) is REJECTED — which is the RIGHT outcome, not a regression:
+  on a LIVE pull a reject re-runs `_pull_window`'s exact-window fallback (phase 2, no
+  pre-pad seek — the pre-pad seek is what lands in stale ring content), which re-pulls
+  the window CLEAN (census purity 1.000), a better result than a trimmed clip missing
+  its onset. A SINGLE-frame stale lead-in is below the agree floor and left to the dHash
+  head gate. VALIDATED against `.va-24h`'s real footage, reproducibly via
+  `scripts/validate_clock_gate_va24h.py`. Parse robustness (sampling-independent) over
+  the 9806 `ocr_results` rows: the `\d{2}` fix cut off-by->600s rows 73->19 and
+  majority-off videos 3->0. End-to-end, the DEFINITIVE `--real` run (shipped
+  `OcrClockReader` over each clip's TRUE head frames): **211 accept / 5 trim / 22 reject**
+  over 238 clips. The reader OCRs a body frame per reject and splits them: 3 are
+  whole-clip wrong-week (no aligned body), 19 are LONG wrong-week heads (measured 2-3 s+,
+  e.g. clean 08-03 through ~1.95 s then 08-10 body) over a good body — a live pull
+  recovers these via the exact-window fallback; ZERO are a good clip false-rejected on
+  OCR noise. (The cheap `--proxy` default reads 233/1 but is OPTIMISTIC — Role-10 1-fps
+  rows sample PAST the sub-second point into the body, so they UNDER-count the head; the
+  real reader over the true head frames is authoritative.) NB the 22 real rejects mean
+  ~22 `.va-24h` clips marked `done` still carry a multi-second wrong-week HEAD the earlier
+  repair (drop t<1s rows) did not remove — a data-integrity note on that workdir; they are
+  correctly-contaminated data, off-ring so not re-pullable. This reader gates FUTURE pulls
+  AND, because `fetch()` re-verifies an existing cache clip, a `va reingest` of one of
+  those clips now REJECTS it (not re-admits). What survives is precise: `va reingest`
+  runs `remove_video(keep_media=True)` FIRST (dropping all role rows, the catalog row,
+  and the per-video dir — `vectors.npz`/`appearance.npz`/keyframes), THEN re-verifies;
+  on that cache-reverify path the preserved media BYTES are restored to the cache path
+  (not orphaned as `.rejected.mp4`) if the expired-window re-pull fails, so nothing is
+  lost that isn't re-derivable — but the row ends `failed` with no role outputs until
+  reingested with `VA_NVR_CLOCK_GATE=off`. So "non-destructive" means the bytes, not the
+  derived data; to reingest such a clip in one step, set the gate off. (`.va-24h` itself
+  is off the ring — no clean re-pull exists.)

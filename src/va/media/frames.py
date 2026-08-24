@@ -92,6 +92,43 @@ def first_frames(path: str | Path, count: int = 8) -> list[Tuple[float, Image.Im
     return out
 
 
+def head_clock_frames(
+    path: str | Path, span_s: float = 1.5, max_samples: int = 8
+) -> list[Tuple[float, Image.Image]]:
+    """The TRUE head frames spanning ~`span_s` seconds, subsampled to at most
+    `max_samples` (t, image) pairs — for the burned-in-clock gate.
+
+    Unlike `first_frames` (the first N consecutive frames, ~0.4 s at 20 fps), the
+    clock gate must see PAST a same-camera wrong-week head — which can run ~1 s,
+    longer than one ring's cross-camera lead-in — into the aligned body, or it can
+    only REJECT a recoverable clip instead of TRIMMING it at the aligned tail. So
+    this decodes sequentially from frame 0 (never `-vf fps=N`, whose first output
+    frame is not frame 0 — the sampler blindness `first_frames` documents) up to
+    `span_s`, then evenly subsamples to `max_samples` frames (always including
+    frame 0) to bound OCR cost."""
+    reader = imageio.get_reader(str(path))
+    meta = reader.get_meta_data()
+    src_fps = meta.get("fps") or 30.0
+    limit = max(1, int(round(span_s * src_fps)))
+    decoded: list[Tuple[float, Image.Image]] = []
+    try:
+        for idx, frame in enumerate(reader):
+            if idx >= limit:
+                break
+            decoded.append((idx / src_fps, Image.fromarray(frame)))
+    finally:
+        reader.close()
+    if max_samples <= 1:
+        return decoded[:1]
+    if len(decoded) <= max_samples:
+        return decoded
+    # even subsample across [0, span], keeping the endpoints (frame 0 is essential —
+    # it is where a stale head starts).
+    step = (len(decoded) - 1) / (max_samples - 1)
+    picked = {int(round(i * step)) for i in range(max_samples)}
+    return [decoded[i] for i in sorted(picked)]
+
+
 def sample_frames(path: str | Path, fps: float = 1.0) -> Iterator[Tuple[float, Image.Image]]:
     """Yield frames at ~`fps`. Always yields at least the first frame."""
     reader = imageio.get_reader(str(path))
