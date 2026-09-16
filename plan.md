@@ -56,7 +56,7 @@ reasoning_llm:    { backend: cloud,  provider: anthropic, model: claude-sonnet }
 Each role ships a **harness**: a CLI driver + a test suite. A role is "done" when its harness passes against a fixture **without any other role present**. Integration is a separate, later step. This makes failures trivial to localize — a bad result is either in one role's harness or in the wiring, never ambiguous.
 
 ### P4 — Reuse-first
-Prefer, in order: (1) NVIDIA NIM containers, (2) the NVIDIA VSS blueprint's components (decode, sampling, Milvus wiring), (3) off-the-shelf HF/open-source models and libraries. We write *glue and contracts*, not models. Each step names the artifact to reuse.
+Prefer, in order: (1) prebuilt inference containers (e.g. NIM), (2) off-the-shelf HF/open-source models and libraries. We write *glue and contracts*, not models. Each step names the artifact to reuse.
 
 ### P5 — Storage abstraction (simple local now, production DB later)
 Vector / full-text / structured stores sit behind interfaces too. Start with the simplest local backend that satisfies the contract (FAISS-flat, SQLite-FTS, SQLite) and swap to production engines (Milvus/Qdrant, Elasticsearch/Typesense, Postgres) behind the same interface — no caller changes.
@@ -149,7 +149,7 @@ The milestone tables in §5 list each role at the **role level** for readability
 | **S0.5** | Serving wrapper | `serving/server.py` (FastAPI) + generic `http_client`; `va serve <role>`. | Generic mechanism documented. | S0.4 |
 | **S0.6** | Prove the machinery | An **`echo` role** (returns input) with `inproc` + `http` backends. | **Parity test passes: `echo` via inproc == via http.** This validates P2/P3 end-to-end with zero ML. | S0.4, S0.5 |
 | **S0.7** | Frame & audio I/O utils | `media/` helpers: ffmpeg frame sampling at N fps, keyframe extraction, audio track extraction. | Extract exactly K frames @1fps from a 10s clip; extract wav. | S0.1 |
-| **S0.8** | Reuse audit | Short `docs/reuse-map.md`: stand up NVIDIA VSS locally, note which components (decode, Milvus wiring, NIM endpoints) we borrow vs. build. | VSS runs on one fixture; reuse decisions recorded. | S0.2 |
+| **S0.8** | Reuse audit | Short `docs/reuse-map.md`: survey which components (decode, Milvus wiring, inference endpoints) we borrow from existing open-source projects vs. build. | Reuse decisions recorded. | S0.2 |
 | **S0.9** | Model runtime — loader | `runtime/{weights,device,loader}.py` + `ModelSpec` schema; resolves weight source + device/dtype/quant from active profile and returns a loaded handle. | Load a **tiny stub model** + one real small model (e.g. SigLIP) onto the configured device with the configured dtype; assert placement & dtype. *(contract+sanity)* | S0.4 |
 | **S0.10** | Model runtime — manager | `runtime/manager.py`: singleton cache + warmup (minimal now); `load()/unload()` interface with VRAM-budget eviction **stubbed for Spark, implemented later for 24GB profile**. | `get(spec)` twice returns the *same* instance; `unload(spec)` frees it (assert VRAM/RSS delta). *(sanity)* | S0.9 |
 
@@ -277,9 +277,8 @@ The milestone tables in §5 list each role at the **role level** for readability
 
 ### MR — Retrieval Layer (semantic text search + cross-modal fusion + reranking)
 *Goal: the "retrieval brain" between extraction and reasoning — turn a pile of per-role
-extractions into **one short, relevance-ranked evidence list**. This is the vendor-neutral
-equivalent of NVIDIA VSS's **CA-RAG**; see `video-analytics-nvidia-comparison.md` §7/§7a (it's the
-single highest value-to-effort borrow) and the "Retrieval Layer" section of the architecture doc.*
+extractions into **one short, relevance-ranked evidence list**. See the "Retrieval Layer" section of the
+architecture doc.*
 
 **Why this milestone exists (the value, for a first-time reader):** today caption/transcript/OCR/
 action search is literal **word-overlap** (so "the budget" misses "fiscal spending"), each
@@ -295,7 +294,7 @@ also **double as the proof of the remote-adapter bet** (point either at a NIM, n
 | **SR.1** ✅ | Text embedder role | `roles/text_embedder.py` + adapters: `hash` stub (offline) / real **transformers-direct** (BGE-M3, *not* sentence-transformers — its multimodal build hard-imports torchcodec which dies on this box) / `http` NIM (NV-embedqa) future. A *text-text* space, separate from Role-2 SigLIP. | **DONE 2026-06-15:** deterministic stub + real bge-m3; suite green. Validated: BGE scores paraphrases 0.70-0.73 vs unrelated 0.42 where word-overlap = 0.00. | S0.3, S0.7 |
 | **SR.2** ✅ | Index text at ingest | `pipeline/text_index.py` embeds all four text modalities (caption/transcript/OCR/action) → per-video `text_vectors` shard (reuses `VectorStore`, parameterized `ShardedVectorStore`) keyed `(video_id, modality, time, source_role)`; `pipeline/text_search.py` + `va textsearch`; ingest hook + `IngestResult.text_vectors`; `backfill_text_index()`. | **DONE 2026-06-15:** ingest builds the index (best-effort), `search_text` retrieves + modality filter, removal cleans the shard; 3 e2e tests + suite green (114). | SR.1, M3–M6 |
 | **SR.3** ✅ | Reranker role | `roles/reranker.py` (`rerank(query, candidates) → aligned scores`) + adapters: **word-overlap** stub (offline) / real **cross-encoder** transformers-direct (BAAI/bge-reranker-v2-m3, matches bge-m3) / `http` NIM future. | **DONE 2026-06-15:** deterministic stub orders correctly; registry/config/extra wired; 3 tests + suite green (117). | S0.3 |
-| **SR.4** ✅ | Retriever orchestrator | `pipeline/retrieval.py` (the CA-RAG-equivalent): **gather** (visual vec + semantic text via SR.2 index, lexical fallback + structured) → **rerank** language items (one common cross-encoder scale) → **fuse** `RERANK_WEIGHT·norm_rerank + (1−w)·lane-normalized native cosine` → ranked `Evidence`. `ask()` routes through it (supersedes `assemble()`). Raw rerank/cosine kept in `attributes` for SR.5; visual frames carry no language so rank on cosine alone. | **DONE 2026-06-15:** 4 tests + suite green (121). Real-model (bge-m3 + bge-reranker-v2-m3) on SNL/Ferrari: "harmony among nations" → "So, world peace." ranks #1 across ALL modalities; "elegant formal gowns" → fusion FIXED the SR.3 reranker misfire (captions the bi-encoder favored now outrank "Very pretty.", which the cross-encoder alone had put #1). | SR.2, SR.3, S7.3 |
+| **SR.4** ✅ | Retriever orchestrator | `pipeline/retrieval.py`: **gather** (visual vec + semantic text via SR.2 index, lexical fallback + structured) → **rerank** language items (one common cross-encoder scale) → **fuse** `RERANK_WEIGHT·norm_rerank + (1−w)·lane-normalized native cosine` → ranked `Evidence`. `ask()` routes through it (supersedes `assemble()`). Raw rerank/cosine kept in `attributes` for SR.5; visual frames carry no language so rank on cosine alone. | **DONE 2026-06-15:** 4 tests + suite green (121). Real-model (bge-m3 + bge-reranker-v2-m3) on SNL/Ferrari: "harmony among nations" → "So, world peace." ranks #1 across ALL modalities; "elegant formal gowns" → fusion FIXED the SR.3 reranker misfire (captions the bi-encoder favored now outrank "Very pretty.", which the cross-encoder alone had put #1). | SR.2, SR.3, S7.3 |
 | **SR.5** ✅ | Relevance threshold | `RelevanceGate` (in `retrieval.py`): two absolute floors on the RAW signals — `min_rerank` (cross-encoder logit, language items) + `min_cosine` (native cosine, visual frames), gating per-signal because neither alone suffices. Permissive by default; calibrated floors in run-*/config (`-3.0`/`0.10`), FLAGGED as harness-calibration targets. Notes record drops; never silently empties. | **DONE 2026-06-15:** 3 tests + suite green (124). Real-model: no-match ("scuba diver", "ski slope") → 0 kept ("no match"); matches still return the right hits. Calibrated `min_cosine` 0.05→0.10 after observing irrelevant SigLIP frames cluster at 0.05-0.06. | SR.4 |
 | **SR.6** ✅ | VLM verifier | `roles/vlm_verifier.py` (3-way `Verdict`: `accept` keeps-unless-confident-NO for reranking; `present` counts-only-confident-YES for detection) + adapters: `passthrough` no-op stub (offline) / real **Qwen2.5-VL** (reuses the Role-4 bundle, no extra VRAM). `pipeline/verify.py`: `verify_visual_hits` (drop SigLIP attribute/composition false-positives) + `verify_object_presence` (recover novel objects YOLO misses). **SELECTIVE** — applied only to queries hitting SigLIP/YOLO weaknesses. **Productionized into the live path:** `QueryPlan.needs_visual_verification` (the Role-11 planner auto-sets it — claude flags "blue Ferrari"/"feeding a snake" True, counting False), applied in `retrieve()`; plus `va query --verify`. `verify_scene_presence` adds recall-recovery (find a true scene SigLIP under-scored). | **DONE 2026-06-16:** 8 offline tests (132 suite) + golden **83 pass / 1 xfail / 0 fail + 2 ask**. Graduated 4 xfails: "blue Ferrari"→NO (attribute), "feeding a mouse to the snake"→NO (composition), "snake"→VLM presence 1/8 (YOLO found 0), wedding→scene-presence 2/8 (SigLIP 0.022). Caught+fixed a blanket-verification regression by going selective. **A fixture audit then found two more defects:** `cobra-pos-07` "kitchen" was a HALLUCINATED match (no kitchen in the video; human-confirmed) → `no_match` (`cobra-neg-07`); `ferrari-pos-06` "grandstands" was passing on a FALSE POSITIVE (the real LVMS grandstands ~122s are distant background — SigLIP maxes 0.065<0.10, VLM misses them) → narrowed time_range to the true location + `xfail` (the 1 remaining, a genuine distant-background-object gap). Region-aware retrieval (SR.7) investigated but NOT built (it would amplify false positives). | SR.4, M4 |
 
@@ -368,13 +367,13 @@ round-robin baseline; a true no-match returns nothing. Runnable local OR against
 
 | Role / Concern | Reuse | Build |
 |---|---|---|
-| Decode, frame sampling | FFmpeg, VSS decode path | Sampling policy, keyframe selection |
-| Vector DB wiring | VSS Milvus setup | Our `storage/vector` interface |
+| Decode, frame sampling | FFmpeg | Sampling policy, keyframe selection |
+| Vector DB wiring | Milvus | Our `storage/vector` interface |
 | Role 2 Embedding | SigLIP / NV-CLIP (NIM) | Adapter + parity tests |
 | Role 4 / 11 VLM | Qwen2.5-VL, NVILA (NIM), Claude/Gemini SDKs | Adapter + serving wrapper |
 | Roles 1,5,6,7,8,9,10 | TransNetV2, YOLO-World, SAM 2, InternVideo2, Whisper, pyannote, PaddleOCR | Adapters + harnesses |
 | Serving | FastAPI; NIM where available | Generic `va serve` wrapper |
-| Orchestration | LangChain patterns (reference from VSS) | Our tier router/planner |
+| Orchestration | LangChain patterns | Our tier router/planner |
 
 ---
 

@@ -276,45 +276,7 @@ LOCAL (Roles 1-10):                    CLOUD-OPTIONAL (Role 11):
 
 ## Existing Solutions & Reference Architectures
 
-### NVIDIA AI Blueprint: Video Search and Summarization (VSS)
-
-The closest existing reference implementation — same problem statement as us (NL search,
-summarization, Q&A over video). **A full role-by-role comparison now lives in its own doc:
-[video-analytics-nvidia-comparison.md](video-analytics-nvidia-comparison.md) — read that for the
-current analysis.** The summary below is kept short and pointed there.
-
-**⚠ This table was rewritten 2026-06-15.** The earlier version claimed VSS had *no* object
-detection, *no* audio, *no* OCR, and only fixed-interval chunking, concluding "VSS covers ~40%
-of our architecture." That was roughly true of the **2024 VSS release but is now wrong.** As of
-**VSS 3.1** (March 2026) the feature-coverage gap has largely closed — VSS added ASR (Parakeet),
-a CV detection/tracking layer (RT-DETR + Grounding DINO + nvtracker, plus 3D multi-camera
-Sparse4D), GraphRAG (Neo4j), live-stream alerts, and an MCP-based agent layer. **Our real
-differentiation is now architectural and licensing posture, not feature count.**
-
-| Component | VSS 3.1 (default NIM) | Ours | Note |
-|---|---|---|---|
-| Scene detection | Duration chunks + sliding-window overlap | Content-aware (PySceneDetect) | We're sharper at shot boundaries |
-| Visual embedding | NV-CLIP | SigLIP SO400M | Equivalent (both image-text) |
-| Text embedding (caption/transcript RAG) | llama-3.2-nv-embedqa-1b-v2 | **none — word-overlap SQL** | **VSS ahead; our biggest model gap** |
-| Reranker | llama-3.2-nv-rerankqa-1b-v2 | none | VSS ahead |
-| VLM captioning | Cosmos-Reason2-8B | Qwen2.5-VL-7B | Comparable |
-| Object detection | RT-DETR + (Mask-)Grounding-DINO | YOLO-World | VSS ahead (real-time, TensorRT, open-vocab) |
-| Object tracking | Gst-nvtracker (NvDCF/DeepSORT), multi-cam | ByteTrack / iou stub | VSS far ahead (re-ID, multi-camera) |
-| Action recognition | (folded into the VLM) | X-CLIP zero-shot per segment | We keep a discrete, thresholdable signal |
-| ASR | Parakeet-CTC-XL-0.6B (Riva NIM) | Whisper | Comparable; Riva lower-latency, Whisper multilingual |
-| Diarization | optional (NeMo) | pyannote.audio 4.x | We have it wired |
-| OCR | (VLM reads text) | RapidOCR (word-searchable index) | We keep a dedicated index |
-| Reasoning LLM | Nemotron-Nano-9B-v2 / Llama-3.1-70B (CA-RAG) | Claude / Qwen2.5-VL | We allow a cloud-frontier option |
-| Retrieval | Vector RAG (Milvus) + GraphRAG (Neo4j) + reranker | Vector (SigLIP) + time-fusion; no graph/reranker | VSS ahead |
-| Counting | detection/tracking + GraphRAG aggregation | **deep-scan: describe→normalize→code-count, ground-truth-validated** | Our novel piece, no VSS analog |
-| Deployment | NIM microservices, Docker/K8s, streaming + alerts | in-process Python, batch | VSS productized; ours a PoC |
-
-**Verdict:** VSS is a far more capable *product*; ours is a more *portable architecture*
-(vendor-neutral role/adapter/registry spine, cloud-frontier reasoning option, validated
-deep-scan counting, offline-testable core). See the comparison doc for the full benefits/gaps
-analysis and what to borrow.
-
-### Other Platforms
+### Comparable Platforms
 
 | Platform | Strength | Limitation |
 |---|---|---|
@@ -423,8 +385,8 @@ Video File ---+-- [Role 1: Scene Boundary Detector] --> Segment Boundaries
 > query finds the right moments across all of them*. It turns a pile of per-role extractions
 > (captions, transcript lines, OCR strings, action labels, detections, frame embeddings) into
 > **one short, relevance-ranked list of evidence** handed to the reasoner. It is the "retrieval
-> brain" that sits between extraction and reasoning. (NVIDIA's VSS calls its equivalent
-> **CA-RAG**; ours is vendor-neutral and runs the same locally or against a remote NIM.)
+> brain" that sits between extraction and reasoning. (It is vendor-neutral and runs the same
+> locally or against a remote inference endpoint.)
 
 **Why a first-time reader should care — five concrete wins:**
 
@@ -454,7 +416,7 @@ Video File ---+-- [Role 1: Scene Boundary Detector] --> Segment Boundaries
   vendor-neutral) · remote NIM (NV-embedqa). *Stub default keeps the suite offline.*
 - **Reranker** *(new, model-backed)* — `rerank(query, candidates) → relevance-scored candidates`,
   a cross-encoder. Backends: stub · local (BGE-reranker) · remote NIM (NV-rerankqa).
-- **Retriever** *(orchestrator, code not model)* — the CA-RAG-equivalent flow:
+- **Retriever** *(orchestrator, code not model)* — the flow:
   **gather** candidates from every enabled modality (visual vector search + semantic text search +
   structured object/track queries) → **normalize** their heterogeneous scores into one comparable
   space → **rerank** → **threshold** → emit a ranked `Evidence` bundle (reusing the existing
@@ -994,6 +956,5 @@ Cloud only for reasoning (Role 11)          -> Best quality where it matters
 ## References
 
 - **Model Selection:** See [video-analytics-model-analysis.md](video-analytics-model-analysis.md)
-- **NVIDIA VSS Blueprint:** `github.com/NVIDIA-AI-Blueprints/video-search-and-summarization`
 - **Milvus Vector DB:** `milvus.io`
 - **Qdrant Vector DB:** `qdrant.tech`
