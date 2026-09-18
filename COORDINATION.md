@@ -942,3 +942,10 @@ above are **breaking** — flag with ⚠ and don't assume the web layer adapted.
   reingested with `VA_NVR_CLOCK_GATE=off`. So "non-destructive" means the bytes, not the
   derived data; to reingest such a clip in one step, set the gate off. (`.va-24h` itself
   is off the ring — no clean re-pull exists.)
+- **2026-09-16 (roles):** Removed `video-analytics-nvidia-comparison.md` (the comparison
+  against the NVIDIA video-search/summarization stack) and every reference to that stack
+  (VSS / CA-RAG / blueprint) from `plan.md`, `video-analytics-solution-architecture.md`,
+  `performance-and-productization-plan.md` and the `pipeline/retrieval.py` docstring. No
+  interface change; if you link the comparison doc, drop the link. DGX Spark / hardware
+  references and the model-candidate tables in `video-analytics-model-analysis.md` are
+  untouched (out of scope by the user's call).

@@ -1,7 +1,7 @@
 # Performance & Productization Plan
 
-Status: **proposed 2026-06-17.** Companion to `plan.md` (role roadmap), `qa-and-traceability-plan.md`
-(stabilization), and `video-analytics-nvidia-comparison.md` (the VSS gap analysis this operationalizes).
+Status: **proposed 2026-06-17.** Companion to `plan.md` (role roadmap) and `qa-and-traceability-plan.md`
+(stabilization).
 This document is about **turning the PoC into an appliance**: the performance work needed to serve a
 multi-tenant home device, and the explicit decision of **which components stay Python vs. move to a
 compiled language (Go/Rust)**.
@@ -108,7 +108,7 @@ startup, batch the per-hit lookups. (Postgres later, behind the same store inter
 worker, job records lost on restart. 10 users + cameras cannot funnel through one serial thread.
 → Persistent queue + GPU-aware batched scheduler (§4-B, PP.4).
 
-**B7 — Eager, unbatched, unquantized inference** (flagged in `nvidia-comparison.md`): single-image
+**B7 — Eager, unbatched, unquantized inference**: single-image
 PyTorch calls, FP16, no TensorRT. On Blackwell, low-precision + dynamic batching is the entire hardware
 value, and batching is what lets **one GPU serve 10 users at once** instead of serializing.
 
@@ -245,5 +245,5 @@ Python data-plane and serving layer they depend on exist.
 
 - Rewriting model inference, the registry/adapter spine, or the reasoner in a compiled language.
 - A distributed/multi-node vector cluster (Milvus) — this is a single box.
-- Real-time (sub-second) streaming analytics — near-real-time with motion-gating is the target, not VSS's
-  live-stream latency.
+- Real-time (sub-second) streaming analytics — near-real-time with motion-gating is the target, not
+  sub-second live-stream latency.

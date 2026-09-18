@@ -1,6 +1,6 @@
 """Retrieval Layer (SR.4) — the retriever orchestrator.
 
-This is the vendor-neutral equivalent of NVIDIA VSS's CA-RAG retrieval stage: it
+This is a vendor-neutral context-aware retrieval stage: it
 turns a QueryPlan into ONE ranked `Evidence` bundle by fusing every modality,
 rather than concatenating per-tier searches in plan order (what the older
 `assemble()` did). Four stages:
